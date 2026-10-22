@@ -1,0 +1,33 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-remediator-build-job-credentials
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [batch]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [jobs]
+        scope: Namespaced
+  matchConditions:
+    - name: remediator-build-job
+      expression: request.namespace == 'security' && request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
+  variables:
+    - name: container
+      expression: object.spec.template.spec.containers[0]
+  validations:
+    - expression: >-
+        !has(variables.container.env) && has(variables.container.envFrom) &&
+        variables.container.envFrom.size() == 1 && variables.container.envFrom.all(e,
+          has(e.secretRef) && e.secretRef.name == 'gitea-repo-read')
+      message: the build Job reads only the gitea-repo-read Secret
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-remediator-build-job-credentials
+spec:
+  policyName: nanoclaw-remediator-build-job-credentials
+  validationActions: [Deny, Audit]
