@@ -3,7 +3,16 @@ import { ALLOW, DENY, HOLD, defineGuardedAction, type GuardInput } from '../../g
 import { log } from '../../log.js';
 import { notifyAgent, registerApprovalHandler, requestApproval } from '../approvals/index.js';
 import { pickApprovalDelivery } from '../approvals/primitive.js';
-import { checkImageUpdate, isAutoApproved, validateRemediationPlan } from './policy.js';
+import fs from 'node:fs';
+
+import {
+  canonicalPlan,
+  checkImageUpdate,
+  isAutoApproved,
+  standingGrant,
+  validateRemediationPlan,
+  type StandingGrant,
+} from './policy.js';
 import type { HelmReleaseExecutor } from './helm-release.js';
 import { tagMatchesDigest, type RegistryFetch } from './registry.js';
 import {
@@ -27,6 +36,22 @@ interface Prepared {
   diff: string[];
   /** Only the repo or Helm record changes; the cluster stays as it is. */
   unchanged?: boolean;
+  /** Why an approval-class plan needs no card: a standing grant or an earlier yes to the same change. */
+  approvedBefore?: string;
+}
+
+const DAY = 24 * 60 * 60_000;
+
+/** The change itself, without the per-submission identity, expiry and binding. */
+function changeKey({ plan }: ValidatedPlan): string {
+  return canonicalPlan({
+    ...plan,
+    id: '',
+    incidentIds: [],
+    reason: '',
+    expiresAt: '',
+    target: { ...plan.target, uid: '', resourceVersion: '' },
+  });
 }
 const preparedFor = new WeakMap<Record<string, unknown>, Prepared>();
 
@@ -165,13 +190,31 @@ export function registerKubernetesRemediationApproval(options: {
   breakGlassHelm?: HelmReleaseExecutor;
   registry?: RegistryFetch;
   t1: ReadonlySet<string>;
+  grants?: () => StandingGrant[];
+  /** Approved changes by changeKey, so a resubmission after the card expired applies for a day. */
+  yesFile?: string;
 }): void {
   t1 = options.t1;
+  const yeses = (): Record<string, number> => {
+    if (!options.yesFile || !fs.existsSync(options.yesFile)) return {};
+    const all = JSON.parse(fs.readFileSync(options.yesFile, 'utf8')) as Record<string, number>;
+    return Object.fromEntries(Object.entries(all).filter(([, at]) => Date.now() - at < DAY));
+  };
+  const approvedBefore = (validated: ValidatedPlan): string | undefined => {
+    const grant = standingGrant(validated, options.grants?.() ?? []);
+    if (grant) return `applied under your standing yes from ${grant.grantedAt.slice(0, 10)}`;
+    return yeses()[changeKey(validated)] ? 'applied under your earlier yes to this change' : undefined;
+  };
   const verify = async (images: Array<string | undefined>) => {
     for (const image of images) {
       if (image && options.registry && (await tagMatchesDigest(image, options.registry)) === false)
         throw new Error(`the registry serves a different digest for the tag of ${image}`);
     }
+  };
+  const withApproval = (prepared: Prepared): Prepared => {
+    if (prepared.auto) return prepared;
+    const because = approvedBefore(prepared.validated);
+    return because ? { ...prepared, auto: true, approvedBefore: because } : prepared;
   };
   const prepare = async (content: Record<string, unknown>): Promise<Prepared> => {
     let validated = validateRemediationPlan(planInput(content));
@@ -183,12 +226,12 @@ export function registerKubernetesRemediationApproval(options: {
         await verify(operation.set.filter((e) => /(?:^|\.)image$/.test(e.path)).map((e) => String(e.after)));
         const bound = await repo.bindManifest(validated.plan as ManifestEditPlan);
         validated = validateRemediationPlan(bound.plan);
-        return {
+        return withApproval({
           validated,
           auto: bound.unchanged || isAutoApproved(validated, t1),
           diff: [],
           unchanged: bound.unchanged,
-        };
+        });
       }
       const binding = await repo.bind(validated.plan as HelmValuesPlan);
       // What the chart composes from the edited values, which is what the cluster will run.
@@ -196,15 +239,15 @@ export function registerKubernetesRemediationApproval(options: {
         checkImageUpdate(before ?? after ?? '', after ?? '');
       await verify(Object.values(binding.images).map((image) => image.after));
       validated = validateRemediationPlan(binding.plan);
-      return {
+      return withApproval({
         validated,
         auto: binding.unchanged || isAutoApproved(validated, t1, binding),
         diff: binding.diff,
         unchanged: binding.unchanged,
-      };
+      });
     }
     await verify(operation.type === 'patch-image' ? [operation.after] : []);
-    return { validated, auto: isAutoApproved(validated, t1), diff: [] };
+    return withApproval({ validated, auto: isAutoApproved(validated, t1), diff: [] });
   };
   const precheck = async (content: Record<string, unknown>, session: Session) => {
     if (!(await options.team(session.agent_group_id))) return false;
@@ -238,8 +281,13 @@ export function registerKubernetesRemediationApproval(options: {
           planId: validated.plan.id,
           planDigest: validated.digest,
         });
-        message =
-          prepared.unchanged && result.applied ? `record updated, nothing changed; ${result.message}` : result.message;
+        message = [
+          prepared.unchanged && result.applied ? 'record updated, nothing changed' : '',
+          prepared.approvedBefore ?? '',
+          result.message,
+        ]
+          .filter(Boolean)
+          .join('; ');
       } catch (error) {
         if (!auto) throw error;
         message = `Auto-approved plan ${validated.plan.id} failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -271,6 +319,10 @@ export function registerKubernetesRemediationApproval(options: {
   registerApprovalHandler(REMEDIATION_ACTION, async (ctx) => {
     const validated = validateRemediationPlan(ctx.payload.plan);
     if (ctx.payload.digest !== validated.digest) throw new Error('stored approval payload digest mismatch');
+    if (options.yesFile) {
+      fs.writeFileSync(`${options.yesFile}.tmp`, JSON.stringify({ ...yeses(), [changeKey(validated)]: Date.now() }));
+      fs.renameSync(`${options.yesFile}.tmp`, options.yesFile);
+    }
     const handler = reenterGuardedDeliveryAction(REMEDIATION_ACTION);
     await handler({
       session: ctx.session,

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
-import { isAutoApproved, validateRemediationPlan } from './policy.js';
+import { isAutoApproved, standingGrant, validateRemediationPlan } from './policy.js';
 
 const now = Date.parse('2026-10-21T12:00:00.000Z');
 
@@ -194,6 +194,20 @@ describe('Kubernetes remediation policy', () => {
     expect(() => validateRemediationPlan(helmValues('gitea', 'ansible/inventory-values.yaml'), now)).toThrow(
       'kubernetes/helm-charts/*.yaml',
     );
+  });
+
+  it('a standing yes for all except wireguard-home never covers wireguard-home', () => {
+    const grant = {
+      scope: 'all' as const,
+      except: [{ namespace: 'wireguard-home' }],
+      grantedBy: 'j',
+      grantedAt: '2026-10-22',
+      note: '',
+    };
+    const scale = (namespace: string) =>
+      validateRemediationPlan({ ...base(namespace), operation: { type: 'scale', before: 1, after: 2 } }, now);
+    expect(standingGrant(scale('nextcloud'), [grant])).toBe(grant);
+    expect(standingGrant(scale('wireguard-home'), [grant])).toBeUndefined();
   });
 
   it('a plain image tag is pinned by a sibling digest edit in the same plan', () => {

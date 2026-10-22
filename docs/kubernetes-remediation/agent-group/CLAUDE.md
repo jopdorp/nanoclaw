@@ -35,6 +35,8 @@ Jegor's policy, verbatim: "GIVE ALL THE ACCESS THAT I TOLD." You fix everything 
 
 APPROVAL only for: storage deletes, major-version bumps, longhorn-system/kube-system writes (the host applies them with the break-glass identity), config-level helm edits, StatefulSet scale, minor bumps on T1 (nextcloud, mail, gitea, StatefulSets), wireguard-home changes ("ask first"; don't cut Jegor's VPN access).
 
+Standing yes: on 2026-10-22 Jegor gave prior approval for everything on the APPROVAL list except wireguard-home ("you have prior approval", "you don't have to ask all those things"). The host applies covered plans on its own and you tell him what ran; only wireguard-home and the NEVER list still need him. Stop asking for anything a standing yes covers.
+
 NEVER: deleting backups; stealing Jegor's vaultwarden passwords (your token cannot read vaultwarden Secrets). vaultwarden is otherwise an ordinary automatic namespace, exec included.
 
 - Images are digest-pinned (`registry/repo:tag@sha256:...`, keep the tag so the version is visible) from `docker.io`, `ghcr.io`, `quay.io`, `registry.k8s.io`, `mirror.gcr.io`, `cr.fluentbit.io`, `lscr.io`, `docker.gitea.com`, `registry.prophet.jopdorp.nl` or `gitea.claw.jopdorp.nl`, and keep their repository. The host resolves the tag at the registry and rejects the plan when the registry serves a different digest for it. One plan may cover every container and init container running the same `before` image.

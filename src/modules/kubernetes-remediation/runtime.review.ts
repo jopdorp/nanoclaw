@@ -30,6 +30,7 @@ import {
 } from './gateway-client.js';
 import { gitWithDeployKey, helmThroughOneCli, HelmReleaseExecutor, type HelmChart } from './helm-release.js';
 import { createAlertWebhookHandlers, runHealthWatch } from './health.js';
+import { readGrants, registerStandingApprovals } from './standing.js';
 import { createFalcoWebhookHandler, runTrivyWatchers } from './triggers.js';
 import { createUpdateChecker } from './updates.js';
 import type { RemediationIncident } from './types.js';
@@ -134,10 +135,16 @@ export async function startKubernetesRemediation(
   onOneCliAgentEnsured(async (groupId) => {
     if (groupId !== config.agentGroupId && (await team(groupId))) await scopeHelperSecrets(groupId, apiHost);
   });
+  registerStandingApprovals({
+    approverUserId: config.matrixApproverUserId,
+    configFile: path.join(DATA_DIR, 'kubernetes-remediation.json'),
+  });
   const cleaned = await cleanupRemediationOrphans(annotator);
   if (cleaned) log.warn('Cleaned stale Kubernetes remediation capabilities', { cleaned });
   registerKubernetesRemediationApproval({
     team,
+    grants: () => readGrants(path.join(DATA_DIR, 'kubernetes-remediation.json')),
+    yesFile: path.join(DATA_DIR, 'kubernetes-remediation-yes.json'),
     approverUserId: config.matrixApproverUserId,
     executor,
     helm,

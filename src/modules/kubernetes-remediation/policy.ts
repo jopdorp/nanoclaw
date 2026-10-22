@@ -542,6 +542,38 @@ function traefikConfig({ apiVersion, kind, name, namespace }: Omit<TargetRef, 'u
   );
 }
 
+export interface GrantEntry {
+  op?: string;
+  namespace?: string;
+  target?: string;
+}
+
+/** The approver's standing yes, recorded by the host from his own message. */
+export interface StandingGrant {
+  scope: 'all' | GrantEntry[];
+  except?: GrantEntry[];
+  grantedBy: string;
+  grantedAt: string;
+  note: string;
+}
+
+/** The grant that covers this approval-class plan; never-rules were already enforced by validation. */
+export function standingGrant({ plan }: ValidatedPlan, grants: StandingGrant[]): StandingGrant | undefined {
+  const namespaces =
+    plan.operation.type === 'repo-write'
+      ? repoObjects(plan.operation.content).map((object) => object.metadata?.namespace ?? null)
+      : [plan.target.namespace];
+  const fits = (e: GrantEntry, namespace: string | null) =>
+    (!e.op || e.op === plan.operation.type) &&
+    (!e.target || e.target === plan.target.name) &&
+    (!e.namespace || e.namespace === namespace);
+  return grants.find(
+    (grant) =>
+      (grant.scope === 'all' || grant.scope.some((e) => namespaces.every((ns) => fits(e, ns)))) &&
+      !(grant.except ?? []).some((e) => namespaces.some((ns) => fits(e, ns))),
+  );
+}
+
 /**
  * Plans the host applies without a Matrix card; the approver still hears what ran.
  * `t1` holds `namespace` or `namespace/name` entries; every StatefulSet is T1 too.

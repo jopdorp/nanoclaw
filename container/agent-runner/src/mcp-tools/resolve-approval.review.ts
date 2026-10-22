@@ -33,4 +33,46 @@ export const resolveApproval: McpToolDefinition = {
   },
 };
 
-registerTools([resolveApproval]);
+const scope = {
+  description:
+    '"all", or a list of {op?, namespace?, target?} entries (op is a plan operation type, target the target name)',
+};
+const standing = (name: string, description: string, properties: Record<string, unknown>): McpToolDefinition => ({
+  tool: {
+    name,
+    description,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...properties,
+        approverMessageId: {
+          type: 'string',
+          description: 'approverMessageId from the block on the approver message that says it',
+        },
+      },
+      required: ['scope', 'approverMessageId'],
+    },
+  },
+  async handler(args) {
+    await writeMessageOut({
+      id: `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'system',
+      content: JSON.stringify({ ...args, action: name }),
+    });
+    return { content: [{ type: 'text', text: 'Submitted; the host confirms in chat or tells you why it refused.' }] };
+  },
+});
+
+registerTools([
+  resolveApproval,
+  standing(
+    'record_standing_approval',
+    'Record the approver\'s standing yes from his own message ("you have my yes for X", "for everything"), so plans it covers apply without asking. Never-rules stay out whatever the scope.',
+    { scope, except: { description: 'entries the yes does not cover, same shape as scope' } },
+  ),
+  standing(
+    'revoke_standing_approval',
+    'Take back a standing yes from the approver\'s own message ("ask me again for X"): scope "all" removes every grant, entries are excluded from all grants.',
+    { scope },
+  ),
+]);
