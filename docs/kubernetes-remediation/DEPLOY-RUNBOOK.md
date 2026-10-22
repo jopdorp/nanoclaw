@@ -115,3 +115,21 @@ Do not leave the Deployment running until immutable images, non-root OneCLI, Cod
 ## 11. [operator=me] Shared memory
 
 Orfie and its helpers reach `shared-mind` (k8s.jegor.nl `kubernetes/nanoclaw-remediator/{qdrant,embedder}.yaml`) through the stdio bridge `phase2-deploy.sh` adds to each group. The image is `shared-mind.Dockerfile` built over a qmem checkout at the commit Fable's local qmem runs, and the base EmbeddingGemma weights are copied once from `~/.local/share/qmem/embeddinggemma` to `/data/embeddinggemma` on the `qmem-encoder` PVC, so embeddings match Fable's copy exactly. Seed and sync it with `qmem sync`.
+
+## 12. [operator=me] Self-upgrade from main
+
+`self-upgrade.yaml` deploys the host from `origin/main` inside the cluster, in `orfie-ci`, which the host's identities cannot write to. Every five minutes `orfie-ci-poll` compares main with `deployed_sha` in ConfigMap `orfie-ci-state`, builds the agent and host images with kaniko (the host build runs the module tests), and `orfie-ci-deploy` patches only the image digests, waits for Ready and otherwise rolls back to `previous_*` and adds the sha to `bad_shas`. Both outcomes post one line to the DM room as `@orfie-ci`.
+
+One-time secrets, then `kubectl apply -f self-upgrade.yaml`: `orfie-ci-deploy-key` (key `id_ed25519`, added read-only with `gh repo deploy-key add -R jopdorp/orfie`), `orfie-ci-registry-push` (copy of `security/gitea-registry-push`), `orfie-ci-matrix` (keys `token`, `password` of `@orfie-ci`, registered like step 2 of `phase2-deploy.sh` and invited into the DM room).
+
+Roll back by hand from the recorded digests, through the same guarded Job:
+
+```bash
+kubectl -n orfie-ci get configmap orfie-ci-state -o yaml
+kubectl -n orfie-ci create job manual-roll --from=cronjob/orfie-ci-deploy --dry-run=client -o yaml \
+  | kubectl set env --local -f - -o yaml GIT_COMMIT=<sha> SUBJECT='a manual rollback' \
+      HOST_IMAGE=<previous_host_digest> AGENT_IMAGE=<previous_agent_digest> \
+  | kubectl -n orfie-ci create -f -
+```
+
+If that Job cannot run, patch the same three images and `CONTAINER_IMAGE` on `deploy/nanoclaw-remediator-orchestrator` with admin credentials. Retry a bad sha by removing it from `bad_shas`. Suspend `cronjob/orfie-ci-poll` before deploying an unpushed tree with `phase2-deploy.sh`, or the next poll puts main back.

@@ -26,6 +26,7 @@ import { getGatewayProvider } from './gateway-providers/index.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
 import { enforceUpgradeTripwire } from './upgrade-state.js';
+import { markHostReady } from './webhook-server.js';
 
 // Response registry lives in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
@@ -200,6 +201,7 @@ async function main(): Promise<void> {
 
   // 9. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
+  markHostReady();
 
   log.info('NanoClaw running');
 }

@@ -148,6 +148,9 @@ spec:
                   key: matrix-access-token
           ports:
             - { name: webhook, containerPort: 3000 }
+          readinessProbe:
+            httpGet: { path: /health, port: webhook }
+            periodSeconds: 5
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

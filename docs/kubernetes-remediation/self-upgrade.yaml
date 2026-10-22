@@ -1,0 +1,460 @@
+# In-cluster deploy of Orfie's host from origin/main, out of the host's reach.
+# Secrets made by hand (DEPLOY-RUNBOOK.md, self-upgrade): orfie-ci-deploy-key, orfie-ci-registry-push, orfie-ci-matrix.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orfie-ci
+  labels:
+    # kaniko builds as root.
+    pod-security.kubernetes.io/enforce: baseline
+---
+# Written only by the CI scripts; no data here so a re-apply keeps the recorded digests.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orfie-ci-state
+  namespace: orfie-ci
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orfie-ci-scripts
+  namespace: orfie-ci
+data:
+  known_hosts: |
+    github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+  fetch.sh: |
+    set -eu
+    export GIT_SSH_COMMAND='ssh -i /key/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/scripts/known_hosts'
+    git init -q /w/src && cd /w/src
+    git fetch -q --depth 1 git@github.com:jopdorp/orfie.git "${GIT_COMMIT:-main}"
+    git checkout -q FETCH_HEAD
+    git rev-parse HEAD >/w/sha
+    git rev-parse 'HEAD^{tree}' >/w/tree
+    git log -1 --format=%s >/w/subject
+  lib.sh: |
+    set -eu
+    keys='deployed_sha deployed_host_digest deployed_agent_digest previous_host_digest previous_agent_digest bad_shas'
+    load() { for k in $keys; do eval "$k=\$(kubectl -n orfie-ci get configmap orfie-ci-state -o jsonpath={.data.$k})"; done; }
+    save() {
+      set --
+      for k in $keys; do eval "set -- \"\$@\" \"--from-literal=$k=\$$k\""; done
+      kubectl -n orfie-ci create configmap orfie-ci-state "$@" --dry-run=client -o yaml | kubectl replace -f - >/dev/null
+    }
+    say() {
+      body=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')
+      curl -fsS -X PUT -H "Authorization: Bearer $(cat /matrix/token)" -H 'Content-Type: application/json' \
+        -d "{\"msgtype\":\"m.text\",\"body\":\"$body\"}" \
+        "http://matrix-synapse.openclaw-private.svc:8008/_matrix/client/v3/rooms/%21rOcsOCEWsLaCgYRSjM%3Amatrix.claw.jopdorp.nl/send/m.room.message/ci-$(date +%s)-$$" >/dev/null
+    }
+  poll.sh: |
+    . /scripts/lib.sh
+    sha=$(cat /w/sha) tree=$(cat /w/tree) subject=$(cat /w/subject)
+    reg=gitea.claw.jopdorp.nl/cluster/nanoclaw
+    load
+    [ "$sha" != "$deployed_sha" ] || exit 0
+    case " $bad_shas " in *" $sha "*) exit 0 ;; esac
+    [ -z "$(kubectl get jobs -l orfie-ci=deploy -o jsonpath='{.items[?(@.status.active)].metadata.name}')" ] || exit 0
+    run() {
+      job=orfie-ci-$1-$(echo "$sha" | cut -c1-12) template=$2
+      shift 2
+      kubectl delete job "$job" --ignore-not-found --wait >/dev/null
+      kubectl create job "$job" --from="cronjob/$template" --dry-run=client -o yaml \
+        | kubectl set env --local -f - -o yaml GIT_COMMIT="$sha" "$@" | kubectl create -f - >/dev/null || return 1
+      until [ -n "$(kubectl get job "$job" -o jsonpath='{.status.succeeded}{.status.failed}')" ]; do sleep 10; done
+      [ "$(kubectl get job "$job" -o jsonpath='{.status.succeeded}')" = 1 ]
+    }
+    built() { echo "$reg/$1@$(kubectl get pod -l job-name="$job" -o jsonpath='{.items[0].status.containerStatuses[0].state.terminated.message}')"; }
+    broken() { load; bad_shas="$bad_shas $sha"; save; say "Host build failed for $subject."; exit 1; }
+    run agent orfie-ci-build GIT_TREE="$tree" CONTEXT=container DOCKERFILE=container/Dockerfile \
+      IMAGE="$reg/remediation-agent" AGENT_IMAGE=unused || broken
+    agent=$(built remediation-agent)
+    run host orfie-ci-build GIT_TREE="$tree" CONTEXT=. DOCKERFILE=docs/kubernetes-remediation/host.Dockerfile \
+      IMAGE="$reg/remediation-host" AGENT_IMAGE="$agent" || broken
+    run deploy orfie-ci-deploy SUBJECT="$subject" HOST_IMAGE="$(built remediation-host)" AGENT_IMAGE="$agent"
+  deploy.sh: |
+    . /scripts/lib.sh
+    ns='-n nanoclaw-remediator' d=deploy/nanoclaw-remediator-orchestrator
+    live() { kubectl $ns get $d -o jsonpath="{.spec.template.spec.containers[?(@.name=='orchestrator')]$1}"; }
+    ready() { [ "$(kubectl $ns get pods -l app=nanoclaw-remediator-orchestrator -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}')" = True ]; }
+    roll() {
+      kubectl $ns delete job -l nanoclaw-group-folder --ignore-not-found >/dev/null &&
+      kubectl $ns patch $d -p "{\"spec\":{\"template\":{\"spec\":{
+        \"initContainers\":[{\"name\":\"state-layout\",\"image\":\"$1\"},{\"name\":\"upgrade-state\",\"image\":\"$1\"}],
+        \"containers\":[{\"name\":\"orchestrator\",\"image\":\"$1\",\"env\":[{\"name\":\"CONTAINER_IMAGE\",\"value\":\"$2\"}]}]}}}}" >/dev/null &&
+      kubectl $ns rollout status $d --timeout=5m && ready
+    }
+    load
+    # A host that is down now was left broken, so fall back to the last good digests.
+    if ready || [ -z "$deployed_host_digest" ]; then
+      previous_host_digest=$(live .image)
+      previous_agent_digest=$(live ".env[?(@.name=='CONTAINER_IMAGE')].value")
+    else
+      previous_host_digest=$deployed_host_digest previous_agent_digest=$deployed_agent_digest
+    fi
+    save
+    if roll "$HOST_IMAGE" "$AGENT_IMAGE"; then
+      deployed_sha=$GIT_COMMIT deployed_host_digest=$HOST_IMAGE deployed_agent_digest=$AGENT_IMAGE
+      save
+      say "Host updated to $SUBJECT."
+      exit 0
+    fi
+    roll "$previous_host_digest" "$previous_agent_digest" && back=1 || back=
+    bad_shas="$bad_shas $GIT_COMMIT"
+    save
+    if [ -n "$back" ]; then say "Host update to $SUBJECT failed, so I rolled back."; else say "Host update to $SUBJECT failed and the rollback is not healthy either."; fi
+    exit 1
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orfie-ci-poll
+  namespace: orfie-ci
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orfie-ci-build
+  namespace: orfie-ci
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orfie-ci-deploy
+  namespace: orfie-ci
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orfie-ci-poll
+  namespace: orfie-ci
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, delete, get, list, watch]
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    verbs: [get]
+  - apiGroups: ['']
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: ['']
+    resources: [configmaps]
+    resourceNames: [orfie-ci-state]
+    verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orfie-ci-poll
+  namespace: orfie-ci
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: orfie-ci-poll }
+subjects:
+  - { kind: ServiceAccount, name: orfie-ci-poll, namespace: orfie-ci }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orfie-ci-deploy-state
+  namespace: orfie-ci
+rules:
+  - apiGroups: ['']
+    resources: [configmaps]
+    resourceNames: [orfie-ci-state]
+    verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orfie-ci-deploy-state
+  namespace: orfie-ci
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: orfie-ci-deploy-state }
+subjects:
+  - { kind: ServiceAccount, name: orfie-ci-deploy, namespace: orfie-ci }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orfie-ci-deploy
+  namespace: nanoclaw-remediator
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [nanoclaw-remediator-orchestrator]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [list, delete]
+  - apiGroups: ['']
+    resources: [pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orfie-ci-deploy
+  namespace: nanoclaw-remediator
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: orfie-ci-deploy }
+subjects:
+  - { kind: ServiceAccount, name: orfie-ci-deploy, namespace: orfie-ci }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: orfie-ci-poll
+  namespace: orfie-ci
+spec:
+  schedule: '*/5 * * * *'
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    metadata:
+      labels: { orfie-ci: poll }
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 9000
+      template:
+        spec:
+          serviceAccountName: orfie-ci-poll
+          restartPolicy: Never
+          initContainers:
+            - name: fetch
+              image: alpine/git:v2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+              command: [sh, /scripts/fetch.sh]
+              securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+              resources: { requests: { cpu: 10m, memory: 32Mi }, limits: { cpu: 500m, memory: 256Mi } }
+              volumeMounts:
+                - { name: w, mountPath: /w }
+                - { name: scripts, mountPath: /scripts }
+                - { name: key, mountPath: /key }
+          containers:
+            - name: poll
+              image: alpine/kubectl:1.35.0@sha256:862d86046bbcad03c252bbc10ab8bf893e7aa50aa7a20de8bfc46727dd645883
+              command: [sh, /scripts/poll.sh]
+              env: [{ name: HOME, value: /w }]
+              securityContext: { runAsNonRoot: true, runAsUser: 65532, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+              resources: { requests: { cpu: 10m, memory: 32Mi }, limits: { cpu: 500m, memory: 256Mi } }
+              volumeMounts:
+                - { name: w, mountPath: /w }
+                - { name: scripts, mountPath: /scripts }
+                - { name: matrix, mountPath: /matrix }
+          volumes:
+            - { name: w, emptyDir: { sizeLimit: 200Mi } }
+            - { name: scripts, configMap: { name: orfie-ci-scripts } }
+            - { name: key, secret: { secretName: orfie-ci-deploy-key, defaultMode: 0400 } }
+            - { name: matrix, secret: { secretName: orfie-ci-matrix, items: [{ key: token, path: token }] } }
+---
+# Template only: orfie-ci-poll stamps a Job from it per image with the env filled in.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: orfie-ci-build
+  namespace: orfie-ci
+spec:
+  schedule: '@yearly'
+  suspend: true
+  jobTemplate:
+    metadata:
+      labels: { orfie-ci: build }
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          serviceAccountName: orfie-ci-build
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          initContainers:
+            - name: fetch
+              image: alpine/git:v2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+              command: [sh, /scripts/fetch.sh]
+              env: [{ name: GIT_COMMIT, value: '' }]
+              securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+              resources: { requests: { cpu: 10m, memory: 32Mi }, limits: { cpu: 500m, memory: 256Mi } }
+              volumeMounts:
+                - { name: w, mountPath: /w }
+                - { name: scripts, mountPath: /scripts }
+                - { name: key, mountPath: /key }
+          containers:
+            - name: kaniko
+              image: gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd80edc663df6def362cd22e79bcdf00ac53f
+              env:
+                - { name: GIT_COMMIT, value: '' }
+                - { name: GIT_TREE, value: '' }
+                - { name: CONTEXT, value: '' }
+                - { name: DOCKERFILE, value: '' }
+                - { name: IMAGE, value: '' }
+                - { name: AGENT_IMAGE, value: '' }
+              args:
+                - --context=dir:///w/src/$(CONTEXT)
+                - --dockerfile=/w/src/$(DOCKERFILE)
+                - --destination=$(IMAGE):candidate-$(GIT_COMMIT)
+                - --build-arg=GIT_COMMIT=$(GIT_COMMIT)
+                - --build-arg=GIT_TREE=$(GIT_TREE)
+                - --build-arg=AGENT_IMAGE=$(AGENT_IMAGE)
+                - --cache=true
+                - --cache-repo=gitea.claw.jopdorp.nl/cluster/nanoclaw/ci-cache
+                - --snapshot-mode=redo
+                - --compressed-caching=false
+                - --digest-file=/dev/termination-log
+              resources:
+                requests: { cpu: 500m, memory: 1Gi }
+                limits: { cpu: '2', memory: 3Gi }
+              volumeMounts:
+                - { name: w, mountPath: /w }
+                - { name: docker, mountPath: /kaniko/.docker }
+          volumes:
+            - { name: w, emptyDir: { sizeLimit: 2Gi } }
+            - { name: scripts, configMap: { name: orfie-ci-scripts } }
+            - { name: key, secret: { secretName: orfie-ci-deploy-key, defaultMode: 0400 } }
+            - name: docker
+              secret: { secretName: orfie-ci-registry-push, items: [{ key: .dockerconfigjson, path: config.json }] }
+---
+# Template only: the deploy and watchdog run, also used by hand for a manual roll (DEPLOY-RUNBOOK.md).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: orfie-ci-deploy
+  namespace: orfie-ci
+spec:
+  schedule: '@yearly'
+  suspend: true
+  jobTemplate:
+    metadata:
+      labels: { orfie-ci: deploy }
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1800
+      ttlSecondsAfterFinished: 604800
+      template:
+        spec:
+          serviceAccountName: orfie-ci-deploy
+          restartPolicy: Never
+          containers:
+            - name: deploy
+              image: alpine/kubectl:1.35.0@sha256:862d86046bbcad03c252bbc10ab8bf893e7aa50aa7a20de8bfc46727dd645883
+              command: [sh, /scripts/deploy.sh]
+              env:
+                - { name: HOME, value: /tmp }
+                - { name: GIT_COMMIT, value: '' }
+                - { name: SUBJECT, value: '' }
+                - { name: HOST_IMAGE, value: '' }
+                - { name: AGENT_IMAGE, value: '' }
+              securityContext: { runAsNonRoot: true, runAsUser: 65532, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+              resources: { requests: { cpu: 10m, memory: 32Mi }, limits: { cpu: 500m, memory: 256Mi } }
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+                - { name: scripts, mountPath: /scripts }
+                - { name: matrix, mountPath: /matrix }
+          volumes:
+            - { name: tmp, emptyDir: { sizeLimit: 50Mi } }
+            - { name: scripts, configMap: { name: orfie-ci-scripts } }
+            - { name: matrix, secret: { secretName: orfie-ci-matrix, items: [{ key: token, path: token }] } }
+---
+# The deploy identity may only move the host and agent images to trusted digests, plus the restart annotation.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orfie-ci-deploy-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ['*']
+        apiVersions: ['*']
+        operations: [CREATE, UPDATE, DELETE]
+        resources: ['*/*']
+  matchConditions:
+    - name: deploy-identity
+      expression: request.userInfo.username == 'system:serviceaccount:orfie-ci:orfie-ci-deploy'
+  variables:
+    - name: hostImage
+      expression: "'^gitea[.]claw[.]jopdorp[.]nl/cluster/nanoclaw/remediation-host@sha256:[0-9a-f]{64}$'"
+    - name: agentImage
+      expression: "'^gitea[.]claw[.]jopdorp[.]nl/cluster/nanoclaw/remediation-agent@sha256:[0-9a-f]{64}$'"
+    - name: isDeployment
+      expression: request.resource.resource == 'deployments' && request.operation == 'UPDATE' && request.subResource == ''
+    - name: newAnn
+      expression: "variables.isDeployment && has(object.spec.template.metadata.annotations) ? object.spec.template.metadata.annotations : {}"
+    - name: oldAnn
+      expression: "variables.isDeployment && has(oldObject.spec.template.metadata.annotations) ? oldObject.spec.template.metadata.annotations : {}"
+  validations:
+    # Session recycling and the ConfigMap write are the only other writes it makes.
+    - expression: >-
+        variables.isDeployment ||
+        (request.resource.resource == 'jobs' && request.operation == 'DELETE' && request.namespace == 'nanoclaw-remediator') ||
+        (request.resource.resource == 'configmaps' && request.operation == 'UPDATE' && request.name == 'orfie-ci-state')
+      message: orfie-ci-deploy only patches the host Deployment, recycles session Jobs and records its state
+    - expression: >-
+        !variables.isDeployment || (
+        dyn(object.metadata).all(k, k in ['generation', 'managedFields', 'resourceVersion'] || (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
+        dyn(oldObject.metadata).all(k, k in ['generation', 'managedFields', 'resourceVersion'] || k in dyn(object.metadata)) &&
+        dyn(object.spec).all(k, k == 'template' || (k in dyn(oldObject.spec) && dyn(object.spec)[k] == dyn(oldObject.spec)[k])) &&
+        dyn(oldObject.spec).all(k, k == 'template' || k in dyn(object.spec)) &&
+        dyn(object.spec.template.metadata).all(k, k == 'annotations' || (k in dyn(oldObject.spec.template.metadata) && dyn(object.spec.template.metadata)[k] == dyn(oldObject.spec.template.metadata)[k])) &&
+        dyn(oldObject.spec.template.metadata).all(k, k == 'annotations' || k in dyn(object.spec.template.metadata)) &&
+        variables.newAnn.all(k, k == 'kubectl.kubernetes.io/restartedAt' || (k in variables.oldAnn && variables.newAnn[k] == variables.oldAnn[k])) &&
+        variables.oldAnn.all(k, k == 'kubectl.kubernetes.io/restartedAt' || k in variables.newAnn) &&
+        dyn(object.spec.template.spec).all(k, k in ['containers', 'initContainers'] || (k in dyn(oldObject.spec.template.spec) && dyn(object.spec.template.spec)[k] == dyn(oldObject.spec.template.spec)[k])) &&
+        dyn(oldObject.spec.template.spec).all(k, k in ['containers', 'initContainers'] || k in dyn(object.spec.template.spec)))
+      message: only the pod template's container images, CONTAINER_IMAGE and the restart annotation may change
+    - expression: >-
+        !variables.isDeployment || (
+        object.spec.template.spec.initContainers.map(c, c.name) == oldObject.spec.template.spec.initContainers.map(c, c.name) &&
+        object.spec.template.spec.initContainers.all(c, c.image.matches(variables.hostImage) &&
+          oldObject.spec.template.spec.initContainers.exists(oc, oc.name == c.name &&
+            dyn(c).all(k, k == 'image' || (k in dyn(oc) && dyn(c)[k] == dyn(oc)[k])) &&
+            dyn(oc).all(k, k == 'image' || k in dyn(c)))))
+      message: init containers may only move to a trusted host digest
+    - expression: >-
+        !variables.isDeployment || (
+        object.spec.template.spec.containers.map(c, c.name) == oldObject.spec.template.spec.containers.map(c, c.name) &&
+        object.spec.template.spec.containers.all(c, c.image.matches(variables.hostImage) &&
+          oldObject.spec.template.spec.containers.exists(oc, oc.name == c.name &&
+            dyn(c).all(k, k in ['image', 'env'] || (k in dyn(oc) && dyn(c)[k] == dyn(oc)[k])) &&
+            dyn(oc).all(k, k in ['image', 'env'] || k in dyn(c)) &&
+            has(c.env) == has(oc.env) &&
+            (!has(c.env) || (c.env.map(e, e.name) == oc.env.map(e, e.name) &&
+              c.env.all(e, oc.env.exists(oe, oe.name == e.name &&
+                (e == oe || (e.name == 'CONTAINER_IMAGE' && has(e.value) && !has(e.valueFrom) && e.value.matches(variables.agentImage))))))))))
+      message: containers may only move to a trusted host digest and CONTAINER_IMAGE to a trusted agent digest
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orfie-ci-deploy-guard
+spec:
+  policyName: orfie-ci-deploy-guard
+  validationActions: [Deny]
+---
+# The host and the bot's identities never write to the CI namespace.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orfie-ci-namespace-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels: { kubernetes.io/metadata.name: orfie-ci }
+    resourceRules:
+      - { apiGroups: ['*'], apiVersions: ['*'], operations: ['*'], resources: ['*/*'], scope: Namespaced }
+      - { apiGroups: [''], apiVersions: [v1], operations: ['*'], resources: [namespaces, namespaces/*], scope: Cluster }
+  matchConditions:
+    - name: remediator-identity
+      expression: request.userInfo.username.startsWith('system:serviceaccount:nanoclaw-remediator:')
+  validations:
+    - expression: 'false'
+      message: nanoclaw-remediator identities cannot write to orfie-ci
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orfie-ci-namespace-guard
+spec:
+  policyName: orfie-ci-namespace-guard
+  validationActions: [Deny]

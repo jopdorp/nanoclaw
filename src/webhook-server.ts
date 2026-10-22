@@ -30,6 +30,13 @@ const routes = new Map<string, WebhookEntry>();
 const rawRoutes = new Map<string, RawWebhookHandler>();
 let server: http.Server | null = null;
 let listenerId: string | null = null;
+let hostReady = false;
+
+/** Turn /health green once host startup has finished; the readiness probe gates deploys on it. */
+export function markHostReady(): void {
+  hostReady = true;
+  ensureServer();
+}
 
 /** Report only a successfully bound listener owned by this host process. */
 export function getWebhookStatus(): { id: string; port: number; paths: string[] } | null {
@@ -129,6 +136,10 @@ function ensureServer(): void {
     res.setHeader('x-nanoclaw-webhook-id', id);
     void (async () => {
       const url = req.url || '/';
+      if (url === '/health') {
+        res.writeHead(hostReady ? 200 : 503).end();
+        return;
+      }
 
       // Route: /webhook/{adapterName}
       const match = url.match(/^\/webhook\/([^/?]+)/);

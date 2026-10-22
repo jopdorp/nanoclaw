@@ -5,13 +5,15 @@ ARG GIT_TREE
 FROM node:22-slim AS build
 WORKDIR /opt/nanoclaw
 RUN corepack enable && corepack prepare pnpm@10.34.5 --activate
+# The helm-release tests drive a real git repo.
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY patches ./patches
 RUN HUSKY=0 pnpm install --frozen-lockfile
 RUN node -e "const Database=require('better-sqlite3'); const db=new Database(':memory:'); db.close()"
-COPY tsconfig.json ./
+COPY tsconfig.json vitest.config.ts ./
 COPY src ./src
-RUN pnpm run build
+RUN pnpm run build && pnpm exec vitest run src/modules/kubernetes-remediation
 
 FROM ${AGENT_IMAGE}
 ARG GIT_COMMIT
