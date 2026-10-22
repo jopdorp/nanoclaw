@@ -1,5 +1,3 @@
-# REVIEW ONLY. Do not apply without admission-policy.yaml and the policy proxy
-# described in approach-2-build-plan.md.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -19,24 +17,44 @@ metadata:
   namespace: nanoclaw-remediator
 automountServiceAccountToken: false
 ---
-# Only resources that are genuinely cluster-scoped belong here.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: nanoclaw-remediator-cluster-read
 rules:
-  - apiGroups: [""]
-    resources: [nodes, persistentvolumes]
-    verbs: [get, list, watch]
-  - apiGroups: [storage.k8s.io]
-    resources: [storageclasses]
-    verbs: [get, list, watch]
-  - apiGroups: [apiextensions.k8s.io]
-    resources: [customresourcedefinitions]
-    verbs: [get, list, watch]
-  - apiGroups: [aquasecurity.github.io]
-    resources: [clustervulnerabilityreports]
-    verbs: [get, list, watch]
+- apiGroups:
+  - ''
+  resources:
+  - nodes
+  - persistentvolumes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apiextensions.k8s.io
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - aquasecurity.github.io
+  resources:
+  - clustervulnerabilityreports
+  verbs:
+  - get
+  - list
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -47,13 +65,10 @@ roleRef:
   kind: ClusterRole
   name: nanoclaw-remediator-cluster-read
 subjects:
-  - kind: ServiceAccount
-    name: nanoclaw-remediator
-    namespace: nanoclaw-remediator
+- kind: ServiceAccount
+  name: nanoclaw-remediator
+  namespace: nanoclaw-remediator
 ---
-# REQUIRES PER-ACTION HUMAN APPROVAL. This capability has no binding by
-# default. A trusted host process may create a short-lived RoleBinding only
-# after Matrix approval and the proxy has installed the approval annotation.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -61,12 +76,13 @@ metadata:
   labels:
     remediation.nanoclaw.io/human-approval: required
 rules:
-  - apiGroups: [""]
-    resources: [persistentvolumeclaims]
-    verbs: [delete]
+- apiGroups:
+  - ''
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - delete
 ---
-# REQUIRES PER-ACTION HUMAN APPROVAL. This capability has no binding by
-# default; the host binds it for one approved PV delete.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -74,41 +90,65 @@ metadata:
   labels:
     remediation.nanoclaw.io/human-approval: required
 rules:
-  - apiGroups: [""]
-    resources: [persistentvolumes]
-    verbs: [delete]
+- apiGroups:
+  - ''
+  resources:
+  - persistentvolumes
+  verbs:
+  - delete
 ---
-# Lane A writes in every namespace. RBAC cannot exclude namespaces, so
-# admission-policy.yaml keeps this identity out of Lane C, behind the approval
-# annotation in the always-ask namespaces, and from deleting anything in backups.
-# PVC and PV deletion come only from the temporary approved bindings.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: nanoclaw-remediator-lane-a
 rules:
-  - apiGroups: [apps]
-    resources: [daemonsets, deployments, statefulsets]
-    verbs: [get, patch]
-  - apiGroups: [apps]
-    resources: [deployments/scale, statefulsets/scale]
-    verbs: [get, patch]
-  - apiGroups: [batch]
-    resources: [cronjobs]
-    verbs: [get, patch]
-  - apiGroups: [batch]
-    resources: [jobs]
-    verbs: [get, delete]
-  - apiGroups: ['']
-    resources: [pods, persistentvolumeclaims]
-    verbs: [get, list]
-  # The pod-exec runner Job runs kubectl in-cluster under this account.
-  - apiGroups: ['']
-    resources: [pods/exec]
-    verbs: [create, get]
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
+  - deployments
+  - statefulsets
+  verbs:
+  - get
+  - patch
+- apiGroups:
+  - apps
+  resources:
+  - deployments/scale
+  - statefulsets/scale
+  verbs:
+  - get
+  - patch
+- apiGroups:
+  - batch
+  resources:
+  - cronjobs
+  verbs:
+  - get
+  - patch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - get
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - persistentvolumeclaims
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ''
+  resources:
+  - pods/exec
+  verbs:
+  - create
+  - get
 ---
-# The pod-exec runner in nanoclaw-remediator and the build-image Job in security;
-# admission-policy.yaml pins what these Jobs may run.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -123,54 +163,89 @@ kind: ClusterRole
 metadata:
   name: nanoclaw-remediator-jobs
 rules:
-  - apiGroups: [batch]
-    resources: [jobs]
-    verbs: [create, get, list, delete]
-  - apiGroups: ['']
-    resources: [pods, pods/log]
-    verbs: [get, list]
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - get
+  - list
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - pods/log
+  verbs:
+  - get
+  - list
 ---
 apiVersion: v1
 kind: List
 items:
-  - &jobs-binding
-    apiVersion: rbac.authorization.k8s.io/v1
-    kind: RoleBinding
-    metadata: { name: nanoclaw-remediator-jobs, namespace: nanoclaw-remediator }
-    roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-remediator-jobs }
-    subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator, namespace: nanoclaw-remediator }]
-  - <<: *jobs-binding
-    metadata: { name: nanoclaw-remediator-jobs, namespace: security }
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: nanoclaw-remediator-jobs
+    namespace: nanoclaw-remediator
+  roleRef: &id001
+    apiGroup: rbac.authorization.k8s.io
+    kind: ClusterRole
+    name: nanoclaw-remediator-jobs
+  subjects: &id002
+  - kind: ServiceAccount
+    name: nanoclaw-remediator
+    namespace: nanoclaw-remediator
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: nanoclaw-remediator-jobs
+    namespace: security
+  roleRef: *id001
+  subjects: *id002
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: nanoclaw-remediator-lane-a
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-remediator-lane-a }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nanoclaw-remediator-lane-a
 subjects:
-  - { kind: ServiceAccount, name: nanoclaw-remediator, namespace: nanoclaw-remediator }
+- kind: ServiceAccount
+  name: nanoclaw-remediator
+  namespace: nanoclaw-remediator
 ---
-# The Trivy watcher lists reports across all namespaces; scan metadata only, read-only.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: nanoclaw-remediator-trivy-read
 rules:
-  - apiGroups: [aquasecurity.github.io]
-    resources: [vulnerabilityreports, clustervulnerabilityreports]
-    verbs: [get, list, watch]
+- apiGroups:
+  - aquasecurity.github.io
+  resources:
+  - vulnerabilityreports
+  - clustervulnerabilityreports
+  verbs:
+  - get
+  - list
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: nanoclaw-remediator-trivy-read
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-remediator-trivy-read }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nanoclaw-remediator-trivy-read
 subjects:
-  - { kind: ServiceAccount, name: nanoclaw-remediator, namespace: nanoclaw-remediator }
+- kind: ServiceAccount
+  name: nanoclaw-remediator
+  namespace: nanoclaw-remediator
 ---
-# Helm and manifest path. Only the host holds this identity (OneCLI agent
-# nanoclaw-helm); the agent never does. It installs and upgrades whole charts,
-# so it manages the cluster-scoped objects charts bring.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -187,78 +262,114 @@ metadata:
   annotations:
     kubernetes.io/service-account.name: nanoclaw-helm
 ---
-# Everything in one namespace. enable-remediation.sh binds it for nanoclaw-helm in every
-# namespace except kube-system and longhorn-system, and for nanoclaw-breakglass
-# below; admission-policy.yaml holds both to the owner's NEVER list.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: nanoclaw-namespace-admin
 rules:
-  - apiGroups: ['*']
-    resources: ['*']
-    verbs: ['*']
+- apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - '*'
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: nanoclaw-helm-cluster-rbac
 rules:
-  - apiGroups: [rbac.authorization.k8s.io]
-    resources: [clusterroles, clusterrolebindings]
-    verbs: ['*']
-  - apiGroups: [apiextensions.k8s.io]
-    resources: [customresourcedefinitions]
-    verbs: ['*']
-  - apiGroups: [admissionregistration.k8s.io]
-    resources: [mutatingwebhookconfigurations, validatingwebhookconfigurations]
-    verbs: ['*']
-  - apiGroups: [apiregistration.k8s.io]
-    resources: [apiservices]
-    verbs: ['*']
-  - apiGroups: [scheduling.k8s.io]
-    resources: [priorityclasses]
-    verbs: ['*']
-  - apiGroups: ['']
-    resources: [namespaces]
-    verbs: [get, list, watch, create]
-  # helm list -A, for check_updates.
-  - apiGroups: ['']
-    resources: [secrets]
-    verbs: [list]
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  - clusterrolebindings
+  verbs:
+  - '*'
+- apiGroups:
+  - apiextensions.k8s.io
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - '*'
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - mutatingwebhookconfigurations
+  - validatingwebhookconfigurations
+  verbs:
+  - '*'
+- apiGroups:
+  - apiregistration.k8s.io
+  resources:
+  - apiservices
+  verbs:
+  - '*'
+- apiGroups:
+  - scheduling.k8s.io
+  resources:
+  - priorityclasses
+  verbs:
+  - '*'
+- apiGroups:
+  - ''
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  verbs:
+  - list
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: nanoclaw-helm-cluster-rbac
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-helm-cluster-rbac }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nanoclaw-helm-cluster-rbac
 subjects:
-  - { kind: ServiceAccount, name: nanoclaw-helm, namespace: nanoclaw-remediator }
+- kind: ServiceAccount
+  name: nanoclaw-helm
+  namespace: nanoclaw-remediator
 ---
-# Charts put leader-election Roles and RoleBindings in kube-system; the rest of kube-system stays break-glass.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: nanoclaw-helm-rbac
   namespace: kube-system
 rules:
-  - apiGroups: [rbac.authorization.k8s.io]
-    resources: [roles, rolebindings]
-    verbs: ['*']
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - roles
+  - rolebindings
+  verbs:
+  - '*'
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: nanoclaw-helm-rbac
   namespace: kube-system
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-helm-rbac }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nanoclaw-helm-rbac
 subjects:
-  - { kind: ServiceAccount, name: nanoclaw-helm, namespace: nanoclaw-remediator }
+- kind: ServiceAccount
+  name: nanoclaw-helm
+  namespace: nanoclaw-remediator
 ---
-# Break-glass. Only the host executor holds this identity (OneCLI agent
-# nanoclaw-breakglass), and only to apply an approved Lane C plan. It reads
-# everything but Secrets cluster-wide, owns kube-system and longhorn-system, and
-# updates the longhorn chart's cluster objects; the never guard still applies.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -280,115 +391,156 @@ kind: ClusterRole
 metadata:
   name: nanoclaw-breakglass-cluster
 rules:
-  - apiGroups: [""]
-    resources:
-      [
-        configmaps,
-        endpoints,
-        events,
-        limitranges,
-        namespaces,
-        nodes,
-        persistentvolumeclaims,
-        persistentvolumes,
-        pods,
-        pods/log,
-        replicationcontrollers,
-        resourcequotas,
-        serviceaccounts,
-        services,
-      ]
-    verbs: [get, list, watch]
-  - apiGroups:
-      [
-        acme.cert-manager.io,
-        admissionregistration.k8s.io,
-        apiextensions.k8s.io,
-        apps,
-        aquasecurity.github.io,
-        autoscaling,
-        batch,
-        cert-manager.io,
-        coordination.k8s.io,
-        discovery.k8s.io,
-        events.k8s.io,
-        helm.cattle.io,
-        longhorn.io,
-        networking.k8s.io,
-        policy,
-        rbac.authorization.k8s.io,
-        scheduling.k8s.io,
-        storage.k8s.io,
-        traefik.io,
-      ]
-    resources: ["*"]
-    verbs: [get, list, watch]
-  - apiGroups: [rbac.authorization.k8s.io]
-    resources: [clusterroles]
-    resourceNames: [longhorn-role, longhorn-csi-role, longhorn-csi-secret-role]
-    verbs: [update, patch, escalate, bind]
-  # longhorn-support-bundle binds cluster-admin and is left out, so this identity never holds bind on it.
-  - apiGroups: [rbac.authorization.k8s.io]
-    resources: [clusterrolebindings]
-    resourceNames: [longhorn-bind, longhorn-csi-bind, longhorn-csi-secret-bind]
-    verbs: [update, patch]
-  - apiGroups: [apiextensions.k8s.io]
-    resources: [customresourcedefinitions]
-    resourceNames:
-      - backingimagedatasources.longhorn.io
-      - backingimagemanagers.longhorn.io
-      - backingimages.longhorn.io
-      - backupbackingimages.longhorn.io
-      - backups.longhorn.io
-      - backuptargets.longhorn.io
-      - backupvolumes.longhorn.io
-      - enginefrontends.longhorn.io
-      - engineimages.longhorn.io
-      - engines.longhorn.io
-      - instancemanagers.longhorn.io
-      - instancemanagerupgradecontrols.longhorn.io
-      - instancemanagerupgrades.longhorn.io
-      - nodes.longhorn.io
-      - orphans.longhorn.io
-      - recurringjobs.longhorn.io
-      - replicas.longhorn.io
-      - settings.longhorn.io
-      - shardgroups.longhorn.io
-      - shards.longhorn.io
-      - sharemanagers.longhorn.io
-      - snapshotgroups.longhorn.io
-      - snapshots.longhorn.io
-      - supportbundles.longhorn.io
-      - systembackups.longhorn.io
-      - systemrestores.longhorn.io
-      - volumeattachments.longhorn.io
-      - volumes.longhorn.io
-    verbs: [update, patch]
-  - apiGroups: [scheduling.k8s.io]
-    resources: [priorityclasses]
-    resourceNames: [longhorn-critical]
-    verbs: [update, patch]
+- apiGroups:
+  - ''
+  resources:
+  - configmaps
+  - endpoints
+  - events
+  - limitranges
+  - namespaces
+  - nodes
+  - persistentvolumeclaims
+  - persistentvolumes
+  - pods
+  - pods/log
+  - replicationcontrollers
+  - resourcequotas
+  - serviceaccounts
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - acme.cert-manager.io
+  - admissionregistration.k8s.io
+  - apiextensions.k8s.io
+  - apps
+  - aquasecurity.github.io
+  - autoscaling
+  - batch
+  - cert-manager.io
+  - coordination.k8s.io
+  - discovery.k8s.io
+  - events.k8s.io
+  - helm.cattle.io
+  - longhorn.io
+  - networking.k8s.io
+  - policy
+  - rbac.authorization.k8s.io
+  - scheduling.k8s.io
+  - storage.k8s.io
+  - traefik.io
+  resources:
+  - '*'
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  resourceNames:
+  - longhorn-role
+  - longhorn-csi-role
+  - longhorn-csi-secret-role
+  verbs:
+  - update
+  - patch
+  - escalate
+  - bind
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterrolebindings
+  resourceNames:
+  - longhorn-bind
+  - longhorn-csi-bind
+  - longhorn-csi-secret-bind
+  verbs:
+  - update
+  - patch
+- apiGroups:
+  - apiextensions.k8s.io
+  resources:
+  - customresourcedefinitions
+  resourceNames:
+  - backingimagedatasources.longhorn.io
+  - backingimagemanagers.longhorn.io
+  - backingimages.longhorn.io
+  - backupbackingimages.longhorn.io
+  - backups.longhorn.io
+  - backuptargets.longhorn.io
+  - backupvolumes.longhorn.io
+  - enginefrontends.longhorn.io
+  - engineimages.longhorn.io
+  - engines.longhorn.io
+  - instancemanagers.longhorn.io
+  - instancemanagerupgradecontrols.longhorn.io
+  - instancemanagerupgrades.longhorn.io
+  - nodes.longhorn.io
+  - orphans.longhorn.io
+  - recurringjobs.longhorn.io
+  - replicas.longhorn.io
+  - settings.longhorn.io
+  - shardgroups.longhorn.io
+  - shards.longhorn.io
+  - sharemanagers.longhorn.io
+  - snapshotgroups.longhorn.io
+  - snapshots.longhorn.io
+  - supportbundles.longhorn.io
+  - systembackups.longhorn.io
+  - systemrestores.longhorn.io
+  - volumeattachments.longhorn.io
+  - volumes.longhorn.io
+  verbs:
+  - update
+  - patch
+- apiGroups:
+  - scheduling.k8s.io
+  resources:
+  - priorityclasses
+  resourceNames:
+  - longhorn-critical
+  verbs:
+  - update
+  - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: nanoclaw-breakglass-cluster
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-breakglass-cluster }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nanoclaw-breakglass-cluster
 subjects:
-  - { kind: ServiceAccount, name: nanoclaw-breakglass, namespace: nanoclaw-remediator }
-
+- kind: ServiceAccount
+  name: nanoclaw-breakglass
+  namespace: nanoclaw-remediator
 ---
 apiVersion: v1
 kind: List
 items:
-  - apiVersion: rbac.authorization.k8s.io/v1
-    kind: RoleBinding
-    metadata: { name: nanoclaw-breakglass, namespace: kube-system }
-    roleRef: &breakglass-role { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-namespace-admin }
-    subjects: &breakglass-subject
-      - { kind: ServiceAccount, name: nanoclaw-breakglass, namespace: nanoclaw-remediator }
-  - apiVersion: rbac.authorization.k8s.io/v1
-    kind: RoleBinding
-    metadata: { name: nanoclaw-breakglass, namespace: longhorn-system }
-    roleRef: *breakglass-role
-    subjects: *breakglass-subject
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: nanoclaw-breakglass
+    namespace: kube-system
+  roleRef: &id001
+    apiGroup: rbac.authorization.k8s.io
+    kind: ClusterRole
+    name: nanoclaw-namespace-admin
+  subjects: &id002
+  - kind: ServiceAccount
+    name: nanoclaw-breakglass
+    namespace: nanoclaw-remediator
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: nanoclaw-breakglass
+    namespace: longhorn-system
+  roleRef: *id001
+  subjects: *id002
