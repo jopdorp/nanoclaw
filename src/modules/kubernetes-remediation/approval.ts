@@ -224,13 +224,10 @@ export function registerKubernetesRemediationApproval(options: {
         if (!auto) throw error;
         message = `Auto-approved plan ${validated.plan.id} failed: ${error instanceof Error ? error.message : String(error)}`;
       }
-      await notifyAgent(session, message);
-      if (auto) {
-        await notifyApprover(
-          options.approverUserId,
-          `Auto-applied remediation\n${renderQuestion(validated, prepared.diff)}\noutcome: ${message}`,
-        );
-      }
+      await notifyAgent(
+        session,
+        `${auto ? 'auto-applied' : 'approved and ran'}: ${summary(validated)}; outcome: ${message}\nTell the approver in one plain sentence.\n${renderQuestion(validated, prepared.diff)}`,
+      );
     },
     {
       guardAction: remediationGuard,
