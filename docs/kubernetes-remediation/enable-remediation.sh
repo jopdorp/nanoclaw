@@ -5,6 +5,7 @@ export KUBECONFIG=/home/jopdorp/.kube/mini-pc.fresh
 
 ROOT=/home/jopdorp/development/nanoclaw-v2
 DOCS="$ROOT/docs/kubernetes-remediation"
+K8S_REPO=/home/jopdorp/development/k8s.jegor.nl
 NAMESPACE=nanoclaw-remediator
 ORCHESTRATOR=nanoclaw-remediator-orchestrator
 ORCHESTRATOR_GROUP=ag-4be55056-f0a3-4991-a83e-a347b75de07d
@@ -95,7 +96,7 @@ kubectl delete validatingadmissionpolicybinding,validatingadmissionpolicy nanocl
   --ignore-not-found >/dev/null
 printf '%s\n' 'approval-controller RBAC and policies are present'
 
-step '1b/6 bind the per-namespace rights from the live namespaces; re-run whenever a namespace is added'
+step '1b/6 bind the per-namespace rights; namespace-binder keeps them on every namespace, new ones too'
 kubectl api-resources --verbs=list -o name \
   | jq -R 'capture("^(?<r>[^.]+)([.](?<g>.+))?$") | {g: (.g // ""), r}' \
   | jq -s '{apiVersion: "rbac.authorization.k8s.io/v1", kind: "ClusterRole",
@@ -103,18 +104,8 @@ kubectl api-resources --verbs=list -o name \
       rules: [group_by(.g)[] | {apiGroups: [.[0].g], verbs: ["get", "list", "watch"],
         resources: ([.[].r] - ["secrets"] + (if .[0].g == "" then ["pods/log"] else [] end))}]}' \
   | kubectl apply -f - >/dev/null
-kubectl get ns -o json | jq --arg self "$NAMESPACE" '
-  def bind($ns; $role; $sa): {apiVersion: "rbac.authorization.k8s.io/v1", kind: "RoleBinding",
-    metadata: {name: $role, namespace: $ns},
-    roleRef: {apiGroup: "rbac.authorization.k8s.io", kind: "ClusterRole", name: $role},
-    subjects: [{kind: "ServiceAccount", name: $sa, namespace: $self}]};
-  {apiVersion: "v1", kind: "List", items: [.items[].metadata.name | . as $ns |
-    (if $ns | IN("vaultwarden", $self) then empty else bind($ns; "nanoclaw-remediator-reader-secrets"; "nanoclaw-remediator-reader") end),
-    (if $ns | IN("wireguard-home", "kube-system", "longhorn-system", $self) then empty
-     else bind($ns; "nanoclaw-remediator-reader-inspect"; "nanoclaw-remediator-reader") end),
-    (if $ns | IN("kube-system", "longhorn-system") then empty
-     else bind($ns; "nanoclaw-namespace-admin"; "nanoclaw-helm") | .metadata.name = "nanoclaw-helm" end)]}' \
-  | kubectl apply -f - >/dev/null
+kubectl apply -f "$K8S_REPO/kubernetes/security/namespace-binder.yaml" >/dev/null
+kubectl rollout status -n security deploy/namespace-binder --timeout=5m >/dev/null
 # Grants replaced by the bindings above.
 for kind in rolebinding role; do
   kubectl get "$kind" -A -o json | jq -r '.items[].metadata | select(.name | IN("nanoclaw-remediator-read",
@@ -125,7 +116,7 @@ done
 kubectl delete clusterrolebinding nanoclaw-remediator-reader-cluster-read nanoclaw-remediator-reader-trivy-read \
   --ignore-not-found >/dev/null
 kubectl delete clusterrole nanoclaw-breakglass-lane-c nanoclaw-remediator-reader-logs --ignore-not-found >/dev/null
-printf '%s\n' 'reader, exec and helm bindings match the live namespaces'
+printf '%s\n' 'namespace-binder binds the reader, exec and helm rights in every namespace'
 kubectl get secret -n "$NAMESPACE" registry-prophet -o json \
   | jq '{apiVersion, kind, type, data, metadata: {name: .metadata.name, namespace: "security"}}' \
   | kubectl apply -f - >/dev/null
