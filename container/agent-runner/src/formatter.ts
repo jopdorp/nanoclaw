@@ -163,8 +163,11 @@ export function isHumanChat(msg: MessageInRow): boolean {
 /** The human or creator whose message may interrupt the active turn. */
 export function interruptSender(msg: MessageInRow): string | null {
   if (isHumanChat(msg)) return 'Jegor';
-  if ((msg.kind !== 'chat' && msg.kind !== 'chat-sdk') || msg.trigger !== 1 || msg.channel_type !== 'agent') return null;
+  if ((msg.kind !== 'chat' && msg.kind !== 'chat-sdk') || msg.trigger !== 1) return null;
   if (isFailureNotice(msg)) return null;
+  const content = parseContent(msg.content);
+  if (extractSenderId(msg, content) === 'cli:fable') return 'Fable, the operator agent';
+  if (msg.channel_type !== 'agent') return null;
   const creator = getAllDestinations().find(
     (destination) =>
       destination.type === 'agent' &&

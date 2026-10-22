@@ -9,6 +9,7 @@ import {
   isClearCommand,
   isRunnerCommand,
   GENERIC_FAILURE_NOTICE,
+  interruptSender,
 } from './formatter.js';
 import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
@@ -491,6 +492,12 @@ it('a creator steers an active turn while a peer only pushes', async () => {
   }
   await processQuery({ push: (m) => pushes.push(m), end: () => {}, events: events(), abort: () => (aborted = true) }, ERR_ROUTING, [], 'claude', undefined, 'prompt', undefined);
   expect([pushes.length, aborted, getPendingMessages().map((m) => m.id)]).toEqual([1, true, ['creator']]);
+});
+
+it('only Fable CLI messages steer', () => {
+  insertMessage('fable', 'chat', { senderId: 'cli:fable', text: 'change course' }, { channelType: 'matrix' });
+  insertMessage('other', 'chat', { senderId: 'cli:other', text: 'fyi' }, { channelType: 'matrix' });
+  expect(getPendingMessages().map(interruptSender)).toEqual(['Fable, the operator agent', null]);
 });
 
 describe('error result with no <message> envelope', () => {
