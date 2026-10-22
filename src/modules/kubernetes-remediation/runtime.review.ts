@@ -50,7 +50,7 @@ export interface KubernetesRemediationConfig {
   breakGlassOneCliAgent?: string;
   /** Verified chart sources keyed `<namespace>/<release>`, cached by the host; hints only. */
   helmReleases?: Record<string, HelmChart>;
-  /** Where build-image pushes and the Secret in security holding its push credentials; registry.prophet by default. */
+  /** Where build-image pushes and the Secret in security holding its push credentials; Gitea's registry by default. */
   imageRegistry?: string;
   registryPullSecret?: string;
   /** `namespace` or `namespace/name`: image updates there need approval beyond a patch version. */

@@ -425,10 +425,13 @@ jq -n \
   --arg helmOneCliAgent "$HELM" \
   --arg breakGlassOneCliAgent "$BREAKGLASS" \
   --argjson helmReleases "$HELM_RELEASES" \
+  --arg imageRegistry gitea.claw.jopdorp.nl/cluster \
+  --arg registryPullSecret gitea-registry-push \
   '$current * {agentGroupId:$agentGroupId,matrixApproverUserId:$matrixApproverUserId,apiServer:$apiServer,
     executorOneCliAgent:$executorOneCliAgent,annotatorOneCliAgent:$annotatorOneCliAgent,
     falcoBearerFile:$falcoBearerFile,
     helmOneCliAgent:$helmOneCliAgent,breakGlassOneCliAgent:$breakGlassOneCliAgent,helmReleases:$helmReleases,
+    imageRegistry:$imageRegistry,registryPullSecret:$registryPullSecret,
     t1:(($current.t1 // []) + ["nextcloud","mail","gitea"] | unique)}' \
   | kubectl exec -i -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -c orchestrator -- \
       sh -c 'set -eu; umask 077; file=/opt/nanoclaw/data/kubernetes-remediation.json; cat > "$file.tmp"; mv "$file.tmp" "$file"'

@@ -470,7 +470,7 @@ export class GatewayRemediationExecutor {
     private readonly observer: RolloutObserver,
     private readonly helm?: HelmReleaseExecutor,
     private readonly breakGlass?: { client: KubernetesJsonClient; helm?: HelmReleaseExecutor },
-    private readonly build = { registry: 'registry.prophet.jopdorp.nl', pushSecret: 'registry-prophet' },
+    private readonly build = { registry: 'gitea.claw.jopdorp.nl/cluster', pushSecret: 'gitea-registry-push' },
   ) {}
 
   async execute(validated: ValidatedPlan, grant: ApprovalGrant) {
