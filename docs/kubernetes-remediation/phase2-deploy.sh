@@ -10,7 +10,7 @@ ORCHESTRATOR=nanoclaw-remediator-orchestrator
 SYNAPSE_NAMESPACE=openclaw-private
 SYNAPSE_SERVICE=matrix-synapse
 SYNAPSE_CONFIG=/data/homeserver.yaml
-REGISTRY=registry.prophet.jopdorp.nl/nanoclaw
+REGISTRY=${REGISTRY:-gitea.claw.jopdorp.nl/cluster/nanoclaw}
 BOT_LOCALPART=nanoclaw-remediator
 OWNER_MATRIX_ID=@jopdorp:matrix.org
 ROOM_LOCALPART=nanoclaw-remediation
@@ -215,7 +215,7 @@ fi
 HOST_IMAGE=$(repo_digest "$HOST_TAG" "$REGISTRY/remediation-host")
 
 sed -E -i \
-  "s#registry\.prophet\.jopdorp\.nl/nanoclaw/remediation-agent@sha256:[0-9a-f]{64}#$AGENT_IMAGE#g; s#registry\.prophet\.jopdorp\.nl/nanoclaw/remediation-host@sha256:[0-9a-f]{64}#$HOST_IMAGE#g" \
+  "s#[^[:space:]'\"]+/remediation-agent@sha256:[0-9a-f]{64}#$AGENT_IMAGE#g; s#[^[:space:]'\"]+/remediation-host@sha256:[0-9a-f]{64}#$HOST_IMAGE#g" \
   "$DOCS/in-cluster-runtime.review.yaml"
 grep -qF "$AGENT_IMAGE" "$DOCS/in-cluster-runtime.review.yaml" || fail 'agent digest update failed'
 grep -qF "$HOST_IMAGE" "$DOCS/in-cluster-runtime.review.yaml" || fail 'host digest update failed'
