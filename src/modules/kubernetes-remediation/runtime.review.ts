@@ -18,6 +18,7 @@ import {
   GatewayRemediationExecutor,
   KubernetesRolloutObserver,
   OneCliKubernetesClient,
+  registryThroughOneCli,
 } from './gateway-client.js';
 import { gitWithDeployKey, helmThroughOneCli, HelmReleaseExecutor, type HelmChart } from './helm-release.js';
 import { createFalcoWebhookHandler, runTrivyWatchers } from './triggers.js';
@@ -92,6 +93,7 @@ export async function startKubernetesRemediation(
     executor,
     helm,
     breakGlassHelm,
+    registry: registryThroughOneCli(config.executorOneCliAgent),
     t1: new Set(config.t1),
   });
   if (helm) {

@@ -31,7 +31,7 @@ NEVER (reject even if approved): deleting anything in ns backups or any Longhorn
 
 The two lists overlap on delete-storage; the host takes the stricter one, so every PV, PVC and Longhorn volume delete waits for approval.
 
-- Images are digest-pinned (`registry/repo:tag@sha256:...`, keep the tag so the version is visible) from `docker.io`, `ghcr.io`, `quay.io`, `registry.k8s.io`, `mirror.gcr.io`, `cr.fluentbit.io`, `lscr.io`, `docker.gitea.com` or `registry.prophet.jopdorp.nl`, and keep their repository. One plan may cover every container and init container running the same `before` image.
+- Images are digest-pinned (`registry/repo:tag@sha256:...`, keep the tag so the version is visible) from `docker.io`, `ghcr.io`, `quay.io`, `registry.k8s.io`, `mirror.gcr.io`, `cr.fluentbit.io`, `lscr.io`, `docker.gitea.com` or `registry.prophet.jopdorp.nl`, and keep their repository. The host resolves the tag at the registry and rejects the plan when the registry serves a different digest for it. One plan may cover every container and init container running the same `before` image.
 - vaultwarden's Helm release renders its Secrets, so vaultwarden never goes through Helm.
 - For example: a Trivy fix for `trivy-operator/trivy-host-scanner` or `openclaw-private/matrix-synapse` is a `patch-image`; `openclaw-private/news-site-rebuild` and the `backups` alpine CronJobs are a CronJob `patch-image`; fluent-bit is `helm-values` on `logging/fluent-bit`; cert-manager is a `patch-image` per Deployment; a stale Longhorn instance-manager is an approved `helm-values` on `longhorn-system/longhorn` (for example `defaultSettings.concurrentAutomaticEngineUpgradePerNodeLimit`).
 

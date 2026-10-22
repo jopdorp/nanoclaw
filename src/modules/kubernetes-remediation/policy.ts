@@ -196,7 +196,7 @@ export function classifyTarget(target: TargetRef): RemediationLane {
   return 'A';
 }
 
-function parseImage(image: string) {
+export function parseImage(image: string) {
   const at = image.indexOf('@');
   const name = at < 0 ? image : image.slice(0, at);
   const digest = at < 0 ? undefined : image.slice(at + 1);

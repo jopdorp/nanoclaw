@@ -5,6 +5,7 @@ import { notifyAgent, registerApprovalHandler, requestApproval } from '../approv
 import { pickApprovalDelivery } from '../approvals/primitive.js';
 import { isAutoApproved, validateRemediationPlan } from './policy.js';
 import type { HelmReleaseExecutor } from './helm-release.js';
+import { tagMatchesDigest, type RegistryFetch } from './registry.js';
 import { REMEDIATION_ACTION, type HelmValuesPlan, type RemediationExecutor, type ValidatedPlan } from './types.js';
 import type { Session } from '../../types.js';
 
@@ -128,17 +129,27 @@ export function registerKubernetesRemediationApproval(options: {
   executor: RemediationExecutor;
   helm?: HelmReleaseExecutor;
   breakGlassHelm?: HelmReleaseExecutor;
+  registry?: RegistryFetch;
   t1: ReadonlySet<string>;
 }): void {
   t1 = options.t1;
+  const verify = async (images: Array<string | undefined>) => {
+    for (const image of images) {
+      if (image && options.registry && (await tagMatchesDigest(image, options.registry)) === false)
+        throw new Error(`the registry serves a different digest for the tag of ${image}`);
+    }
+  };
   const prepare = async (content: Record<string, unknown>): Promise<Prepared> => {
     let validated = validateRemediationPlan(planInput(content));
-    if (validated.plan.operation.type !== 'helm-values') {
+    const { operation } = validated.plan;
+    if (operation.type !== 'helm-values') {
+      await verify(operation.type === 'patch-image' ? [operation.after] : []);
       return { validated, auto: isAutoApproved(validated, t1), diff: [] };
     }
     const helm = validated.lane === 'C' ? options.breakGlassHelm : options.helm;
     if (!helm) throw new Error('the Helm path is not configured');
     const binding = await helm.bind(validated.plan as HelmValuesPlan);
+    await verify(Object.values(binding.images).map((image) => image.after));
     validated = validateRemediationPlan(binding.plan);
     return { validated, auto: isAutoApproved(validated, t1, binding), diff: binding.diff };
   };

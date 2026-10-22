@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 
 import type { HelmReleaseExecutor } from './helm-release.js';
 import { canonicalImage } from './policy.js';
+import type { RegistryFetch } from './registry.js';
 import type {
   ApprovalGrant,
   ExecutionResult,
@@ -134,6 +135,36 @@ export class OneCliKubernetesClient implements KubernetesJsonClient {
     const code = await completion;
     if (code !== 0 && !signal.aborted) throw new Error(`Kubernetes gateway watch failed: ${stderr.trim() || code}`);
   }
+}
+
+/** Registry reads through the gateway; the identity's only token is scoped to the API server, so nothing is injected. */
+export function registryThroughOneCli(agent: string, onecli = 'onecli'): RegistryFetch {
+  return async (url, headers) => {
+    const args = ['run', '--agent', agent, '--', 'curl', '--silent', '--show-error', '--location'];
+    args.push('--max-time', '20', '--suppress-connect-headers', '--dump-header', '-');
+    for (const [name, value] of Object.entries(headers)) args.push('--header', `${name}: ${value}`);
+    const { stdout, code, stderr } = await run(onecli, [...args, url]);
+    if (code !== 0) throw new Error(`registry request failed: ${stderr.trim() || code}`);
+    // One header block per redirect; the last one belongs to the body.
+    let rest = stdout;
+    let block = '';
+    while (/^HTTP\/\S+ \d{3}/.test(rest)) {
+      const end = rest.search(/\r?\n\r?\n/);
+      block = end < 0 ? rest : rest.slice(0, end);
+      rest = end < 0 ? '' : rest.slice(end).replace(/^\r?\n\r?\n/, '');
+    }
+    const [statusLine, ...lines] = block.split(/\r?\n/);
+    return {
+      status: Number(statusLine?.split(' ')[1] ?? 0),
+      headers: Object.fromEntries(
+        lines.map((line) => [
+          line.slice(0, line.indexOf(':')).trim().toLowerCase(),
+          line.slice(line.indexOf(':') + 1).trim(),
+        ]),
+      ),
+      body: rest,
+    };
+  };
 }
 
 const WORKLOAD_COLLECTIONS: Partial<Record<RemediationPlan['target']['kind'], [string, string]>> = {
