@@ -238,7 +238,7 @@ spec:
   validations:
     - expression: request.resource.resource != 'persistentvolumeclaims' || request.namespace != 'backups'
       message: PVC deletion is forbidden in namespace backups
-    - expression: request.resource.resource != 'persistentvolumes' || !has(oldObject.spec.claimRef) || oldObject.spec.claimRef.namespace != 'backups'
+    - expression: request.resource.resource != 'persistentvolumes' || !has(dyn(oldObject).spec.claimRef) || dyn(oldObject).spec.claimRef.namespace != 'backups'
       message: PV deletion is forbidden for volumes claimed from namespace backups
     - expression: >-
         has(oldObject.metadata.annotations) &&

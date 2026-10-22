@@ -36,6 +36,16 @@ ncl() {
   kubectl exec -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -- env HOME=/tmp node_modules/.bin/tsx src/cli/client.ts "$@"
 }
 
+ensure_patch_lines() {
+  local patch=$1 file= line
+  while IFS= read -r line; do
+    case "$line" in
+      '+++ b/'*) file=${line#+++ b/} ;;
+      '+++'*|'---'*) ;;
+      '+'*) line=${line#+}; grep -qxF -- "$line" "$file" || printf '%s\n' "$line" >>"$file" ;;
+    esac
+  done <"$patch"
+}
 apply_patch_once() {
   local patch=$1
   if git apply --reverse --check "$patch" >/dev/null 2>&1; then
@@ -113,7 +123,7 @@ for file in \
   grep -qxF "import './claude-remediation.review.js';" "$file" \
     || printf "import './claude-remediation.review.js';\n" >>"$file"
 done
-apply_patch_once "$DOCS/enable-remediation-review.patch"
+ensure_patch_lines "$DOCS/enable-remediation-review.patch"
 pnpm run build
 node --input-type=module -e 'await import("@beeper/chat-adapter-matrix")'
 pnpm exec vitest run src/channels/matrix-registration.test.ts
