@@ -25,8 +25,8 @@ import {
   categorizeMessage,
   FAILURE_NOTICE_FIELD,
   GENERIC_FAILURE_NOTICE,
+  interruptSender,
   isClearCommand,
-  isHumanChat,
   isRunnerCommand,
   isSessionEcho,
   stripInternalTags,
@@ -42,10 +42,9 @@ const ACTIVE_POLL_INTERVAL_MS = 500;
 
 /** Consecutive driver-classified failures before a fresh runner is required. */
 const MAILBOX_FAILURE_STREAK_EXIT = 10;
-// Human messages that interrupted a turn; their prompt gets INTERRUPT_PREFIX.
-const interruptedBy = new Set<string>();
-const INTERRUPT_PREFIX =
-  '[Jegor wrote this while you were mid-task. Answer him first in one or two lines, then continue the task where you left off.]';
+// Messages that interrupted a turn, keyed to the human or creator steering it.
+const interruptedBy = new Map<string, string>();
+const STEER_CONTINUATION = 'Continue the task you were on, taking this into account; do not restart from scratch.';
 
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
@@ -241,10 +240,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const resumed = keep.filter((m) => interruptedBy.delete(m.id)).length > 0;
-    const prompt =
-      (resumed ? `${INTERRUPT_PREFIX}\n` : '') +
-      formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
+    const sender = keep.map((m) => interruptedBy.get(m.id)).find((value) => value !== undefined);
+    keep.forEach((m) => interruptedBy.delete(m.id));
+    const formatted = formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
+    const prompt = sender ? `[steer from ${sender}] ${formatted}\n${STEER_CONTINUATION}` : formatted;
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
@@ -499,11 +498,16 @@ export async function processQuery(
         }
 
         // A pushed follow-up waits for the whole tool-call chain to finish, so a
-        // human mid-turn aborts it; the outer loop resumes the session with their message.
-        const human = answering ? pending.filter(isHumanChat) : [];
-        if (human.length > 0) {
-          log('Human message mid-turn — interrupting so the outer loop answers it first');
-          human.forEach((m) => interruptedBy.add(m.id));
+        // human or creator steer aborts it; the outer loop resumes the same session.
+        const interrupts = answering
+          ? pending.flatMap((message) => {
+              const sender = interruptSender(message);
+              return sender ? [{ message, sender }] : [];
+            })
+          : [];
+        if (interrupts.length > 0) {
+          log('Steer message mid-turn — interrupting so the outer loop can process it');
+          interrupts.forEach(({ message, sender }) => interruptedBy.set(message.id, sender));
           endedForCommand = true;
           query.abort();
           return;

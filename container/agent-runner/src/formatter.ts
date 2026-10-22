@@ -1,4 +1,4 @@
-import { findByRouting } from './destinations.js';
+import { findByRouting, getAllDestinations } from './destinations.js';
 import type { MessageInRow } from './db/messages-in.js';
 import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
 import './providers/index.js';
@@ -158,6 +158,20 @@ export function isHumanChat(msg: MessageInRow): boolean {
   const content = parseContent(msg.content);
   const senderId = extractSenderId(msg, content);
   return !!senderId && !senderId.startsWith('cli:') && content?.author?.isBot !== true;
+}
+
+/** The human or creator whose message may interrupt the active turn. */
+export function interruptSender(msg: MessageInRow): string | null {
+  if (isHumanChat(msg)) return 'Jegor';
+  if ((msg.kind !== 'chat' && msg.kind !== 'chat-sdk') || msg.trigger !== 1 || msg.channel_type !== 'agent') return null;
+  if (isFailureNotice(msg)) return null;
+  const creator = getAllDestinations().find(
+    (destination) =>
+      destination.type === 'agent' &&
+      destination.agentGroupId === msg.platform_id &&
+      /^parent(?:-\d+)?$/.test(destination.name),
+  );
+  return creator?.displayName ?? null;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

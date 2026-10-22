@@ -26,14 +26,23 @@ function insertMessage(
   id: string,
   kind: string,
   content: object,
-  opts?: { processAfter?: string; trigger?: 0 | 1; onWake?: 0 | 1 },
+  opts?: { processAfter?: string; trigger?: 0 | 1; onWake?: 0 | 1; channelType?: string; platformId?: string },
 ) {
   getInboundDb()
     .prepare(
-      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, on_wake, content)
-     VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?)`,
+      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, on_wake, channel_type, platform_id, content)
+     VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, kind, opts?.processAfter ?? null, opts?.trigger ?? 1, opts?.onWake ?? 0, JSON.stringify(content));
+    .run(
+      id,
+      kind,
+      opts?.processAfter ?? null,
+      opts?.trigger ?? 1,
+      opts?.onWake ?? 0,
+      opts?.channelType ?? null,
+      opts?.platformId ?? null,
+      JSON.stringify(content),
+    );
 }
 
 describe('formatter', () => {
@@ -467,6 +476,21 @@ it('a human message mid-turn aborts the turn instead of being pushed', async () 
   await processQuery(query, ERR_ROUTING, [], 'claude', undefined, 'prompt', undefined);
   expect([pushes.length, aborted]).toEqual([0, true]);
   expect(getPendingMessages().map((m) => m.id)).toEqual(['m1']);
+});
+
+it('a creator steers an active turn while a peer only pushes', async () => {
+  getInboundDb().exec(`INSERT INTO destinations VALUES ('parent', 'Orfie', 'agent', NULL, NULL, 'ag-creator'), ('peer', 'Peer', 'agent', NULL, NULL, 'ag-peer');`);
+  const pushes: string[] = [];
+  let aborted = false;
+  async function* events(): AsyncGenerator<ProviderEvent> {
+    yield { type: 'init', continuation: 'sess-1' };
+    insertMessage('peer', 'chat', { sender: 'Peer', text: 'fyi' }, { channelType: 'agent', platformId: 'ag-peer' });
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    insertMessage('creator', 'chat', { sender: 'Orfie', text: 'change course' }, { channelType: 'agent', platformId: 'ag-creator' });
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
+  await processQuery({ push: (m) => pushes.push(m), end: () => {}, events: events(), abort: () => (aborted = true) }, ERR_ROUTING, [], 'claude', undefined, 'prompt', undefined);
+  expect([pushes.length, aborted, getPendingMessages().map((m) => m.id)]).toEqual([1, true, ['creator']]);
 });
 
 describe('error result with no <message> envelope', () => {
