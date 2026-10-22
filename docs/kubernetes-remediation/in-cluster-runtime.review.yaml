@@ -86,7 +86,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       initContainers:
         - name: state-layout
-          image: registry.prophet.jopdorp.nl/nanoclaw/remediation-host@sha256:1bdf13d4a16ec2203affa320610e16c92c031f8b2c0a00c297f791b20fa9f975
+          image: registry.prophet.jopdorp.nl/nanoclaw/remediation-host@sha256:f80ec355ada1f9ee0f2be536e1db696c2b9e8e6b3b37a7b35d5066fdcab2c3aa
           # fsGroup makes the volume 2770; OneCLI refuses anything but 0700 for its staged files.
           command: [sh, -c]
           args: [mkdir -p /state/data/onecli /state/groups /state/store && chmod 0700 /state/data/onecli]
@@ -98,7 +98,7 @@ spec:
             - { name: state, mountPath: /state }
         # This deploy is our sanctioned upgrade path, so it stamps the upgrade tripwire marker.
         - name: upgrade-state
-          image: registry.prophet.jopdorp.nl/nanoclaw/remediation-host@sha256:1bdf13d4a16ec2203affa320610e16c92c031f8b2c0a00c297f791b20fa9f975
+          image: registry.prophet.jopdorp.nl/nanoclaw/remediation-host@sha256:f80ec355ada1f9ee0f2be536e1db696c2b9e8e6b3b37a7b35d5066fdcab2c3aa
           command: [node, --input-type=module, -e]
           args: ["(await import('/opt/nanoclaw/dist/upgrade-state.js')).writeUpgradeState({ via: 'orfie-deploy' })"]
           workingDir: /opt/nanoclaw
@@ -111,7 +111,7 @@ spec:
             - { name: tmp, mountPath: /tmp }
       containers:
         - name: orchestrator
-          image: registry.prophet.jopdorp.nl/nanoclaw/remediation-host@sha256:1bdf13d4a16ec2203affa320610e16c92c031f8b2c0a00c297f791b20fa9f975
+          image: registry.prophet.jopdorp.nl/nanoclaw/remediation-host@sha256:f80ec355ada1f9ee0f2be536e1db696c2b9e8e6b3b37a7b35d5066fdcab2c3aa
           imagePullPolicy: IfNotPresent
           command: [node]
           args: [/opt/nanoclaw/dist/index.js]
@@ -119,7 +119,7 @@ spec:
           env:
             - { name: HOME, value: /home/node }
             - { name: NANOCLAW_RUNTIME_DRIVER, value: kubernetes }
-            - { name: CONTAINER_IMAGE, value: 'registry.prophet.jopdorp.nl/nanoclaw/remediation-agent@sha256:27af54e3be994147df5ce061b726b2743b74196d2a791e3ecc3e44c09c56a02a' }
+            - { name: CONTAINER_IMAGE, value: 'registry.prophet.jopdorp.nl/nanoclaw/remediation-agent@sha256:434f650288a02d27a6fc76ed023b97f7ace6f1d7c8fec8cf12847c2d15d99c5c' }
             - { name: NANOCLAW_KUBERNETES_NAMESPACE, value: nanoclaw-remediator }
             - { name: NANOCLAW_KUBERNETES_SERVICE_ACCOUNT, value: nanoclaw-session }
             # RWO state volume: sessions co-locate with the host. Drop with an RWX state class.
