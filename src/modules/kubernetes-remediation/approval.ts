@@ -3,7 +3,7 @@ import { ALLOW, DENY, HOLD, defineGuardedAction, type GuardInput } from '../../g
 import { log } from '../../log.js';
 import { notifyAgent, registerApprovalHandler, requestApproval } from '../approvals/index.js';
 import { pickApprovalDelivery } from '../approvals/primitive.js';
-import { isAutoApproved, validateRemediationPlan } from './policy.js';
+import { checkImageUpdate, isAutoApproved, validateRemediationPlan } from './policy.js';
 import type { HelmReleaseExecutor } from './helm-release.js';
 import { tagMatchesDigest, type RegistryFetch } from './registry.js';
 import {
@@ -191,6 +191,9 @@ export function registerKubernetesRemediationApproval(options: {
         };
       }
       const binding = await repo.bind(validated.plan as HelmValuesPlan);
+      // What the chart composes from the edited values, which is what the cluster will run.
+      for (const { before, after } of Object.values(binding.images))
+        checkImageUpdate(before ?? after ?? '', after ?? '');
       await verify(Object.values(binding.images).map((image) => image.after));
       validated = validateRemediationPlan(binding.plan);
       return {

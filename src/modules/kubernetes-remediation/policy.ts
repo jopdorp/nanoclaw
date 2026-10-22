@@ -39,7 +39,7 @@ const DIGEST_IMAGE_RE =
 const TAG_RE = /^\w[\w.-]{0,127}$/;
 const CHART_REPO_RE = /^(?:https|oci):\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[\w.~%-]+)*\/?$/;
 const VALUES_PATH_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
-const IMAGE_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest)$/;
+const IMAGE_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest|sha)$/;
 // Only the chart's own top-level key; nested ones usually size a subchart's database StatefulSet.
 const REPLICA_KEY_RE = /^(replicas|replicaCount)$/;
 const PINNED_RE = /^(?:\w[\w.-]{0,127}@)?sha256:[0-9a-f]{64}$/;
@@ -373,7 +373,7 @@ export function parseImage(image: string) {
   return { registry, repository, tag, digest };
 }
 
-function checkImageUpdate(beforeImage: string, afterImage: string): void {
+export function checkImageUpdate(beforeImage: string, afterImage: string): void {
   const before = parseImage(beforeImage);
   const after = parseImage(afterImage);
   if (
@@ -452,14 +452,28 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     if (plan.target.kind !== 'Job') throw new Error('delete-job requires a Job');
   } else if (plan.operation.type === 'helm-values') {
     if (plan.target.kind !== 'Secret') throw new Error('helm-values requires a Helm release');
+    // Charts pin in different shapes: tag@sha256, a sibling digest or sha key, or repository@sha256.
+    const planned = new Map(plan.operation.set.map((edit) => [edit.path, edit.after]));
     for (const { path, before, after } of plan.operation.set) {
       const key = IMAGE_KEY_RE.exec(path)?.[1];
       if (!key) continue;
-      if (key === 'repository' || key === 'registry') throw new Error(`${path}: image repository may not change`);
-      if (typeof after !== 'string' || (key === 'image' ? typeof before !== 'string' : !PINNED_RE.test(after))) {
-        throw new Error(`${path} must pin a sha256 digest of the same image repository`);
-      }
-      if (key === 'image') checkImageUpdate(before as string, after);
+      const parent = path.slice(0, -key.length);
+      const siblingPin = ['digest', 'sha'].some((k) => PINNED_RE.test(String(planned.get(`${parent}${k}`) ?? '')));
+      const sameRepository =
+        typeof before === 'string' && typeof after === 'string' && before.split('@')[0] === after.split('@')[0];
+      if (key === 'registry') throw new Error(`${path}: image registry may not change`);
+      if (key === 'image') {
+        if (typeof before !== 'string' || typeof after !== 'string')
+          throw new Error(`${path} must be an image reference`);
+        checkImageUpdate(before, after);
+      } else if (
+        key === 'repository'
+          ? !sameRepository || !/@sha256:[0-9a-f]{64}$/.test(String(after))
+          : typeof after !== 'string' || !(PINNED_RE.test(after) || (key === 'tag' && siblingPin))
+      )
+        throw new Error(
+          `${path} must pin a sha256 digest of the same image repository, in the tag or a sibling digest key`,
+        );
     }
   } else if (['helm-sync-values', 'helm-install', 'helm-uninstall'].includes(plan.operation.type)) {
     if (plan.target.kind !== 'Secret' || !namespace || !RELEASE_NAME_RE.test(name))
@@ -573,12 +587,15 @@ export function isAutoApproved(
   if (operation.type === 'patch-image')
     return sameVersionLine(parseImage(operation.before).tag, parseImage(operation.after).tag, critical);
   if (operation.type !== 'helm-values' || !helm) return false;
-  return operation.set.every(({ path }) => {
-    // Which workload a replica key sizes is chart-specific, so a release with a StatefulSet asks.
-    if (REPLICA_KEY_RE.test(path)) return !critical && !helm.hasStatefulSet;
-    const image = IMAGE_KEY_RE.test(path) ? helm.images[path] : undefined;
-    if (!image?.after) return false;
-    const strict = critical || helm.statefulRepositories.includes(imageRepository(image.after));
-    return sameVersionLine(parseImage(image.before ?? '').tag, parseImage(image.after).tag, strict);
-  });
+  // Which workload a replica key sizes is chart-specific, so a release with a StatefulSet asks.
+  const edits = operation.set.every(({ path }) =>
+    REPLICA_KEY_RE.test(path) ? !critical && !helm.hasStatefulSet : IMAGE_KEY_RE.test(path),
+  );
+  return (
+    edits &&
+    Object.values(helm.images).every(({ before, after }) => {
+      const strict = critical || helm.statefulRepositories.includes(imageRepository(after ?? ''));
+      return !!after && !!before && sameVersionLine(parseImage(before).tag, parseImage(after).tag, strict);
+    })
+  );
 }

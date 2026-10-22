@@ -196,6 +196,18 @@ describe('Kubernetes remediation policy', () => {
     );
   });
 
+  it('a plain image tag is pinned by a sibling digest edit in the same plan', () => {
+    const plan = (set: unknown[]) => ({
+      ...base(),
+      target: { apiVersion: 'v1', kind: 'Secret', namespace: 'gitea', name: 'gitea', uid: '-', resourceVersion: '-' },
+      operation: { type: 'helm-values', file: 'kubernetes/helm-charts/gitea-values.yaml', set },
+    });
+    const tag = { path: 'image.tag', before: '1.27.0', after: '1.27.3' };
+    const digest = { path: 'image.digest', before: `sha256:${'b'.repeat(64)}`, after: `sha256:${'a'.repeat(64)}` };
+    expect(validateRemediationPlan(plan([tag, digest]), now).lane).toBe('A');
+    expect(() => validateRemediationPlan(plan([tag]), now)).toThrow('must pin a sha256 digest');
+  });
+
   it('repo-write refuses inline credentials but passes Secret references', () => {
     const write = (content: string) => ({
       ...base(),

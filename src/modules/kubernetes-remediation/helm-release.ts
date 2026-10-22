@@ -114,35 +114,23 @@ function valueAt(values: Values, dotted: string): unknown {
   return dotted.split('.').reduce<unknown>((node, key) => (node as Values | undefined)?.[key], values);
 }
 
-/** Full image references for each image-key edit, assembled from the edit and its repository/registry/tag/digest siblings. */
-function imageEdits(values: Values, set: HelmValuesPlan['operation']['set']): HelmBinding['images'] {
-  const images: HelmBinding['images'] = {};
-  const planned = new Map(set.map((edit) => [edit.path, edit.after]));
-  for (const { path: dotted, before, after } of set) {
-    const key = /(?:^|\.)(image|tag|digest)$/.exec(dotted)?.[1];
-    if (key === 'image') {
-      images[dotted] = { before: before === null ? undefined : String(before), after: String(after) };
-      continue;
-    }
-    if (!key) continue;
-    const parent = dotted.slice(0, -key.length);
-    const repository = valueAt(values, `${parent}repository`);
-    if (typeof repository !== 'string') continue;
-    const registry = valueAt(values, `${parent}registry`);
-    const ref = (side: 'before' | 'after') => {
-      const pick = (leaf: string) => {
-        const value =
-          side === 'after' && planned.has(`${parent}${leaf}`)
-            ? planned.get(`${parent}${leaf}`)
-            : valueAt(values, `${parent}${leaf}`);
-        return value === undefined || value === null || value === '' ? '' : String(value);
-      };
-      const [tag, digest] = [pick('tag'), pick('digest').replace(/^@/, '')];
-      return `${typeof registry === 'string' && registry ? `${registry}/` : ''}${repository}${tag ? `:${tag}` : ''}${digest && !tag.includes('@') ? `@${digest}` : ''}`;
-    };
-    images[dotted] = { before: ref('before'), after: ref('after') };
+/** Container images of a rendered or installed manifest, keyed `<kind>/<name>/<container>`. */
+function manifestImages(objects: Values[]): Map<string, string> {
+  const images = new Map<string, string>();
+  for (const object of objects) {
+    const spec = object.spec as Workload['spec'] & { jobTemplate?: { spec?: Workload['spec'] } };
+    const pod = spec?.template?.spec ?? spec?.jobTemplate?.spec?.template?.spec;
+    const name = (object.metadata as { name?: string } | undefined)?.name;
+    for (const c of [...(pod?.containers ?? []), ...(pod?.initContainers ?? [])])
+      images.set(`${String(object.kind)}/${name}/${c.name}`, c.image ?? '');
   }
   return images;
+}
+
+function objects(manifest: string): Values[] {
+  return parseAllDocuments(manifest)
+    .map((doc) => doc.toJS() as Values | null)
+    .filter((object): object is Values => !!object?.kind);
 }
 
 /** What the API server owns or derives; never part of a manifest or a drift comparison. */
@@ -586,25 +574,30 @@ export class HelmReleaseExecutor {
     const text = await this.unchangedFromLive(plan);
     const live = parseValues(text);
     const edited = editValues(text, plan.operation.set);
-    const stateful = parseAllDocuments(await this.options.helm(['get', 'manifest', release, '-n', ns]))
-      .map((doc) => doc.toJS() as { kind?: string; spec?: Workload['spec'] } | null)
-      .filter((object): object is { kind: string; spec?: Workload['spec'] } => object?.kind === 'StatefulSet');
+    const installed = objects(await this.options.helm(['get', 'manifest', release, '-n', ns]));
+    const rendered = await this.render(release, ns, chart, metadata.version, edited);
+    const [before, after] = [manifestImages(installed), manifestImages(rendered)];
+    const stateful = installed.filter((object) => object.kind === 'StatefulSet') as Array<{ spec?: Workload['spec'] }>;
     return {
       plan: { ...plan, target: { ...plan.target, ...anchor } },
       diff: valuesDiff(live, parseValues(edited)),
-      images: imageEdits(live, plan.operation.set),
+      images: Object.fromEntries(
+        [...after]
+          .filter(([key, image]) => before.get(key) !== image)
+          .map(([key, image]) => [key, { before: before.get(key), after: image }]),
+      ),
       statefulRepositories: stateful.flatMap(({ spec }) =>
         [...(spec?.template?.spec?.containers ?? []), ...(spec?.template?.spec?.initContainers ?? [])].map((c) =>
           imageRepository(c.image ?? ''),
         ),
       ),
       hasStatefulSet: stateful.length > 0,
-      unchanged: await this.rendersLive(release, ns, chart, metadata.version, edited),
+      unchanged: await this.matchesLive(rendered, ns),
     };
   }
 
-  /** true when the chart rendered with these values leaves every live object as it is. */
-  private async rendersLive(release: string, ns: string, chart: HelmChart, version: string, values: string) {
+  /** The release's objects as Helm would apply them with these values. */
+  private async render(release: string, ns: string, chart: HelmChart, version: string, values: string) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orfie-values-'));
     fs.writeFileSync(path.join(dir, 'values.yaml'), values);
     try {
@@ -624,11 +617,18 @@ export class HelmReleaseExecutor {
           'json',
         ]),
       ) as { manifest?: string };
-      let compared = 0;
-      for (const doc of parseAllDocuments(manifest)) {
-        const object = doc.toJS() as Values | null;
-        if (!object?.kind) continue;
-        compared++;
+      return objects(manifest);
+    } catch (error) {
+      throw new Error(`helm cannot render the edited values: ${reason(error)}`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** true when applying these objects leaves every live object as it is. */
+  private async matchesLive(rendered: Values[], ns: string): Promise<boolean> {
+    try {
+      for (const object of rendered) {
         const { name = '', namespace = ns } = (object.metadata as { name?: string; namespace?: string }) ?? {};
         const objectPath = await this.objectPath({
           apiVersion: String(object.apiVersion),
@@ -646,12 +646,10 @@ export class HelmReleaseExecutor {
         );
         if (valuesDiff(declared(live), declared(dry)).length) return false;
       }
-      return compared > 0;
+      return rendered.length > 0;
       // eslint-disable-next-line no-catch-all/no-catch-all -- anything it cannot prove unchanged counts as a change
     } catch {
       return false;
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
     }
   }
 
