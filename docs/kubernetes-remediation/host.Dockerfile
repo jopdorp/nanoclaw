@@ -26,6 +26,12 @@ RUN curl -fsSL -o /tmp/onecli.tar.gz https://github.com/onecli/onecli-cli/releas
     && echo 'bd51bfbaed90d03081370d50b3733aa6b20790860a478191c216ac68b54d6495  /tmp/onecli.tar.gz' | sha256sum -c - \
     && tar -xzf /tmp/onecli.tar.gz -C /usr/local/bin onecli \
     && rm /tmp/onecli.tar.gz
+# helm-values plans push to k8s.jegor.nl over SSH and run helm upgrade.
+RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL -o /tmp/helm.tar.gz https://get.helm.sh/helm-v4.3.1-linux-amd64.tar.gz \
+    && echo '0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b  /tmp/helm.tar.gz' | sha256sum -c - \
+    && tar -xzf /tmp/helm.tar.gz -C /usr/local/bin --strip-components=1 linux-amd64/helm \
+    && rm /tmp/helm.tar.gz
 WORKDIR /opt/nanoclaw
 COPY --from=build /opt/nanoclaw/node_modules ./node_modules
 COPY --from=build /opt/nanoclaw/dist ./dist

@@ -273,6 +273,51 @@ metadata:
 spec:
   policyName: nanoclaw-remediator-job-delete-guard
   validationActions: [Deny, Audit]
+---
+# helm upgrade renders whole charts, so the workload-guard freezes above cannot
+# apply to the nanoclaw-helm identity. Its workload writes keep the namespace
+# allowlist and the digest-only rule for every new or changed image.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-helm-workload-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [deployments, statefulsets, daemonsets]
+        scope: Namespaced
+  matchConditions:
+    - name: helm-service-account
+      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-helm'
+  variables:
+    - name: newImages
+      expression: >-
+        object.spec.template.spec.containers.map(c, c.image) +
+        (has(object.spec.template.spec.initContainers) ? object.spec.template.spec.initContainers.map(c, c.image) : [])
+    - name: oldImages
+      expression: >-
+        oldObject == null ? [] : oldObject.spec.template.spec.containers.map(c, c.image) +
+        (has(oldObject.spec.template.spec.initContainers) ? oldObject.spec.template.spec.initContainers.map(c, c.image) : [])
+    - name: pinnedImagePattern
+      expression: "'^((docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io)/)?[a-z0-9]+([_-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
+  validations:
+    - expression: request.namespace in ['gitea', 'nextcloud', 'logging', 'excalidraw', 'trivy-operator', 'wiki-js']
+      message: the Helm path writes only the allowlisted release namespaces
+    - expression: variables.newImages.all(i, i in variables.oldImages || i.matches(variables.pinnedImagePattern))
+      message: a new or changed image from the Helm path must come from a trusted registry pinned by sha256 digest
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-helm-workload-guard
+spec:
+  policyName: nanoclaw-helm-workload-guard
+  validationActions: [Deny, Audit]
 
 # PSA inventory, read-only inspection on 2026-10-21:
 # - restricted enforce is set only on nanoclaw-remediator in home-k3s-rbac.yaml.

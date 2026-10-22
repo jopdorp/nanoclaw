@@ -247,6 +247,16 @@ printf '%s\n' 'stored and assigned both Kubernetes credentials; values were not 
 printf '%s\n' 'WARNING: these TokenRequest credentials expire after one hour; production still requires the reviewed refresher.'
 
 step '5/6 write the approval-required runtime config atomically into the state PVC'
+# Releases whose live values equal their k8s.jegor.nl file. mail/docker-mailserver and logging/vlogs
+# have drifted from their files, and hermes is a local chart, so they stay off the Helm path.
+HELM_RELEASES='{
+  "gitea/gitea": {"chart": "gitea", "repo": "https://dl.gitea.com/charts/", "file": "kubernetes/helm-charts/gitea-values.yaml"},
+  "nextcloud/nextcloud": {"chart": "nextcloud", "repo": "https://nextcloud.github.io/helm/", "file": "kubernetes/helm-charts/nextcloud-values.yaml"},
+  "logging/fluent-bit": {"chart": "fluent-bit", "repo": "https://fluent.github.io/helm-charts", "file": "kubernetes/helm-charts/fluent-bit-values.yaml"},
+  "excalidraw/excalidraw": {"chart": "excalidraw", "repo": "https://pmoscode-helm.github.io/excalidraw/", "file": "kubernetes/helm-charts/excalidraw-values.yaml"},
+  "trivy-operator/trivy-operator": {"chart": "trivy-operator", "repo": "https://aquasecurity.github.io/helm-charts/", "file": "kubernetes/helm-charts/trivy-operator-values.yaml"},
+  "wiki-js/wiki-js": {"chart": "wiki", "repo": "https://charts.js.wiki", "file": "kubernetes/helm-charts/wiki-js-values.yaml"}
+}'
 jq -n \
   --arg agentGroupId "$ORCHESTRATOR_GROUP" \
   --arg matrixApproverUserId "$APPROVER" \
@@ -254,9 +264,11 @@ jq -n \
   --arg executorOneCliAgent "$EXECUTOR" \
   --arg annotatorOneCliAgent "$ANNOTATOR" \
   --arg falcoBearerFile /run/nanoclaw/falco/bearer \
+  --argjson helmReleases "$HELM_RELEASES" \
   '{agentGroupId:$agentGroupId,matrixApproverUserId:$matrixApproverUserId,apiServer:$apiServer,
     executorOneCliAgent:$executorOneCliAgent,annotatorOneCliAgent:$annotatorOneCliAgent,
-    falcoBearerFile:$falcoBearerFile,approvalRequired:true}' \
+    falcoBearerFile:$falcoBearerFile,approvalRequired:true,
+    helmOneCliAgent:"nanoclaw-helm",helmReleases:$helmReleases}' \
   | kubectl exec -i -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -c orchestrator -- \
       sh -c 'set -eu; umask 077; file=/opt/nanoclaw/data/kubernetes-remediation.json; cat > "$file.tmp"; mv "$file.tmp" "$file"'
 kubectl exec -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -c orchestrator -- \

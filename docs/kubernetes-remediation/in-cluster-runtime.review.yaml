@@ -159,6 +159,7 @@ spec:
             - { name: tmp, mountPath: /tmp }
             - { name: onecli-home, mountPath: /home/node/.onecli }
             - { name: falco-bearer, mountPath: /run/nanoclaw/falco, readOnly: true }
+            - { name: git-deploy-key, mountPath: /run/nanoclaw/git, readOnly: true }
             # Channel adapters read creds from /opt/nanoclaw/.env, not process env.
             - { name: dotenv, mountPath: /opt/nanoclaw/.env, subPath: .env, readOnly: true }
           resources:
@@ -179,6 +180,9 @@ spec:
             secretName: nanoclaw-runtime
             items:
               - { key: falco-webhook-bearer, path: bearer }
+        # 0400 plus fsGroup reads as 0440 root:1000; ssh accepts that because node does not own the key.
+        - name: git-deploy-key
+          secret: { secretName: orfie-git-deploy-key, defaultMode: 256 }
 ---
 apiVersion: v1
 kind: Service

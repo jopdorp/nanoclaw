@@ -488,3 +488,127 @@ metadata:
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-remediator-trivy-read }
 subjects:
   - { kind: ServiceAccount, name: nanoclaw-remediator, namespace: nanoclaw-remediator }
+---
+# Helm path. Only the host's helm-values executor holds this identity (OneCLI
+# agent nanoclaw-helm); the agent never does. Bound only in the namespaces of
+# the allowlisted releases. It may write what those charts render, but never
+# deletes a PVC or writes RBAC or cluster-scoped objects; a values change that
+# needs those fails and rolls back.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nanoclaw-helm
+  namespace: nanoclaw-remediator
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/service-account-token
+metadata:
+  name: nanoclaw-helm-token
+  namespace: nanoclaw-remediator
+  annotations:
+    kubernetes.io/service-account.name: nanoclaw-helm
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nanoclaw-helm-cluster-read
+rules:
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles, clusterrolebindings]
+    verbs: [get]
+  - apiGroups: [aquasecurity.github.io]
+    resources: [clustercompliancereports]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nanoclaw-helm-cluster-read
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-helm-cluster-read }
+subjects:
+  - { kind: ServiceAccount, name: nanoclaw-helm, namespace: nanoclaw-remediator }
+---
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata: { name: nanoclaw-helm-release, namespace: gitea }
+    rules: &helm-release-rules
+      - apiGroups: [""]
+        resources: [configmaps, secrets, services, serviceaccounts]
+        verbs: [get, list, watch, create, update, patch, delete]
+      - apiGroups: [""]
+        resources: [persistentvolumeclaims]
+        verbs: [get, list, watch, create, update, patch]
+      - apiGroups: [""]
+        resources: [pods, events]
+        verbs: [get, list, watch]
+      - apiGroups: [apps]
+        resources: [deployments, statefulsets, daemonsets]
+        verbs: [get, list, watch, create, update, patch]
+      - apiGroups: [apps]
+        resources: [replicasets, controllerrevisions]
+        verbs: [get, list, watch]
+      - apiGroups: [networking.k8s.io]
+        resources: [ingresses, networkpolicies]
+        verbs: [get, list, watch, create, update, patch, delete]
+      - apiGroups: [policy]
+        resources: [poddisruptionbudgets]
+        verbs: [get, list, watch, create, update, patch, delete]
+      - apiGroups: [rbac.authorization.k8s.io]
+        resources: [roles, rolebindings]
+        verbs: [get, list, watch]
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata: { name: nanoclaw-helm-release, namespace: nextcloud }
+    rules: *helm-release-rules
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata: { name: nanoclaw-helm-release, namespace: logging }
+    rules: *helm-release-rules
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata: { name: nanoclaw-helm-release, namespace: excalidraw }
+    rules: *helm-release-rules
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata: { name: nanoclaw-helm-release, namespace: trivy-operator }
+    rules: *helm-release-rules
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata: { name: nanoclaw-helm-release, namespace: wiki-js }
+    rules: *helm-release-rules
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: { name: nanoclaw-helm-release, namespace: gitea }
+    roleRef: &helm-release-role { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-helm-release }
+    subjects: &helm-subject
+      - { kind: ServiceAccount, name: nanoclaw-helm, namespace: nanoclaw-remediator }
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: { name: nanoclaw-helm-release, namespace: nextcloud }
+    roleRef: *helm-release-role
+    subjects: *helm-subject
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: { name: nanoclaw-helm-release, namespace: logging }
+    roleRef: *helm-release-role
+    subjects: *helm-subject
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: { name: nanoclaw-helm-release, namespace: excalidraw }
+    roleRef: *helm-release-role
+    subjects: *helm-subject
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: { name: nanoclaw-helm-release, namespace: trivy-operator }
+    roleRef: *helm-release-role
+    subjects: *helm-subject
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: { name: nanoclaw-helm-release, namespace: wiki-js }
+    roleRef: *helm-release-role
+    subjects: *helm-subject
