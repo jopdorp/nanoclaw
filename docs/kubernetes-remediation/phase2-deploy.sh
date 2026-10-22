@@ -64,6 +64,62 @@ repo_digest() {
   printf '%s' "$digest"
 }
 
+prune_registry_tags() (
+  local host=${REGISTRY%%/*} namespace=${REGISTRY#*/} auth repo image current tag digest config created
+  local work="$TMP_DIR/registry-prune" headers manifest blob tags rows keep_file delete_file count
+  auth=$(jq -er --arg host "$host" '.auths[$host].auth // .auths["https://" + $host].auth // empty' ~/.docker/config.json)
+  auth=$(printf '%s' "$auth" | base64 -d)
+  mkdir -p "$work"
+
+  for entry in "remediation-agent $AGENT_IMAGE" "remediation-host $HOST_IMAGE"; do
+    read -r repo image <<<"$entry"
+    current=${image##*@}
+    rows="$work/$repo.rows"
+    tags="$work/$repo.tags"
+    keep_file="$work/$repo.keep"
+    delete_file="$work/$repo.delete"
+    : >"$rows"
+    curl -fsS -u "$auth" "https://$host/v2/$namespace/$repo/tags/list" >"$tags" || return 1
+    while IFS= read -r tag; do
+      headers="$work/$repo.headers"
+      manifest="$work/$repo.manifest"
+      blob="$work/$repo.blob"
+      curl -fsS -u "$auth" -I \
+        -H 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json' \
+        "https://$host/v2/$namespace/$repo/manifests/$tag" >"$headers" || return 1
+      digest=$(awk 'BEGIN { IGNORECASE=1 } /^Docker-Content-Digest:/ { sub("\r$", "", $2); print $2; exit }' "$headers")
+      [[ -n "$digest" ]] || return 1
+      curl -fsS -u "$auth" \
+        -H 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json' \
+        "https://$host/v2/$namespace/$repo/manifests/$tag" >"$manifest" || return 1
+      config=$(jq -r '.config.digest // empty' "$manifest")
+      created=
+      if [[ -n "$config" ]]; then
+        curl -fsS -u "$auth" "https://$host/v2/$namespace/$repo/blobs/$config" >"$blob" || return 1
+        created=$(jq -r '.created // empty' "$blob")
+      fi
+      printf '%s\t%s\t%s\n' "${created:-0000}" "$tag" "$digest" >>"$rows"
+    done < <(jq -r '.tags[]?' "$tags")
+
+    { printf '%s\n' "$current"; sort -r "$rows" | head -n 2 | cut -f3; } | sort -u >"$keep_file"
+    awk -F '\t' 'NR == FNR { keep[$1]; next } !($3 in keep) { print $2 "\t" $3 }' \
+      "$keep_file" "$rows" >"$delete_file"
+    count=$(wc -l <"$delete_file")
+    if [[ "${PRUNE_DRY_RUN:-}" = 1 ]]; then
+      while IFS=$'\t' read -r tag digest; do
+        printf 'would prune %s:%s (%s)\n' "$repo" "$tag" "$digest"
+      done <"$delete_file"
+    else
+      cut -f2 "$delete_file" | sort -u | while IFS= read -r digest; do
+        [[ -z "$digest" ]] || curl -fsS -u "$auth" -X DELETE \
+          "https://$host/v2/$namespace/$repo/manifests/$digest" >/dev/null || return 1
+      done
+    fi
+    printf 'pruned %s tags from %s/%s\n' "$count" "$namespace" "$repo"
+  done
+  # The registry needs registry garbage-collect to reclaim blobs; Orfie runs it.
+)
+
 matrix_call() {
   local method=$1 path=$2 body=${3:-} output=$4
   local args=(-sS -o "$output" -w '%{http_code}' -X "$method" "http://127.0.0.1:18008$path")
@@ -161,6 +217,7 @@ grep -qF "$HOST_IMAGE" "$DOCS/in-cluster-runtime.review.yaml" || fail 'host dige
 kubectl -n "$NAMESPACE" delete job -l nanoclaw-group-folder --ignore-not-found >/dev/null
 kubectl apply -f "$DOCS/in-cluster-runtime.review.yaml"
 kubectl rollout status -n "$NAMESPACE" "deploy/$ORCHESTRATOR" --timeout=5m
+prune_registry_tags || printf 'WARNING: registry tag pruning failed\n' >&2
 
 [[ "${ONLY_REDEPLOY:-}" = 1 ]] && { printf 'ONLY_REDEPLOY: images rebuilt and orchestrator redeployed; skipping setup steps 2-6.\n'; exit 0; }
 step '2/6 register/reuse the non-admin Matrix bot and wire its token'
