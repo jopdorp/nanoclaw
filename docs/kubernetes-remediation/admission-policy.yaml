@@ -507,7 +507,7 @@ spec:
   policyName: nanoclaw-remediator-job-guard
   validationActions: [Deny, Audit]
 ---
-# Backups are never deleted, approved or not.
+# Backup data is never deleted, approved or not.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -537,8 +537,14 @@ spec:
         request.resource.group != 'longhorn.io' ||
         !request.userInfo.username.startsWith('system:serviceaccount:longhorn-system:')
   validations:
-    - expression: "!has(request.namespace) || request.namespace != 'backups'"
-      message: nothing in backups is ever deleted
+    - expression: >-
+        !has(request.namespace) || request.namespace != 'backups' ||
+        !((request.resource.group == '' && request.resource.resource in ['secrets', 'configmaps', 'persistentvolumeclaims']) ||
+          (request.resource.group == 'batch' && request.resource.resource in ['cronjobs', 'jobs']) ||
+          (request.resource.group == 'longhorn.io' && request.resource.resource in
+            ['backups', 'backupvolumes', 'backuptargets', 'backupbackingimages', 'snapshots', 'snapshotgroups', 'systembackups']) ||
+          request.resource.group == 'velero.io')
+      message: backup data in backups is never deleted
     - expression: >-
         !(request.resource.group == 'longhorn.io' && request.resource.resource in
             ['backups', 'backupvolumes', 'backuptargets', 'backupbackingimages', 'snapshots', 'snapshotgroups', 'systembackups']) &&
@@ -583,6 +589,10 @@ spec:
   matchConditions:
     - name: own-namespace
       expression: has(request.namespace) && request.namespace in ['nanoclaw-remediator', 'orfie-ci']
+    - name: managed-resource
+      expression: >-
+        !(request.resource.group in ['aquasecurity.github.io', 'metrics.k8s.io', 'events.k8s.io']) &&
+        request.resource.resource != 'events'
     - name: non-admin
       expression: >-
         request.userInfo.username != 'system:admin' &&
@@ -646,6 +656,19 @@ spec:
       expression: "request.operation == 'DELETE' ? dyn(oldObject) : dyn(object)"
     - name: protectedName
       expression: "'^(nanoclaw|orfie)-'"
+    - name: protectedNamespaces
+      expression: "['nanoclaw-remediator', 'orfie-ci', 'kube-system', 'longhorn-system', 'wireguard-home', 'backups', 'cert-manager']"
+    - name: hostIdentities
+      expression: "['nanoclaw-remediator', 'nanoclaw-helm', 'nanoclaw-breakglass', 'nanoclaw-remediator-reader', 'nanoclaw-orchestrator', 'nanoclaw-remediation-approver']"
+    - name: adminBindingAllowed
+      expression: >-
+        request.resource.resource == 'rolebindings' && has(request.namespace) &&
+        !(request.namespace in variables.protectedNamespaces) &&
+        variables.obj.roleRef.apiGroup == 'rbac.authorization.k8s.io' && variables.obj.roleRef.kind == 'ClusterRole' &&
+        variables.obj.roleRef.name == 'admin' && variables.obj.subjects.all(s,
+          s.kind == 'ServiceAccount' && has(s.namespace) &&
+          !(s.namespace in ['nanoclaw-remediator', 'orfie-ci']) &&
+          !(s.namespace == 'nanoclaw-remediator' && s.name in variables.hostIdentities))
     - name: binderAllowed
       expression: >-
         request.userInfo.username == 'system:serviceaccount:security:namespace-binder' &&
@@ -663,6 +686,7 @@ spec:
         (request.resource.group == 'admissionregistration.k8s.io' &&
          request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-helm' &&
          !variables.obj.metadata.name.matches(variables.protectedName)) ||
+        variables.adminBindingAllowed ||
         variables.binderAllowed ||
         (request.resource.group == 'rbac.authorization.k8s.io' && request.resource.resource in ['rolebindings', 'clusterrolebindings'] &&
          request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediation-approver' &&
