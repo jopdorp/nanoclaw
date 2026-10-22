@@ -3,16 +3,18 @@ import { ALLOW, DENY, HOLD, defineGuardedAction, type GuardInput } from '../../g
 import { log } from '../../log.js';
 import { notifyAgent, registerApprovalHandler, requestApproval } from '../approvals/index.js';
 import { pickApprovalDelivery } from '../approvals/primitive.js';
-import { isLowRiskAutoApprove, validateRemediationPlan } from './policy.js';
+import { isAutoApproved, validateRemediationPlan } from './policy.js';
 import type { HelmReleaseExecutor } from './helm-release.js';
 import { REMEDIATION_ACTION, type HelmValuesPlan, type RemediationExecutor, type ValidatedPlan } from './types.js';
 import type { Session } from '../../types.js';
 
 const AUTO_APPROVER = 'auto:low-risk';
+// The guard is module-scoped, so the T1 list from the runtime config lands here at registration.
+let t1: ReadonlySet<string> = new Set();
 
 function decide(input: GuardInput) {
   if (input.actor.kind !== 'agent') return DENY('remediation proposals must originate from the dedicated agent group');
-  return isLowRiskAutoApprove(validateRemediationPlan(input.payload.plan))
+  return isAutoApproved(validateRemediationPlan(input.payload.plan), t1)
     ? ALLOW('low-risk Lane A plan is auto-approved')
     : HOLD('this remediation plan requires an explicit Matrix approval');
 }
@@ -48,11 +50,9 @@ function renderQuestion({ plan, lane, digest, automaticWriteCap }: ValidatedPlan
           ? `restart at ${operation.restartedAt}`
           : operation.type === 'delete-storage' || operation.type === 'delete-job'
             ? `delete ${plan.target.kind}`
-            : operation.type === 'helm-values'
-              ? `helm release ${plan.target.name}, ${operation.file}: ${operation.set.map((e) => `${e.path}: ${JSON.stringify(e.before)} -> ${JSON.stringify(e.after)}`).join(', ')}`
-              : `manual Lane C request: ${operation.requestedChange}`;
+            : `helm release ${plan.target.name}, ${operation.file}: ${operation.set.map((e) => `${e.path}: ${JSON.stringify(e.before)} -> ${JSON.stringify(e.after)}`).join(', ')}`;
   return [
-    `lane: ${lane}`,
+    `lane: ${lane === 'C' ? 'C, applied with the break-glass identity' : lane}`,
     `target: ${plan.target.namespace ?? '_cluster'}/${plan.target.kind}/${plan.target.name}`,
     `uid: ${plan.target.uid}`,
     `resourceVersion: ${plan.target.resourceVersion}`,
@@ -93,7 +93,10 @@ export function registerKubernetesRemediationApproval(options: {
   approverUserId: string;
   executor: RemediationExecutor;
   helm?: HelmReleaseExecutor;
+  breakGlassHelm?: HelmReleaseExecutor;
+  t1: ReadonlySet<string>;
 }): void {
+  t1 = options.t1;
   const validate = async (content: Record<string, unknown>, session: Session) => {
     if (session.agent_group_id !== options.agentGroupId) return false;
     try {
@@ -112,12 +115,16 @@ export function registerKubernetesRemediationApproval(options: {
   registerDeliveryAction(
     REMEDIATION_ACTION,
     async (content, session) => {
-      const validated = validateRemediationPlan(planInput(content));
-      const auto = isLowRiskAutoApprove(validated);
+      let validated = validateRemediationPlan(planInput(content));
+      const auto = isAutoApproved(validated, t1);
       if (!auto && content.approvedBy !== options.approverUserId)
         throw new Error('approval came from the wrong Matrix user');
       let message: string;
       try {
+        if (auto && validated.plan.operation.type === 'helm-values') {
+          if (!options.helm) throw new Error('the Helm path is not configured');
+          validated = validateRemediationPlan(await options.helm.bind(validated.plan as HelmValuesPlan));
+        }
         const result = await options.executor.execute(validated, {
           approvalRowId: auto ? '' : String(content.approvalRowId ?? ''),
           approverUserId: auto ? AUTO_APPROVER : String(content.approvedBy),
@@ -133,7 +140,7 @@ export function registerKubernetesRemediationApproval(options: {
       if (auto) {
         await notifyApprover(
           options.approverUserId,
-          `Auto-approved low-risk remediation\n${renderQuestion(validated)}\noutcome: ${message}`,
+          `Auto-applied remediation\n${renderQuestion(validated)}\noutcome: ${message}`,
         );
       }
     },
@@ -144,8 +151,9 @@ export function registerKubernetesRemediationApproval(options: {
         let validated = validateRemediationPlan(planInput(content));
         if (validated.plan.operation.type === 'helm-values') {
           try {
-            if (!options.helm) throw new Error('the Helm path is not configured');
-            validated = validateRemediationPlan(await options.helm.bind(validated.plan as HelmValuesPlan));
+            const helm = validated.lane === 'C' ? options.breakGlassHelm : options.helm;
+            if (!helm) throw new Error('the Helm path is not configured');
+            validated = validateRemediationPlan(await helm.bind(validated.plan as HelmValuesPlan));
             // eslint-disable-next-line no-catch-all/no-catch-all -- the agent hears why its plan got no card
           } catch (error) {
             await notifyAgent(

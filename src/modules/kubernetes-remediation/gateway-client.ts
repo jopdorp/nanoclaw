@@ -129,19 +129,18 @@ export class OneCliKubernetesClient implements KubernetesJsonClient {
   }
 }
 
+const WORKLOAD_COLLECTIONS: Partial<Record<RemediationPlan['target']['kind'], [string, string]>> = {
+  Deployment: ['apps/v1', 'deployments'],
+  StatefulSet: ['apps/v1', 'statefulsets'],
+  DaemonSet: ['apps/v1', 'daemonsets'],
+  CronJob: ['batch/v1', 'cronjobs'],
+};
+
 function workloadPath(plan: RemediationPlan): string {
-  const namespace = encodeURIComponent(plan.target.namespace ?? '');
-  const name = encodeURIComponent(plan.target.name);
-  const plural =
-    plan.target.kind === 'Deployment'
-      ? 'deployments'
-      : plan.target.kind === 'StatefulSet'
-        ? 'statefulsets'
-        : plan.target.kind === 'DaemonSet'
-          ? 'daemonsets'
-          : null;
-  if (!plural) throw new Error('target is not a workload');
-  return `/apis/apps/v1/namespaces/${namespace}/${plural}/${name}`;
+  const collection = WORKLOAD_COLLECTIONS[plan.target.kind];
+  if (!collection) throw new Error('target is not a workload');
+  const [groupVersion, plural] = collection;
+  return `/apis/${groupVersion}/namespaces/${encodeURIComponent(plan.target.namespace ?? '')}/${plural}/${encodeURIComponent(plan.target.name)}`;
 }
 
 function jobPath(plan: RemediationPlan): string {
@@ -162,9 +161,10 @@ function mergePatch(plan: RemediationPlan): Record<string, unknown> {
     const images = (init: boolean) =>
       containers.filter((c) => c.initContainer === init).map(({ name }) => ({ name, image: after }));
     const spec = { containers: images(false), initContainers: images(true) };
+    const template = { spec: Object.fromEntries(Object.entries(spec).filter(([, list]) => list.length)) };
     return {
       metadata: { resourceVersion },
-      spec: { template: { spec: Object.fromEntries(Object.entries(spec).filter(([, list]) => list.length)) } },
+      spec: plan.target.kind === 'CronJob' ? { jobTemplate: { spec: { template } } } : { template },
     };
   }
   if (plan.operation.type === 'restart') {
@@ -189,11 +189,13 @@ function approvalAnnotationPatch(plan: RemediationPlan, value: string | null): R
   };
 }
 
+interface PodTemplateHolder {
+  template?: { spec?: Partial<Record<'containers' | 'initContainers', Array<{ name?: string; image?: string }>>> };
+}
+
 interface LiveObject {
   metadata?: { uid?: string; resourceVersion?: string };
-  spec?: {
-    template?: { spec?: Partial<Record<'containers' | 'initContainers', Array<{ name?: string; image?: string }>>> };
-  };
+  spec?: PodTemplateHolder & { jobTemplate?: { spec?: PodTemplateHolder } };
   status?: { active?: number; conditions?: Array<{ type?: string; status?: string }> };
 }
 
@@ -321,13 +323,14 @@ export class KubernetesRolloutObserver implements RolloutObserver {
   }
 }
 
-/** Host-only executor. The agent is never given either OneCLI identity. */
+/** Host-only executor. The agent is never given any of these OneCLI identities. */
 export class GatewayRemediationExecutor {
   constructor(
-    private readonly executor: KubernetesJsonClient,
+    private readonly writer: KubernetesJsonClient,
     private readonly annotator: KubernetesJsonClient,
     private readonly observer: RolloutObserver,
     private readonly helm?: HelmReleaseExecutor,
+    private readonly breakGlass?: { client: KubernetesJsonClient; helm?: HelmReleaseExecutor },
   ) {}
 
   async execute(validated: ValidatedPlan, grant: ApprovalGrant) {
@@ -335,15 +338,12 @@ export class GatewayRemediationExecutor {
     if (grant.planId !== plan.id || grant.planDigest !== validated.digest)
       throw new Error('approval does not bind this plan');
     if (Date.parse(plan.expiresAt) <= Date.now()) throw new Error('approved plan expired');
-    if (lane === 'C')
-      return {
-        applied: false,
-        message: 'Lane C stays read-only; approval recorded for manual escalation.',
-        automaticWrites: 0,
-      };
+    const executor = lane === 'C' ? this.breakGlass?.client : this.writer;
+    if (!executor) throw new Error('the break-glass identity is not configured');
     if (plan.operation.type === 'helm-values') {
-      if (!this.helm) throw new Error('the Helm path is not configured');
-      return this.helm.apply(plan as HelmValuesPlan);
+      const helm = lane === 'C' ? this.breakGlass?.helm : this.helm;
+      if (!helm) throw new Error('the Helm path is not configured');
+      return helm.apply(plan as HelmValuesPlan);
     }
 
     const path =
@@ -352,7 +352,7 @@ export class GatewayRemediationExecutor {
         : plan.operation.type === 'delete-job'
           ? jobPath(plan)
           : workloadPath(plan);
-    const live = (await this.executor.request(path)) as LiveObject;
+    const live = (await executor.request(path)) as LiveObject;
     if (live.metadata?.uid !== plan.target.uid || live.metadata?.resourceVersion !== plan.target.resourceVersion) {
       throw new Error('target UID or resourceVersion changed after proposal');
     }
@@ -361,7 +361,7 @@ export class GatewayRemediationExecutor {
         (c) => (c.type === 'Complete' || c.type === 'Failed') && c.status === 'True',
       );
       if (!finished || live.status?.active) throw new Error('Job is still running');
-      await this.executor.request(path, {
+      await executor.request(path, {
         method: 'DELETE',
         body: {
           apiVersion: 'v1',
@@ -373,7 +373,7 @@ export class GatewayRemediationExecutor {
       return { applied: true, message: `Deleted finished Job for plan ${plan.id}.`, automaticWrites: 0 };
     }
     if (plan.operation.type === 'patch-image') {
-      const pod = live.spec?.template?.spec;
+      const pod = (plan.target.kind === 'CronJob' ? live.spec?.jobTemplate?.spec : live.spec)?.template?.spec;
       for (const { name, initContainer } of plan.operation.containers) {
         const image = (initContainer ? pod?.initContainers : pod?.containers)?.find((c) => c.name === name)?.image;
         if (!image || canonicalImage(image) !== canonicalImage(plan.operation.before))
@@ -389,25 +389,28 @@ export class GatewayRemediationExecutor {
     let executionError: unknown;
     try {
       result = await (async () => {
-        annotationInstalled = true;
-        await this.annotator.request(path, {
-          method: 'PATCH',
-          body: approvalAnnotationPatch(plan, plan.id),
-          contentType: 'application/merge-patch+json',
-        });
-        const annotated = (await this.annotator.request(path)) as {
-          metadata?: { uid?: string; resourceVersion?: string };
-        };
-        if (annotated.metadata?.uid !== plan.target.uid || !annotated.metadata.resourceVersion) {
-          throw new Error('annotated target identity changed');
+        // Only the always-ask admission rules read the annotation.
+        if (lane === 'always-ask') {
+          annotationInstalled = true;
+          await this.annotator.request(path, {
+            method: 'PATCH',
+            body: approvalAnnotationPatch(plan, plan.id),
+            contentType: 'application/merge-patch+json',
+          });
+          const annotated = (await this.annotator.request(path)) as {
+            metadata?: { uid?: string; resourceVersion?: string };
+          };
+          if (annotated.metadata?.uid !== plan.target.uid || !annotated.metadata.resourceVersion) {
+            throw new Error('annotated target identity changed');
+          }
+          currentPlan = { ...plan, target: { ...plan.target, resourceVersion: annotated.metadata.resourceVersion } };
         }
-        currentPlan = { ...plan, target: { ...plan.target, resourceVersion: annotated.metadata.resourceVersion } };
 
         if (plan.operation.type === 'delete-storage') {
           const candidate = binding(currentPlan);
           temporaryBindingPath = candidate.path;
           await this.annotator.request(candidate.collection, { method: 'POST', body: candidate.body });
-          await this.executor.request(path, {
+          await executor.request(path, {
             method: 'DELETE',
             body: {
               apiVersion: 'v1',
@@ -417,13 +420,13 @@ export class GatewayRemediationExecutor {
           });
           storageDeleted = true;
         } else {
-          await this.executor.request(path, {
+          await executor.request(path, {
             method: 'PATCH',
             body: mergePatch(currentPlan),
             contentType: 'application/strategic-merge-patch+json',
           });
         }
-        if (plan.operation.type === 'delete-storage') {
+        if (plan.operation.type === 'delete-storage' || plan.target.kind === 'CronJob') {
           return { applied: true, message: `Applied approved plan ${plan.id}.`, automaticWrites: 0 };
         }
         const deadline = Math.min(Date.parse(plan.expiresAt), Date.now() + 10 * 60_000);
@@ -478,7 +481,7 @@ export class GatewayRemediationExecutor {
     if (!result) throw new Error('remediation execution produced no result');
     if (this.helm && (plan.operation.type === 'patch-image' || plan.operation.type === 'scale')) {
       const note = await this.helm
-        .recordPatch(plan, await this.executor.request(path))
+        .recordPatch(plan, await executor.request(path))
         .catch(
           (error: unknown) => `Helm drift was not recorded: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -492,11 +495,11 @@ export class GatewayRemediationExecutor {
     let writes = 0;
     const apply = async (candidate: RemediationPlan): Promise<boolean> => {
       if (Date.now() >= deadline) return false;
-      const live = (await this.executor.request(path)) as { metadata?: { uid?: string; resourceVersion?: string } };
+      const live = (await this.writer.request(path)) as { metadata?: { uid?: string; resourceVersion?: string } };
       if (live.metadata?.uid !== plan.target.uid || !live.metadata.resourceVersion)
         throw new Error('recovery target drifted');
       const fresh = { ...candidate, target: { ...candidate.target, resourceVersion: live.metadata.resourceVersion } };
-      await this.executor.request(path, {
+      await this.writer.request(path, {
         method: 'PATCH',
         body: mergePatch(fresh),
         contentType: 'application/strategic-merge-patch+json',

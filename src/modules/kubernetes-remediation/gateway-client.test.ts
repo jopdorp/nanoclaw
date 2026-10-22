@@ -34,7 +34,7 @@ function plan(namespace: 'vaultwarden' | 'kube-system' | 'gitea') {
           }
         : namespace === 'gitea'
           ? { type: 'scale', before: 1, after: 1 }
-          : { type: 'lane-c-escalation', requestedChange: 'upgrade coredns manually' },
+          : { type: 'restart', restartedAt: new Date().toISOString() },
   };
 }
 
@@ -75,13 +75,16 @@ describe('gateway remediation executor', () => {
   });
 
   it('uses only the annotator identity for the approval annotation and clears it', async () => {
-    const validated = validateRemediationPlan(plan('gitea'));
+    const validated = validateRemediationPlan(plan('vaultwarden'));
     const executorCalls: Array<{ path: string; options?: Record<string, unknown> }> = [];
     const annotatorCalls: Array<{ path: string; options?: Record<string, unknown> }> = [];
     const executor: KubernetesJsonClient = {
       request: vi.fn(async (path, options) => {
         executorCalls.push({ path, options });
-        return options ? {} : { metadata: { uid: 'uid-1', resourceVersion: '42' } };
+        const containers = [{ name: 'vaultwarden', image: 'docker.io/vaultwarden/server:latest' }];
+        return options
+          ? {}
+          : { metadata: { uid: 'uid-1', resourceVersion: '42' }, spec: { template: { spec: { containers } } } };
       }),
       watch: vi.fn(),
     };
@@ -149,17 +152,85 @@ describe('gateway remediation executor', () => {
     });
   });
 
-  it('records Lane C approval without touching Kubernetes', async () => {
+  it('patches a CronJob job template without an annotation or rollout wait', async () => {
+    const validated = validateRemediationPlan({
+      ...plan('gitea'),
+      target: { ...plan('gitea').target, apiVersion: 'batch/v1', kind: 'CronJob', namespace: 'openclaw-private' },
+      operation: {
+        type: 'patch-image',
+        containers: [{ name: 'build', initContainer: false }],
+        before: 'node:20-alpine',
+        after: `docker.io/library/node:20-alpine@sha256:${'a'.repeat(64)}`,
+      },
+    });
+    const containers = [{ name: 'build', image: 'node:20-alpine' }];
+    const request = vi.fn(async (_path: string, options?: unknown) =>
+      options
+        ? {}
+        : {
+            metadata: { uid: 'uid-1', resourceVersion: '42' },
+            spec: { jobTemplate: { spec: { template: { spec: { containers } } } } },
+          },
+    );
+    const annotator = { request: vi.fn(), watch: vi.fn() };
+    const observer = { ready: vi.fn() };
+    await new GatewayRemediationExecutor({ request, watch: vi.fn() }, annotator, observer).execute(validated, {
+      approvalRowId: '',
+      approverUserId: 'auto:low-risk',
+      planId: validated.plan.id,
+      planDigest: validated.digest,
+    });
+    expect(request).toHaveBeenLastCalledWith('/apis/batch/v1/namespaces/openclaw-private/cronjobs/gitea', {
+      method: 'PATCH',
+      body: {
+        metadata: { resourceVersion: '42' },
+        spec: {
+          jobTemplate: {
+            spec: {
+              template: {
+                spec: {
+                  containers: [
+                    {
+                      name: 'build',
+                      image: validated.plan.operation.type === 'patch-image' && validated.plan.operation.after,
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+      contentType: 'application/strategic-merge-patch+json',
+    });
+    expect(annotator.request).not.toHaveBeenCalled();
+    expect(observer.ready).not.toHaveBeenCalled();
+  });
+
+  it('applies an approved Lane C plan only through the break-glass identity', async () => {
     const validated = validateRemediationPlan(plan('kube-system'));
-    const request = vi.fn();
-    const client: KubernetesJsonClient = { request, watch: vi.fn() };
-    const result = await new GatewayRemediationExecutor(client, client, { ready: vi.fn() }).execute(validated, {
+    const grant = {
       approvalRowId: 'row-1',
       approverUserId: 'matrix:@owner:example',
       planId: validated.plan.id,
       planDigest: validated.digest,
-    });
-    expect(result.applied).toBe(false);
-    expect(request).not.toHaveBeenCalled();
+    };
+    const writer = { request: vi.fn(), watch: vi.fn() };
+    const observer = { ready: vi.fn(async () => true) };
+    await expect(new GatewayRemediationExecutor(writer, writer, observer).execute(validated, grant)).rejects.toThrow(
+      'break-glass identity is not configured',
+    );
+    const request = vi.fn(async (_path: string, options?: unknown) =>
+      options ? {} : { metadata: { uid: 'uid-1', resourceVersion: '42' } },
+    );
+    const result = await new GatewayRemediationExecutor(writer, writer, observer, undefined, {
+      client: { request, watch: vi.fn() },
+    }).execute(validated, grant);
+    expect(result.applied).toBe(true);
+    expect(request).toHaveBeenLastCalledWith(
+      '/apis/apps/v1/namespaces/kube-system/deployments/coredns',
+      expect.objectContaining({ method: 'PATCH' }),
+    );
+    expect(writer.request).not.toHaveBeenCalled();
   });
 });

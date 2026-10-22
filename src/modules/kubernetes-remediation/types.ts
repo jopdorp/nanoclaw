@@ -6,7 +6,7 @@ export type WorkloadKind = 'Deployment' | 'StatefulSet' | 'DaemonSet';
 
 export interface TargetRef {
   apiVersion: 'apps/v1' | 'batch/v1' | 'v1';
-  kind: WorkloadKind | 'Job' | 'PersistentVolume' | 'PersistentVolumeClaim' | 'Secret';
+  kind: WorkloadKind | 'CronJob' | 'Job' | 'PersistentVolume' | 'PersistentVolumeClaim' | 'Secret';
   namespace: string | null;
   name: string;
   uid: string;
@@ -58,18 +58,7 @@ export interface HelmValuesPlan extends PlanBase {
   };
 }
 
-export interface LaneCEscalationPlan extends PlanBase {
-  operation: { type: 'lane-c-escalation'; requestedChange: string };
-}
-
-export type RemediationPlan =
-  | ImagePlan
-  | RestartPlan
-  | ScalePlan
-  | JobDeletePlan
-  | StorageDeletePlan
-  | HelmValuesPlan
-  | LaneCEscalationPlan;
+export type RemediationPlan = ImagePlan | RestartPlan | ScalePlan | JobDeletePlan | StorageDeletePlan | HelmValuesPlan;
 
 export interface ValidatedPlan {
   plan: RemediationPlan;

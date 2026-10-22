@@ -2,53 +2,31 @@ import { createHash } from 'node:crypto';
 
 import type { RemediationLane, RemediationPlan, TargetRef, ValidatedPlan, ValuesScalar } from './types.js';
 
-export const LANE_A_NAMESPACES = new Set([
-  'nextcloud',
-  'mail',
-  'gitea',
-  'monitoring',
-  'wiki-js',
-  'logging',
-  'excalidraw',
-  'excalidraw-room',
-  'openclaw',
-  'openclaw-private',
-  'duckdns',
-  'hermes',
-  'mpcpi',
-  'prophet',
-  'schipperswoning',
-  'trivy-operator',
-]);
-
-export const LANE_C_NAMESPACES = new Set([
-  'kube-system',
-  'kube-node-lease',
-  'kube-public',
-  'longhorn-system',
-  'cert-manager',
-  'falco',
-  'system-upgrade',
-]);
+/** Every write here needs approval and runs as the break-glass identity. */
+export const LANE_C_NAMESPACES = new Set(['kube-system', 'kube-node-lease', 'kube-public', 'longhorn-system']);
 
 const API_VERSIONS: Record<TargetRef['kind'], TargetRef['apiVersion']> = {
   Deployment: 'apps/v1',
   StatefulSet: 'apps/v1',
   DaemonSet: 'apps/v1',
+  CronJob: 'batch/v1',
   Job: 'batch/v1',
   PersistentVolume: 'v1',
   PersistentVolumeClaim: 'v1',
   Secret: 'v1',
 };
 const WORKLOAD_KINDS = ['Deployment', 'StatefulSet', 'DaemonSet'];
+const IMAGE_KINDS = [...WORKLOAD_KINDS, 'CronJob'];
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DIGEST_IMAGE_RE =
-  /^(docker\.io|docker\.gitea\.com|cr\.fluentbit\.io|ghcr\.io|quay\.io|registry\.k8s\.io)\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/;
+  /^(docker\.io|docker\.gitea\.com|cr\.fluentbit\.io|ghcr\.io|quay\.io|registry\.k8s\.io|mirror\.gcr\.io|lscr\.io|registry\.prophet\.jopdorp\.nl)\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/;
 const TAG_RE = /^\w[\w.-]{0,127}$/;
 const VALUES_FILE_RE = /^kubernetes\/helm-charts\/[a-z0-9]+(?:-[a-z0-9]+)*-values\.yaml$/;
 const VALUES_PATH_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
 const IMAGE_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest)$/;
+// Only the chart's own top-level key; nested ones usually size a subchart's database StatefulSet.
+const REPLICA_KEY_RE = /^(replicas|replicaCount)$/;
 const PINNED_RE = /^(?:\w[\w.-]{0,127}@)?sha256:[0-9a-f]{64}$/;
 const VAULTWARDEN_RE = /^docker\.io\/vaultwarden\/server@sha256:[0-9a-f]{64}$/;
 const WIREGUARD_RE = /^lscr\.io\/linuxserver\/wireguard@sha256:[0-9a-f]{64}$/;
@@ -194,24 +172,17 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
       throw new Error('plan.operation.set paths must be unique');
     return { ...base, operation: { type, file, set } };
   }
-  if (type === 'lane-c-escalation') {
-    exactKeys(operation, ['type', 'requestedChange'], 'plan.operation');
-    return {
-      ...base,
-      operation: { type, requestedChange: string(operation.requestedChange, 'plan.operation.requestedChange', 2000) },
-    };
-  }
   throw new Error(
-    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values or lane-c-escalation',
+    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage or helm-values',
   );
 }
 
 export function classifyTarget(target: TargetRef): RemediationLane {
   if (target.kind === 'PersistentVolume' || target.kind === 'PersistentVolumeClaim') return 'always-ask';
   if (target.namespace === 'vaultwarden' || target.namespace === 'wireguard-home') return 'always-ask';
-  if (target.namespace && LANE_A_NAMESPACES.has(target.namespace)) return 'A';
   if (target.namespace && LANE_C_NAMESPACES.has(target.namespace)) return 'C';
-  throw new Error('target is outside the remediation lanes');
+  if (target.namespace === 'nanoclaw-remediator') throw new Error('Orfie never changes its own namespace');
+  return 'A';
 }
 
 function parseImage(image: string) {
@@ -272,16 +243,12 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
   }
   const lane = classifyTarget(plan.target);
   let automaticWriteCap: 0 | 1 | 2 = 0;
-
-  if (lane === 'C') {
-    if (plan.operation.type !== 'lane-c-escalation') throw new Error('Lane C is read/propose only');
-  } else if (plan.operation.type === 'lane-c-escalation') {
-    throw new Error('lane-c-escalation is valid only for Lane C');
-  }
+  if (plan.target.namespace === 'backups' && !(plan.operation.type === 'patch-image' && plan.target.kind === 'CronJob'))
+    throw new Error('backups is immutable except CronJob images');
 
   if (plan.operation.type === 'patch-image') {
-    if (!WORKLOAD_KINDS.includes(plan.target.kind)) {
-      throw new Error('patch-image requires a workload target');
+    if (!IMAGE_KINDS.includes(plan.target.kind) || (lane === 'C' && plan.target.kind === 'CronJob')) {
+      throw new Error('patch-image requires a workload target, or a CronJob outside Lane C');
     }
     const expected =
       plan.target.namespace === 'vaultwarden'
@@ -295,17 +262,18 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     // restart attempt only; a digest-pinned or exact-tag prior image may also
     // use the second, rollback write.
     const exactTag = plan.operation.after.startsWith(`${plan.operation.before}@sha256:`);
-    automaticWriteCap = lane === 'A' ? (DIGEST_IMAGE_RE.test(plan.operation.before) || exactTag ? 2 : 1) : 0;
+    if (lane === 'A' && plan.target.kind !== 'CronJob')
+      automaticWriteCap = DIGEST_IMAGE_RE.test(plan.operation.before) || exactTag ? 2 : 1;
   } else if (plan.operation.type === 'restart') {
-    if (lane !== 'A' || !WORKLOAD_KINDS.includes(plan.target.kind)) {
-      throw new Error('restart requires a Lane A workload');
+    if (lane === 'always-ask' || !WORKLOAD_KINDS.includes(plan.target.kind)) {
+      throw new Error('restart requires a Lane A or Lane C workload');
     }
     if (!Number.isFinite(Date.parse(plan.operation.restartedAt)))
       throw new Error('restartedAt must be an ISO timestamp');
-    automaticWriteCap = 1;
+    if (lane === 'A') automaticWriteCap = 1;
   } else if (plan.operation.type === 'scale') {
-    if (lane !== 'A' || !['Deployment', 'StatefulSet'].includes(plan.target.kind)) {
-      throw new Error('scale requires a Lane A Deployment or StatefulSet');
+    if (lane === 'always-ask' || !['Deployment', 'StatefulSet'].includes(plan.target.kind)) {
+      throw new Error('scale requires a Lane A or Lane C Deployment or StatefulSet');
     }
     if (
       plan.operation.before < 0 ||
@@ -315,11 +283,12 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     ) {
       throw new Error('replicas must be between 0 and 10');
     }
-    automaticWriteCap = 1;
+    if (lane === 'A') automaticWriteCap = 1;
   } else if (plan.operation.type === 'delete-job') {
     if (lane !== 'A' || plan.target.kind !== 'Job') throw new Error('delete-job requires a Lane A Job');
   } else if (plan.operation.type === 'helm-values') {
-    if (lane !== 'A' || plan.target.kind !== 'Secret') throw new Error('helm-values requires a Lane A Helm release');
+    if (lane === 'always-ask' || plan.target.kind !== 'Secret')
+      throw new Error('helm-values requires a Lane A or Lane C Helm release');
     for (const { path, before, after } of plan.operation.set) {
       const key = IMAGE_KEY_RE.exec(path)?.[1];
       if (!key) continue;
@@ -331,7 +300,6 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     }
   } else if (plan.operation.type === 'delete-storage') {
     if (!plan.target.kind.startsWith('Persistent')) throw new Error('delete-storage requires PV or PVC');
-    if (plan.target.namespace === 'backups') throw new Error('backup storage is immutable');
   }
 
   const canonical = canonicalPlan(plan);
@@ -344,7 +312,39 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
   };
 }
 
-/** The only plans that apply without a Matrix card; the executor still refuses a Job that has not finished. */
-export function isLowRiskAutoApprove({ lane, plan }: ValidatedPlan): boolean {
-  return lane === 'A' && (plan.operation.type === 'restart' || plan.operation.type === 'delete-job');
+function tagVersion(tag = ''): [number, number] | undefined {
+  const match = /^v?(\d+)(?:\.(\d+))?(?:[.+_-]|$)/.exec(tag.split('@')[0]);
+  return match ? [Number(match[1]), Number(match[2] ?? 0)] : undefined;
+}
+
+/** Same major, and for T1 also the same minor; a tag without a version (latest, sha-1234) passes only outside T1. */
+function sameVersionLine(before: string | undefined, after: string | undefined, t1: boolean): boolean {
+  const [from, to] = [tagVersion(before), tagVersion(after)];
+  if (!from || !to) return !t1;
+  return from[0] === to[0] && (!t1 || from[1] === to[1]);
+}
+
+/**
+ * Plans the host applies without a Matrix card; the approver still hears what ran.
+ * `t1` holds `namespace` or `namespace/name` entries; every StatefulSet is T1 too.
+ */
+export function isAutoApproved({ lane, plan }: ValidatedPlan, t1: ReadonlySet<string>): boolean {
+  if (lane !== 'A') return false;
+  const { target, operation } = plan;
+  const critical =
+    target.kind === 'StatefulSet' || t1.has(target.namespace ?? '') || t1.has(`${target.namespace}/${target.name}`);
+  if (operation.type === 'restart' || operation.type === 'delete-job') return true;
+  if (operation.type === 'scale') return target.kind === 'Deployment';
+  if (operation.type === 'patch-image')
+    return sameVersionLine(parseImage(operation.before).tag, parseImage(operation.after).tag, critical);
+  if (operation.type !== 'helm-values') return false;
+  return operation.set.every(({ path, before, after }) => {
+    if (REPLICA_KEY_RE.test(path)) return !critical;
+    const key = IMAGE_KEY_RE.exec(path)?.[1];
+    if (key === 'digest') return true;
+    if (key === 'tag') return sameVersionLine(String(before ?? ''), String(after), critical);
+    if (key === 'image')
+      return sameVersionLine(parseImage(String(before)).tag, parseImage(String(after)).tag, critical);
+    return false;
+  });
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
-import { isLowRiskAutoApprove, validateRemediationPlan } from './policy.js';
+import { isAutoApproved, validateRemediationPlan } from './policy.js';
 
 const now = Date.parse('2026-10-21T12:00:00.000Z');
 
@@ -71,42 +71,55 @@ describe('Kubernetes remediation policy', () => {
     expect(validated.automaticWriteCap).toBe(0);
   });
 
-  it('allows only a manual escalation plan in Lane C', () => {
-    const laneC = {
-      ...base('kube-system'),
-      operation: { type: 'lane-c-escalation', requestedChange: 'upgrade coredns' },
-    };
-    expect(validateRemediationPlan(laneC, now).automaticWriteCap).toBe(0);
-    expect(() =>
-      validateRemediationPlan({ ...base('kube-system'), operation: { type: 'scale', before: 1, after: 1 } }, now),
-    ).toThrow('Lane C is read/propose only');
+  it('auto-approves within the major version, T1 within the minor, and holds the rest', () => {
+    const t1 = new Set(['nextcloud']);
+    const auto = (namespace: string, operation: Record<string, unknown>, kind = 'Deployment') =>
+      isAutoApproved(
+        validateRemediationPlan({ ...base(namespace), target: { ...base(namespace).target, kind }, operation }, now),
+        t1,
+      );
+    const image = (before: string, after: string) => ({
+      type: 'patch-image',
+      containers: [{ name: 'app', initContainer: false }],
+      before,
+      after: `${after}@sha256:${'a'.repeat(64)}`,
+    });
+    expect(auto('duckdns', image('ghcr.io/x/app:v1.2.3', 'ghcr.io/x/app:v1.9.0'))).toBe(true);
+    expect(auto('duckdns', image('ghcr.io/x/app:1.2.3', 'ghcr.io/x/app:2.0.0'))).toBe(false);
+    expect(auto('duckdns', image('matrixdotorg/synapse:latest', 'docker.io/matrixdotorg/synapse:v1.140.0'))).toBe(true);
+    expect(auto('nextcloud', image('nextcloud:31.0.1', 'docker.io/library/nextcloud:31.0.9-apache'))).toBe(true);
+    expect(auto('nextcloud', image('nextcloud:31.0.1', 'docker.io/library/nextcloud:31.1.0'))).toBe(false);
+    expect(auto('nextcloud', image('nextcloud:latest', 'docker.io/library/nextcloud:31.1.0'))).toBe(false);
+    expect(auto('prophet', image('qdrant/qdrant:v1.13.0', 'docker.io/qdrant/qdrant:v1.14.0'), 'StatefulSet')).toBe(
+      false,
+    );
+    expect(auto('prophet', { type: 'scale', before: 1, after: 0 })).toBe(true);
+    expect(auto('prophet', { type: 'scale', before: 1, after: 0 }, 'StatefulSet')).toBe(false);
+    const restart = { type: 'restart', restartedAt: new Date(now).toISOString() };
+    const laneC = validateRemediationPlan({ ...base('longhorn-system'), operation: restart }, now);
+    expect([laneC.lane, laneC.automaticWriteCap, isAutoApproved(laneC, t1)]).toEqual(['C', 0, false]);
+    expect(() => validateRemediationPlan({ ...base('nanoclaw-remediator'), operation: restart }, now)).toThrow();
   });
 
-  it('auto-approves only Lane A restarts and Job deletes', () => {
-    const restart = { type: 'restart', restartedAt: new Date(now).toISOString() };
-    const job = (namespace: string) => ({
-      ...base(namespace),
-      target: { ...base(namespace).target, apiVersion: 'batch/v1', kind: 'Job' },
-      operation: { type: 'delete-job' },
-    });
-    expect(isLowRiskAutoApprove(validateRemediationPlan({ ...base(), operation: restart }, now))).toBe(true);
-    expect(isLowRiskAutoApprove(validateRemediationPlan(job('gitea'), now))).toBe(true);
-    const image = {
-      type: 'patch-image',
-      containers: [{ name: 'gitea', initContainer: false }],
-      before: `docker.io/gitea/gitea@sha256:${'c'.repeat(64)}`,
-      after: `docker.io/gitea/gitea@sha256:${'a'.repeat(64)}`,
-    };
-    expect(isLowRiskAutoApprove(validateRemediationPlan({ ...base(), operation: image }, now))).toBe(false);
-    const laneC = {
-      ...base('kube-system'),
-      operation: { type: 'lane-c-escalation', requestedChange: 'restart coredns' },
-    };
-    expect(isLowRiskAutoApprove(validateRemediationPlan(laneC, now))).toBe(false);
-    for (const namespace of ['vaultwarden', 'wireguard-home', 'kube-system', 'backups']) {
-      expect(() => validateRemediationPlan({ ...base(namespace), operation: restart }, now)).toThrow();
-      expect(() => validateRemediationPlan(job(namespace), now)).toThrow();
-    }
+  it('keeps backups to CronJob image updates', () => {
+    const target = (kind: string) => ({ ...base('backups').target, apiVersion: 'batch/v1', kind });
+    const cron = validateRemediationPlan(
+      {
+        ...base('backups'),
+        target: target('CronJob'),
+        operation: {
+          type: 'patch-image',
+          containers: [{ name: 'backup', initContainer: false }],
+          before: 'alpine:3.19',
+          after: `docker.io/library/alpine:3.22@sha256:${'a'.repeat(64)}`,
+        },
+      },
+      now,
+    );
+    expect([cron.automaticWriteCap, isAutoApproved(cron, new Set())]).toEqual([0, true]);
+    expect(() =>
+      validateRemediationPlan({ ...base('backups'), target: target('Job'), operation: { type: 'delete-job' } }, now),
+    ).toThrow('backups is immutable');
   });
 
   it('rejects tag updates, target drift fields, backup deletion, and stale plans', () => {
@@ -139,7 +152,7 @@ describe('Kubernetes remediation policy', () => {
         },
         now,
       ),
-    ).toThrow('backup storage is immutable');
+    ).toThrow('backups is immutable');
     expect(() =>
       validateRemediationPlan(
         { ...base(), expiresAt: '2026-10-21T11:59:00Z', operation: { type: 'scale', before: 1, after: 1 } },
@@ -159,6 +172,6 @@ describe('Kubernetes remediation policy', () => {
     );
     expect(() =>
       validateRemediationPlan(helmValues('vaultwarden', 'kubernetes/helm-charts/vaultwarden-values.yaml'), now),
-    ).toThrow('helm-values requires a Lane A Helm release');
+    ).toThrow('helm-values requires a Lane A or Lane C Helm release');
   });
 });

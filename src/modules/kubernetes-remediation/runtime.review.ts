@@ -20,6 +20,7 @@ import {
   OneCliKubernetesClient,
 } from './gateway-client.js';
 import { gitWithDeployKey, helmThroughOneCli, HelmReleaseExecutor, type HelmChart } from './helm-release.js';
+import { LANE_C_NAMESPACES } from './policy.js';
 import { createFalcoWebhookHandler, runTrivyWatchers } from './triggers.js';
 import type { RemediationIncident } from './types.js';
 
@@ -31,8 +32,12 @@ export interface KubernetesRemediationConfig {
   annotatorOneCliAgent: string;
   falcoBearerFile: string;
   helmOneCliAgent?: string;
+  /** Applies approved Lane C plans, including the Lane C releases in helmReleases. */
+  breakGlassOneCliAgent?: string;
   /** Keyed `<namespace>/<release>`. */
   helmReleases?: Record<string, HelmChart>;
+  /** `namespace` or `namespace/name`: image updates there need approval beyond a patch version. */
+  t1: string[];
 }
 
 const DAY = 24 * 60 * 60_000;
@@ -44,25 +49,34 @@ export async function startKubernetesRemediation(
   const reader = new OneCliKubernetesClient(config.agentGroupId, config.apiServer);
   const executorClient = new OneCliKubernetesClient(config.executorOneCliAgent, config.apiServer);
   const annotator = new OneCliKubernetesClient(config.annotatorOneCliAgent, config.apiServer);
+  if (!Array.isArray(config.t1)) throw new Error('kubernetes-remediation.json needs a t1 list');
   const group = await getAgentGroup(config.agentGroupId);
-  const checkout = path.join(DATA_DIR, 'k8s.jegor.nl');
-  const helm =
-    config.helmOneCliAgent && config.helmReleases && group
-      ? new HelmReleaseExecutor({
-          client: new OneCliKubernetesClient(config.helmOneCliAgent, config.apiServer),
-          charts: config.helmReleases,
-          checkout,
-          memoryDir: path.join(resolveGroupFolderPath(group.folder), 'memory'),
-          helm: helmThroughOneCli(config.helmOneCliAgent, config.apiServer, path.join(DATA_DIR, 'helm')),
-          git: gitWithDeployKey(checkout, '/run/nanoclaw/git'),
-          remote: 'git@github.com:jopdorp/k8s.jegor.nl.git',
-        })
-      : undefined;
+  // Each identity gets its own checkout, so the two executors never share a working tree.
+  const helmFor = (agent: string | undefined, laneC: boolean) => {
+    if (!agent || !config.helmReleases || !group) return undefined;
+    const checkout = path.join(DATA_DIR, laneC ? 'k8s.jegor.nl-breakglass' : 'k8s.jegor.nl');
+    return new HelmReleaseExecutor({
+      client: new OneCliKubernetesClient(agent, config.apiServer),
+      charts: Object.fromEntries(
+        Object.entries(config.helmReleases).filter(([key]) => LANE_C_NAMESPACES.has(key.split('/')[0]) === laneC),
+      ),
+      checkout,
+      memoryDir: path.join(resolveGroupFolderPath(group.folder), 'memory'),
+      helm: helmThroughOneCli(agent, config.apiServer, path.join(DATA_DIR, 'helm')),
+      git: gitWithDeployKey(checkout, '/run/nanoclaw/git'),
+      remote: 'git@github.com:jopdorp/k8s.jegor.nl.git',
+    });
+  };
+  const helm = helmFor(config.helmOneCliAgent, false);
+  const breakGlassHelm = helmFor(config.breakGlassOneCliAgent, true);
   const executor = new GatewayRemediationExecutor(
     executorClient,
     annotator,
     new KubernetesRolloutObserver(executorClient),
     helm,
+    config.breakGlassOneCliAgent
+      ? { client: new OneCliKubernetesClient(config.breakGlassOneCliAgent, config.apiServer), helm: breakGlassHelm }
+      : undefined,
   );
   const cleaned = await cleanupRemediationOrphans(annotator);
   if (cleaned) log.warn('Cleaned stale Kubernetes remediation capabilities', { cleaned });
@@ -71,6 +85,8 @@ export async function startKubernetesRemediation(
     approverUserId: config.matrixApproverUserId,
     executor,
     helm,
+    breakGlassHelm,
+    t1: new Set(config.t1),
   });
   if (helm) {
     const remind = () => {
