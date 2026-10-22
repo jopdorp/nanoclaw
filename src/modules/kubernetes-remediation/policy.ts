@@ -193,6 +193,24 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     exactKeys(operation, ['type', 'file'], 'plan.operation');
     return { ...base, operation: { type, file: valuesFile() } };
   }
+  if (type === 'write-secret') {
+    exactKeys(operation, ['type', 'secretType', 'stringData'], 'plan.operation');
+    const stringData = record(operation.stringData, 'plan.operation.stringData');
+    const entries = Object.entries(stringData);
+    if (
+      !entries.length ||
+      entries.length > 64 ||
+      entries.some(
+        ([key, value]) => !/^[-._a-zA-Z0-9]{1,253}$/.test(key) || typeof value !== 'string' || value.length > 65536,
+      )
+    )
+      throw new Error('plan.operation.stringData must map 1 through 64 Secret keys to strings');
+    const secretType =
+      operation.secretType === undefined ? 'Opaque' : string(operation.secretType, 'plan.operation.secretType', 128);
+    if (secretType === 'kubernetes.io/service-account-token')
+      throw new Error('ServiceAccount tokens are minted by Kubernetes, not written');
+    return { ...base, operation: { type, secretType, stringData: stringData as Record<string, string> } };
+  }
   if (type === 'delete-snapshot') {
     exactKeys(operation, ['type', 'volume'], 'plan.operation');
     return { ...base, operation: { type, volume: string(operation.volume, 'plan.operation.volume', 253) } };
@@ -269,7 +287,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     return { ...base, operation: { type, dockerfile, context, image } };
   }
   throw new Error(
-    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, pod-exec, manifest-edit, manifest-sync, repo-write or build-image',
+    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, write-secret, pod-exec, manifest-edit, manifest-sync, repo-write or build-image',
   );
 }
 
@@ -456,6 +474,8 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
       throw new Error('delete-storage requires a PV, PVC or Longhorn volume');
     if (plan.target.kind === 'Volume' && namespace !== 'longhorn-system')
       throw new Error('Longhorn volumes live in longhorn-system');
+  } else if (plan.operation.type === 'write-secret') {
+    if (plan.target.kind !== 'Secret' || !namespace) throw new Error('write-secret targets a namespaced v1 Secret');
   } else if (plan.operation.type === 'delete-snapshot') {
     if (plan.target.kind !== 'Snapshot' || namespace !== 'longhorn-system')
       throw new Error('delete-snapshot targets a Longhorn Snapshot in longhorn-system');
@@ -536,7 +556,11 @@ export function isAutoApproved(
   if (lane !== 'A') return false;
   const critical =
     target.kind === 'StatefulSet' || t1.has(target.namespace ?? '') || t1.has(`${target.namespace}/${target.name}`);
-  if (['restart', 'delete-job', 'pod-exec', 'build-image', 'helm-install', 'repo-write'].includes(operation.type))
+  if (
+    ['restart', 'delete-job', 'pod-exec', 'build-image', 'helm-install', 'repo-write', 'write-secret'].includes(
+      operation.type,
+    )
+  )
     return true;
   if (operation.type === 'manifest-edit') {
     return operation.set.every(({ path, before, after }) =>

@@ -17,6 +17,7 @@ import type {
   PodExecPlan,
   RemediationPlan,
   RepoWritePlan,
+  SecretWritePlan,
   SnapshotDeletePlan,
   ValidatedPlan,
 } from './types.js';
@@ -488,10 +489,12 @@ export class GatewayRemediationExecutor {
       case 'helm-install':
       case 'helm-uninstall':
       case 'repo-write':
+      case 'write-secret':
         if (!repo) throw new Error('the Helm and manifest path is not configured');
         if (plan.operation.type === 'helm-install') return repo.install(plan as HelmInstallPlan);
         if (plan.operation.type === 'helm-uninstall') return repo.uninstall(plan as HelmUninstallPlan);
         if (plan.operation.type === 'repo-write') return repo.writeFile(plan as RepoWritePlan);
+        if (plan.operation.type === 'write-secret') return repo.writeSecret(plan as SecretWritePlan);
         if (plan.operation.type === 'helm-values') return repo.apply(plan as HelmValuesPlan);
         if (plan.operation.type === 'helm-sync-values') return repo.syncValues(plan as HelmSyncPlan);
         if (plan.operation.type === 'manifest-edit') return repo.applyManifest(plan as ManifestEditPlan);

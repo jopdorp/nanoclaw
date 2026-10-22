@@ -34,6 +34,7 @@ import type {
   ManifestSyncPlan,
   RemediationPlan,
   RepoWritePlan,
+  SecretWritePlan,
   TargetRef,
 } from './types.js';
 
@@ -432,6 +433,29 @@ export class HelmReleaseExecutor {
       }
       return this.commit(file, `Orfie: ${plan.reason.split('\n', 1)[0]}`, `applied ${objects.length} objects`);
     });
+  }
+
+  async writeSecret(plan: SecretWritePlan): Promise<ExecutionResult> {
+    const { name, namespace } = plan.target;
+    const { secretType, stringData } = plan.operation;
+    try {
+      await this.serverSideApply(
+        `/api/v1/namespaces/${encodeURIComponent(namespace ?? '')}/secrets/${encodeURIComponent(name)}`,
+        { apiVersion: 'v1', kind: 'Secret', metadata: { name, namespace }, type: secretType, stringData },
+        false,
+      );
+      // eslint-disable-next-line no-catch-all/no-catch-all -- the API error may quote a value, so it is redacted first
+    } catch (error) {
+      const redacted = Object.values(stringData)
+        .filter(Boolean)
+        .reduce((text, value) => text.replaceAll(value, '***'), reason(error));
+      return { applied: false, message: `writing Secret ${namespace}/${name} failed: ${redacted}`, automaticWrites: 0 };
+    }
+    return {
+      applied: true,
+      message: `wrote Secret ${namespace}/${name} with keys ${Object.keys(stringData).join(', ')}.`,
+      automaticWrites: 0,
+    };
   }
 
   /** A text file of the checkout, at most 64 KB, or a directory listing with a trailing / on subdirectories. */

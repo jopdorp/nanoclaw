@@ -74,6 +74,11 @@ export interface SnapshotDeletePlan extends PlanBase {
   operation: { type: 'delete-snapshot'; volume: string };
 }
 
+/** Creates or replaces the target Secret on the cluster only; its values are never echoed. */
+export interface SecretWritePlan extends PlanBase {
+  operation: { type: 'write-secret'; secretType: string; stringData: Record<string, string> };
+}
+
 export type ValuesScalar = string | number | boolean;
 export type ValuesEdit = { path: string; before: ValuesScalar | null; after: ValuesScalar };
 
@@ -135,6 +140,7 @@ export type RemediationPlan =
   | JobDeletePlan
   | StorageDeletePlan
   | SnapshotDeletePlan
+  | SecretWritePlan
   | HelmValuesPlan
   | HelmSyncPlan
   | HelmInstallPlan

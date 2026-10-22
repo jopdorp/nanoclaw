@@ -83,6 +83,8 @@ function describe({ plan }: ValidatedPlan, full: boolean): string {
       return `sync helm values of ${where} from live into ${op.file}`;
     case 'helm-install':
       return `install ${op.chart} ${op.version} as ${where} with ${op.file}`;
+    case 'write-secret':
+      return `write Secret ${where} (${op.secretType}) keys ${Object.keys(op.stringData).join(', ')}`;
     case 'helm-uninstall':
       return `uninstall helm release ${where}`;
     case 'repo-write':
