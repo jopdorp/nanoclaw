@@ -6,16 +6,21 @@ export const resolveApproval: McpToolDefinition = {
   tool: {
     name: 'resolve_approval',
     description:
-      "Approve or reject a pending approval from the approver's own reply. When a message from the approver arrives with a <pending_approvals> block, read their reply as an answer to those items. If it clearly approves or rejects one of them, call resolve_approval with that item's id, the decision, any reason they gave, and the approverMessageId from the block. If it is unclear which pending item they mean, or whether they decided at all, ask them instead of guessing. The host only accepts the approver's own message, sent after the card, used once. It confirms in chat or tells you why it refused.",
+      "Approve or reject pending approvals from the approver's own reply. Approvals are a conversation. When the host asks you to get approval, ask the approver in one plain sentence what will change and why. Read their reply: yes, fine, do it, go and the like approve; no, wait, don't and the like reject; if it is unclear, ask one short question. Then call resolve_approval with the ids from the <pending_approvals> block on their message, the decision, and that block's approverMessageId; a reply that covers several pending items resolves them all in one call. Never show plan ids, approval ids or codes to the approver. The host only accepts the approver's own message, sent while the approvals were pending, and confirms in chat or tells you why it refused.",
     inputSchema: {
       type: 'object',
       properties: {
-        approvalId: { type: 'string', description: 'Id from the pending_approvals block' },
+        approvalIds: {
+          type: 'array',
+          items: { type: 'string' },
+          minItems: 1,
+          description: 'Ids from the pending_approvals block that the reply decides',
+        },
         decision: { type: 'string', enum: ['approve', 'reject'] },
         reason: { type: 'string', description: 'Why, when they reject and say why' },
         approverMessageId: { type: 'string', description: 'approverMessageId from the block of the reply you act on' },
       },
-      required: ['approvalId', 'decision', 'approverMessageId'],
+      required: ['approvalIds', 'decision', 'approverMessageId'],
     },
   },
   async handler(args) {

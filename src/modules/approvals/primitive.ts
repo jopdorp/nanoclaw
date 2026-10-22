@@ -22,11 +22,13 @@
  * if either module becomes genuinely optional (see REFACTOR_PLAN open q #3).
  */
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
-import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { getChannelAdapter } from '../../channels/channel-registry.js';
+import { getMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import {
   bindPendingApprovalMessage,
   createPendingApproval,
   deletePendingApproval,
+  findSessionForAgent,
   getSession,
   getUnboundPendingApprovals,
 } from '../../db/sessions.js';
@@ -281,13 +283,14 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
   const adapter = getDeliveryAdapter();
   if (adapter) {
     try {
-      await sendApprovalCard(
+      await deliverApproval(
         adapter,
         approvalId,
         target.messagingGroup,
         approvalCardThread(session, target.messagingGroup),
         title,
         question,
+        session,
       );
     } catch (err) {
       log.error('Failed to deliver approval card', { action, approvalId, err });
@@ -302,16 +305,25 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
   log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
 }
 
-async function sendApprovalCard(
+async function deliverApproval(
   adapter: ChannelDeliveryAdapter,
   approvalId: string,
   to: Pick<MessagingGroup, 'channel_type' | 'platform_id' | 'instance'>,
   threadId: string | null,
   title: string,
   question: string,
+  session: Session,
 ): Promise<void> {
-  // Channels without buttons show fallbackText; handleApprovalTextReply parses the answer.
-  const shortId = approvalId.slice(-6);
+  // No card on a text-only channel: the agent asks in the approver's chat and handleApprovalTextReply reads the answer.
+  if (getChannelAdapter(to.instance ?? to.channel_type)?.textOnly) {
+    const chat = await getMessagingGroupByPlatform(to.channel_type, to.platform_id, to.instance);
+    const asker = (chat && (await findSessionForAgent(session.agent_group_id, chat.id, null))) || session;
+    await notifyAgent(
+      asker,
+      `Ask the approver for approval of: ${title}\n${question}\nWhen they answer, call resolve_approval with their message id.`,
+    );
+    return;
+  }
   const messageId = await adapter.deliver(
     to.channel_type,
     to.platform_id,
@@ -323,7 +335,6 @@ async function sendApprovalCard(
       title,
       question,
       options: APPROVAL_OPTIONS,
-      fallbackText: `${title}\n\n${question}\n\nReply "yes"/"no" (or just answer in your own words); several items pending? reply to this message or name it. Id: ${shortId}.`,
     }),
     undefined,
     to.instance,
@@ -334,14 +345,17 @@ async function sendApprovalCard(
 /**
  * Re-send cards a host restart cut off before the platform confirmed them. A
  * card that landed but lost its bind is sent twice; both resolve the same row.
+ * Text-only approvals are never bound, so each restart asks the agent again.
  */
 export async function redeliverUnboundApprovals(adapter: ChannelDeliveryAdapter): Promise<void> {
   for (const row of await getUnboundPendingApprovals()) {
     // ga- rows belong to the gateway coordinator, which expires its own unbound cards.
     if (!row.approval_id.startsWith('appr-') || !row.channel_type || !row.platform_id) continue;
+    const session = row.session_id ? await getSession(row.session_id) : undefined;
+    if (!session) continue;
     const to = { channel_type: row.channel_type, platform_id: row.platform_id, instance: row.instance ?? undefined };
     try {
-      await sendApprovalCard(adapter, row.approval_id, to, null, row.title, row.question);
+      await deliverApproval(adapter, row.approval_id, to, null, row.title, row.question, session);
       log.info('Approval card redelivered', { approvalId: row.approval_id });
     } catch (err) {
       log.error('Failed to redeliver approval card', { approvalId: row.approval_id, err });

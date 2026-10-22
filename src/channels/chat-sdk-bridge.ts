@@ -352,6 +352,8 @@ export interface ChatSdkBridgeConfig {
    * way and the default depends on installation style.
    */
   supportsThreads: boolean;
+  /** See `ChannelAdapter.textOnly`. */
+  textOnly?: boolean;
   /**
    * Declared wiring-time defaults for this channel. Copied verbatim onto the
    * returned ChannelAdapter, exactly like supportsThreads. See
@@ -559,6 +561,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     instance: config.instance, // undefined ⇒ default instance
 
     supportsThreads: config.supportsThreads,
+    textOnly: config.textOnly,
     defaults: config.defaults,
 
     async setup(hostConfig: ChannelSetup) {

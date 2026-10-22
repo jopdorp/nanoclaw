@@ -231,6 +231,9 @@ export interface ChannelAdapter {
    */
   supportsThreads: boolean;
 
+  /** Cards render as plain text without buttons, so approvals are asked in conversation instead. */
+  textOnly?: boolean;
+
   // Lifecycle
   setup(config: ChannelSetup): Promise<void>;
   teardown(): Promise<void>;

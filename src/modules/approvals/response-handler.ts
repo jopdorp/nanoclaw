@@ -126,7 +126,6 @@ async function handleRegisteredApproval(
   await requestWake(session, 'approval-response');
 }
 
-const TEXT_REPLY = /^(approve|reject)\s+([a-z0-9]{6})(?:\s+(\S[\s\S]*))?$/i;
 const onlyPhrases = (phrases: string) => new RegExp(`^(?:(?:${phrases}|i|please|thanks|it)(?:[\\s.,!]+|$))+$`);
 const APPROVE_REPLY = onlyPhrases(
   "yes|yep|ok|okay|approved?|go ahead|go|do it|fix it|that's fine|fine|sure|ship it|proceed|lgtm",
@@ -141,16 +140,15 @@ interface ChatAddress {
   instance: string;
 }
 
-/** Approver messages handed to the agent with pending approvals attached; resolve_approval consumes one each. */
+/** Approver messages handed to the agent with pending approvals attached; each approval resolves once per message. */
 const approverMessages = new Map<string, ChatAddress & { userId: string; approvalIds: string[]; at: number }>();
 
 /**
- * Typed answer to an approval card on a channel that rendered it as text
- * (see sendApprovalCard's fallbackText). Only the card's own chat can name it,
- * and the sender is checked exactly like a button click. `approve <id>` names
- * the card; a bare yes or no decides the card it replies to, or the only one
- * pending; anything else reaches the agent with the pending approvals
- * attached, and the agent answers through resolve_approval.
+ * The approver's answer, typed in the chat the approval belongs to; the sender
+ * is checked exactly like a button click. A bare yes or no decides the card it
+ * replies to, or the only approval pending; anything else reaches the agent
+ * with the pending approvals attached, and the agent answers through
+ * resolve_approval.
  */
 export async function handleApprovalTextReply(event: InboundEvent): Promise<boolean> {
   let content: Record<string, unknown>;
@@ -160,45 +158,24 @@ export async function handleApprovalTextReply(event: InboundEvent): Promise<bool
   } catch {
     return false;
   }
-  const text = typeof content.text === 'string' ? content.text.trim() : '';
-  const explicit = TEXT_REPLY.exec(text);
-  if (explicit?.[1].toLowerCase() === 'approve' && explicit[3]) return false;
-
   const chat: ChatAddress = {
     channelType: event.channelType,
     platformId: event.platformId,
     threadId: event.threadId,
     instance: event.instance ?? event.channelType,
   };
-  const inChat = (await getPendingApprovalsInChat(chat.channelType, chat.platformId)).filter(
-    (a) => (a.instance ?? a.channel_type) === chat.instance,
-  );
   const payload: ResponsePayload = {
     questionId: '',
     value: '',
     userId: typeof content.senderId === 'string' ? content.senderId : null,
     ...chat,
   };
-  const userId = namespacedUserId(payload) ?? '';
-
-  if (explicit) {
-    const [, verb, shortId, reason] = explicit;
-    const named = inChat.filter((a) => a.approval_id.endsWith(`-${shortId.toLowerCase()}`));
-    if (named.length !== 1) {
-      await say(chat, `No pending approval ${shortId}.`);
-      return true;
-    }
-    if (!(await isAuthorizedApprovalClick(named[0], payload))) {
-      log.warn('Ignoring approval reply from a non-approver', { approvalId: named[0].approval_id, userId });
-      return true;
-    }
-    await decide(named[0], verb.toLowerCase(), userId, chat, reason && clampReason(reason));
-    return true;
-  }
-
   const mine: PendingApproval[] = [];
-  for (const a of inChat) if (a.platform_message_id && (await isAuthorizedApprovalClick(a, payload))) mine.push(a);
+  for (const a of await getPendingApprovalsInChat(chat.channelType, chat.platformId)) {
+    if ((a.instance ?? a.channel_type) === chat.instance && (await isAuthorizedApprovalClick(a, payload))) mine.push(a);
+  }
   if (mine.length === 0) return false;
+  const userId = namespacedUserId(payload) ?? '';
 
   const replyToId = (content.replyTo as { id?: unknown } | undefined)?.id;
   const target = replyToId
@@ -206,7 +183,7 @@ export async function handleApprovalTextReply(event: InboundEvent): Promise<bool
     : mine.length === 1
       ? mine[0]
       : undefined;
-  const said = text.toLowerCase().replace(/’/g, "'");
+  const said = (typeof content.text === 'string' ? content.text : '').trim().toLowerCase().replace(/’/g, "'");
   const option = APPROVE_REPLY.test(said) ? 'approve' : REJECT_REPLY.test(said) ? 'reject' : null;
   if (target && option) {
     await decide(target, option, userId, chat);
@@ -223,7 +200,7 @@ export async function handleApprovalTextReply(event: InboundEvent): Promise<bool
       `approverMessageId: ${event.message.id}`,
       ...mine.map(
         (a) =>
-          `${a.approval_id.slice(-6)} · ${a.title} · ${a.question.split('\n')[0].slice(0, 160)} · created ${a.created_at} · card ${a.platform_message_id}`,
+          `${a.approval_id.slice(-6)} · ${a.title} · ${a.question.split('\n')[0].slice(0, 160)} · created ${a.created_at}${a.platform_message_id ? ` · card ${a.platform_message_id}` : ''}`,
       ),
     ].join('\n'),
   });
@@ -233,18 +210,23 @@ export async function handleApprovalTextReply(event: InboundEvent): Promise<bool
 /** resolve_approval: the agent's reading of an approver message the host recorded above. */
 export async function resolveApprovalAction(content: Record<string, unknown>, session: Session): Promise<void> {
   const refuse = (why: string) => notifyAgent(session, `resolve_approval refused, nothing was resolved: ${why}`);
-  const { approvalId, decision, reason, approverMessageId } = content;
-  if (typeof approvalId !== 'string' || typeof approverMessageId !== 'string') {
-    return refuse('approvalId and approverMessageId are required.');
+  const { approvalIds, decision, reason, approverMessageId } = content;
+  if (!Array.isArray(approvalIds) || approvalIds.length === 0 || typeof approverMessageId !== 'string') {
+    return refuse('approvalIds (at least one) and approverMessageId are required.');
   }
   if (decision !== 'approve' && decision !== 'reject') return refuse('decision must be approve or reject.');
   const message = approverMessages.get(approverMessageId);
   if (!message || Date.now() - message.at > APPROVER_MESSAGE_TTL_MS) {
-    return refuse(`${approverMessageId} is not a recent, unused approver reply sent while approvals were pending.`);
+    return refuse(`${approverMessageId} is not a recent approver reply sent while approvals were pending.`);
   }
-  const fullId = message.approvalIds.find((id) => id === approvalId || id.endsWith(`-${approvalId}`));
-  if (!fullId) return refuse(`${approvalId} was not pending when the approver wrote ${approverMessageId}.`);
-  approverMessages.delete(approverMessageId);
+  const fullIds: string[] = [];
+  for (const id of new Set(approvalIds)) {
+    const fullId = message.approvalIds.find((full) => full === id || full.endsWith(`-${id}`));
+    if (!fullId)
+      return refuse(`${id} was not pending when the approver wrote ${approverMessageId}, or it already resolved.`);
+    fullIds.push(fullId);
+  }
+  message.approvalIds = message.approvalIds.filter((id) => !fullIds.includes(id));
 
   const chat = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
   if (
@@ -254,19 +236,24 @@ export async function resolveApprovalAction(content: Record<string, unknown>, se
   ) {
     return refuse(`${approverMessageId} was not sent in this conversation.`);
   }
-  const approval = await getPendingApproval(fullId);
-  if (approval?.status !== 'pending') return refuse(`${approvalId} is no longer pending.`);
-  const payload: ResponsePayload = { questionId: fullId, value: decision, ...message };
-  if (!(await isAuthorizedApprovalClick(approval, payload))) {
-    return refuse(`${approverMessageId} is not from this approval's approver.`);
+  const approvals: PendingApproval[] = [];
+  for (const id of fullIds) {
+    const approval = await getPendingApproval(id);
+    if (approval?.status !== 'pending') return refuse(`${id.slice(-6)} is no longer pending.`);
+    if (!(await isAuthorizedApprovalClick(approval, { questionId: id, value: decision, ...message }))) {
+      return refuse(`${approverMessageId} is not from the approver of ${id.slice(-6)}.`);
+    }
+    approvals.push(approval);
   }
-  await decide(
-    approval,
-    decision,
-    message.userId,
-    message,
-    typeof reason === 'string' ? clampReason(reason) : undefined,
-  );
+  for (const approval of approvals) {
+    await decide(
+      approval,
+      decision,
+      message.userId,
+      message,
+      typeof reason === 'string' ? clampReason(reason) : undefined,
+    );
+  }
 }
 
 async function decide(
@@ -277,7 +264,7 @@ async function decide(
   reason?: string,
 ): Promise<void> {
   await handleRegisteredApproval(approval, option, userId, reason);
-  await say(chat, `${option === 'approve' ? '✅ Approved' : '❌ Rejected'}: ${approval.title}`);
+  await say(chat, `${option === 'approve' ? '✅ Done' : '❌ Not doing'}: ${approval.title}`);
 }
 
 async function say(chat: ChatAddress, text: string): Promise<void> {

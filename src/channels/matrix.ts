@@ -177,6 +177,7 @@ registerChannelAdapter('matrix', {
       adapter: matrixAdapter,
       concurrency: 'concurrent',
       supportsThreads: false,
+      textOnly: true,
       defaults: MATRIX_DEFAULTS,
       // raw is the matrix-js-sdk MatrixEvent; replyEventId reads m.relates_to.m.in_reply_to.event_id.
       extractReplyContext: (raw) => (typeof raw.replyEventId === 'string' ? { id: raw.replyEventId } : null),
