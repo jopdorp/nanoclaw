@@ -163,6 +163,8 @@ sed -E -i \
   "$DOCS/in-cluster-runtime.review.yaml"
 grep -qF "$AGENT_IMAGE" "$DOCS/in-cluster-runtime.review.yaml" || fail 'agent digest update failed'
 grep -qF "$HOST_IMAGE" "$DOCS/in-cluster-runtime.review.yaml" || fail 'host digest update failed'
+# Session Jobs pin the RWO state volume to the old host node; recycle them so the new host can attach.
+kubectl -n "$NAMESPACE" delete job -l nanoclaw-group-folder --ignore-not-found >/dev/null
 kubectl apply -f "$DOCS/in-cluster-runtime.review.yaml"
 kubectl rollout status -n "$NAMESPACE" "deploy/$ORCHESTRATOR" --timeout=5m
 
