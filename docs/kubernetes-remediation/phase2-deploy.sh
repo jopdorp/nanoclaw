@@ -427,6 +427,15 @@ ncl messaging-groups create --channel-type matrix --platform-id "$ROOM_ID" --ins
 ncl wirings create --channel-type matrix --platform-id "$ROOM_ID" --instance matrix \
   --agent-group-id "$PRIMARY_ID" --engage-mode pattern --engage-pattern '.' \
   --sender-scope known --ignored-message-policy drop --session-mode shared >/dev/null
+# Mail from Sparkle reaches Orfie on both mailboxes (EMAIL_* keys in nanoclaw-dotenv's .env).
+WIRINGS=$(ncl wirings list --json)
+for box in claw orfie; do
+  MG_ID=$(ncl messaging-groups create --channel-type email --platform-id claws.sparkle@gmail.com --instance "email-$box" \
+    --name "Sparkle Claws via $box@" --is-group 0 --unknown-sender-policy public --json | jq -r '.id')
+  jq -e --arg m "$MG_ID" --arg g "$PRIMARY_ID" '.[] | select(.messaging_group_id == $m and .agent_group_id == $g)' <<<"$WIRINGS" >/dev/null \
+    || ncl wirings create --messaging-group-id "$MG_ID" --agent-group-id "$PRIMARY_ID" --engage-mode pattern \
+      --engage-pattern '.' --sender-scope all --ignored-message-policy drop --session-mode shared >/dev/null
+done
 ncl groups restart --id "$PRIMARY_ID" >/dev/null
 
 step '6/6 create a harmless session and prove one Codex round-trip'

@@ -8,3 +8,4 @@
 
 import './cli.js';
 import './matrix.js';
+import './email.js';
