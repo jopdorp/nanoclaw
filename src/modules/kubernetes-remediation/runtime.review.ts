@@ -121,7 +121,7 @@ export async function startKubernetesRemediation(
   );
   void runTrivyWatchers(reader, sink, signal, path.join(DATA_DIR, 'kubernetes-remediation-seen.json')).catch(
     (error) => {
-      if (!signal.aborted) log.error('Kubernetes remediation Trivy watcher stopped', { error });
+      if (!signal.aborted) log.error('Kubernetes remediation Trivy watcher stopped', { err: error });
     },
   );
 }
