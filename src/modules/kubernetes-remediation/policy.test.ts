@@ -86,7 +86,7 @@ describe('Kubernetes remediation policy', () => {
     });
     expect(auto('duckdns', image('ghcr.io/x/app:v1.2.3', 'ghcr.io/x/app:v1.9.0'))).toBe(true);
     expect(auto('duckdns', image('ghcr.io/x/app:1.2.3', 'ghcr.io/x/app:2.0.0'))).toBe(false);
-    expect(auto('duckdns', image('ghcr.io/x/app:1.2.3', 'ghcr.io/x/app'))).toBe(false);
+    expect(auto('nextcloud', image('nextcloud:31.0.1', 'docker.io/library/nextcloud'))).toBe(false);
     expect(auto('duckdns', image('matrixdotorg/synapse:latest', 'docker.io/matrixdotorg/synapse:v1.140.0'))).toBe(true);
     expect(auto('nextcloud', image('nextcloud:31.0.1', 'docker.io/library/nextcloud:31.0.9-apache'))).toBe(true);
     expect(auto('nextcloud', image('nextcloud:31.0.1', 'docker.io/library/nextcloud:31.1.0'))).toBe(false);
@@ -99,10 +99,16 @@ describe('Kubernetes remediation policy', () => {
     const restart = { type: 'restart', restartedAt: new Date(now).toISOString() };
     const laneC = validateRemediationPlan({ ...base('longhorn-system'), operation: restart }, now);
     expect([laneC.lane, laneC.automaticWriteCap, isAutoApproved(laneC, t1)]).toEqual(['C', 0, false]);
-    expect(() => validateRemediationPlan({ ...base('nanoclaw-remediator'), operation: restart }, now)).toThrow();
+    const lane = (namespace: string) => validateRemediationPlan({ ...base(namespace), operation: restart }, now).lane;
+    expect(['security', 'nanoclaw-remediator', 'wireguard-home', 'kube-system'].map(lane)).toEqual([
+      'A',
+      'always-ask',
+      'always-ask',
+      'C',
+    ]);
   });
 
-  it('keeps backups to CronJob image updates', () => {
+  it('never deletes anything in backups', () => {
     const target = (kind: string) => ({ ...base('backups').target, apiVersion: 'batch/v1', kind });
     const cron = validateRemediationPlan(
       {
@@ -120,7 +126,7 @@ describe('Kubernetes remediation policy', () => {
     expect([cron.automaticWriteCap, isAutoApproved(cron, new Set())]).toEqual([0, true]);
     expect(() =>
       validateRemediationPlan({ ...base('backups'), target: target('Job'), operation: { type: 'delete-job' } }, now),
-    ).toThrow('backups is immutable');
+    ).toThrow('nothing in backups is ever deleted');
   });
 
   it('rejects tag updates, target drift fields, backup deletion, and stale plans', () => {
@@ -153,7 +159,7 @@ describe('Kubernetes remediation policy', () => {
         },
         now,
       ),
-    ).toThrow('backups is immutable');
+    ).toThrow('nothing in backups is ever deleted');
     expect(() =>
       validateRemediationPlan(
         { ...base(), expiresAt: '2026-10-21T11:59:00Z', operation: { type: 'scale', before: 1, after: 1 } },
@@ -173,6 +179,6 @@ describe('Kubernetes remediation policy', () => {
     );
     expect(() =>
       validateRemediationPlan(helmValues('vaultwarden', 'kubernetes/helm-charts/vaultwarden-values.yaml'), now),
-    ).toThrow('helm-values requires a Lane A or Lane C Helm release');
+    ).toThrow('never goes through Helm');
   });
 });

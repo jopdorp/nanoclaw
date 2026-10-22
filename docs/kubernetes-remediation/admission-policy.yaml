@@ -18,20 +18,14 @@ spec:
     - name: remediator-service-account
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
   variables:
-    - name: excludedNamespaces
-      expression: "['kube-system', 'kube-node-lease', 'kube-public', 'longhorn-system', 'nanoclaw-remediator', 'backups', 'vaultwarden', 'wireguard-home']"
     - name: approvalRequiredNamespaces
-      expression: "['vaultwarden', 'wireguard-home']"
+      expression: "['vaultwarden', 'wireguard-home', 'nanoclaw-remediator']"
     - name: restartAnnotation
       expression: "'kubectl.kubernetes.io/restartedAt'"
     - name: trustedRegistries
       expression: "['docker.io', 'docker.gitea.com', 'cr.fluentbit.io', 'ghcr.io', 'quay.io', 'registry.k8s.io', 'mirror.gcr.io', 'lscr.io', 'registry.prophet.jopdorp.nl']"
     - name: digestImagePattern
       expression: "'^(docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io|lscr[.]io|registry[.]prophet[.]jopdorp[.]nl)/[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
-    - name: vaultwardenImagePattern
-      expression: "'^docker[.]io/vaultwarden/server(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
-    - name: wireguardImagePattern
-      expression: "'^lscr[.]io/linuxserver/wireguard(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
     - name: newAnnotations
       expression: "has(object.spec.template.metadata.annotations) ? object.spec.template.metadata.annotations : {}"
     - name: oldAnnotations
@@ -59,23 +53,19 @@ spec:
     - name: imageRepos
       expression: >-
         variables.imageQualified.map(e, [e[0], e[1].matches('^docker[.]io/[^/]+$') ? 'docker.io/library/' + e[1].substring(10) : e[1]])
-    - name: isVaultwarden
-      expression: request.namespace == 'vaultwarden' && request.resource.resource == 'deployments' && object.metadata.name == 'vaultwarden'
-    - name: isWireguard
-      expression: request.namespace == 'wireguard-home' && request.resource.resource == 'deployments' && object.metadata.name == 'wireguard'
   validations:
-    - expression: variables.isVaultwarden || variables.isWireguard || !(request.namespace in variables.excludedNamespaces)
-      message: namespace is outside the approved remediation lanes
-    - expression: request.namespace != 'vaultwarden' || variables.isVaultwarden
-      message: only the vaultwarden Deployment is writable in namespace vaultwarden
-    - expression: request.namespace != 'wireguard-home' || variables.isWireguard
-      message: only the wireguard Deployment is writable in namespace wireguard-home
+    - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
+      message: kube-system and longhorn-system are written only by the break-glass identity
     - expression: >-
         !(request.namespace in variables.approvalRequiredNamespaces) ||
         (has(oldObject.metadata.annotations) &&
          'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations &&
          oldObject.metadata.annotations['remediation.nanoclaw.io/approval-id'].matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'))
       message: always-ask remediation requires a proxy-verified per-action Matrix approval annotation
+    - expression: >-
+        !(request.namespace == 'wireguard-home' && request.resource.resource == 'deployments' && object.metadata.name == 'wireguard') ||
+        !has(dyn(object.spec).replicas) || dyn(object.spec).replicas > 0
+      message: wireguard is never scaled to 0
     - expression: >-
         dyn(object).all(k, k in ['metadata', 'spec'] || (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
         dyn(oldObject).all(k, k in ['metadata', 'spec'] || (k in dyn(object) && dyn(oldObject)[k] == dyn(object)[k]))
@@ -122,11 +112,9 @@ spec:
           dyn(c).all(k, k == 'image' || (k in dyn(oc) && dyn(c)[k] == dyn(oc)[k])) &&
           dyn(oc).all(k, k == 'image' || (k in dyn(c) && dyn(oc)[k] == dyn(c)[k]))))
       message: init-container count/order/names, env, envFrom, volumeMounts, securityContext, hostPort and all fields other than image are immutable
-    - expression: "!has(dyn(object.spec).replicas) || (dyn(object.spec).replicas >= 0 && dyn(object.spec).replicas <= 10)"
-      message: replicas must be between 0 and 10
     # A rollback may unpin back to the exact tag the live digest was pinned from, never to another mutable tag.
     - expression: >-
-        variables.isVaultwarden || variables.isWireguard || variables.newContainers.all(c,
+        variables.newContainers.all(c,
           variables.oldContainers.exists(oc, oc.name == c.name &&
             (c.image == oc.image ||
               (oc.image.size() == c.image.size() + 72 && oc.image.startsWith(c.image + '@sha256:') && oc.image.matches('@sha256:[0-9a-f]{64}$')) ||
@@ -135,7 +123,7 @@ spec:
                  variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1]))))))
       message: a new container image must retain its repository and use a trusted registry sha256 digest
     - expression: >-
-        variables.isVaultwarden || variables.isWireguard || variables.newInitContainers.all(c,
+        variables.newInitContainers.all(c,
           variables.oldInitContainers.exists(oc, oc.name == c.name &&
             (c.image == oc.image ||
               (oc.image.size() == c.image.size() + 72 && oc.image.startsWith(c.image + '@sha256:') && oc.image.matches('@sha256:[0-9a-f]{64}$')) ||
@@ -143,26 +131,6 @@ spec:
                variables.imageRepos.exists(n, n[0] == c.image &&
                  variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1]))))))
       message: a new init-container image must retain its repository and use a trusted registry sha256 digest
-    - expression: >-
-        !variables.isVaultwarden ||
-        (((!has(dyn(object.spec).replicas) && !has(dyn(oldObject.spec).replicas)) ||
-          (has(dyn(object.spec).replicas) && has(dyn(oldObject.spec).replicas) && dyn(object.spec).replicas == dyn(oldObject.spec).replicas)) &&
-         variables.newAnnotations == variables.oldAnnotations &&
-         variables.newInitContainers.map(c, c.image) == variables.oldInitContainers.map(c, c.image) &&
-         variables.newContainers.exists(c, c.name == 'vaultwarden' && c.image.matches(variables.vaultwardenImagePattern)) &&
-         variables.newContainers.all(c, c.name == 'vaultwarden' ||
-           variables.oldContainers.exists(oc, oc.name == c.name && c.image == oc.image)))
-      message: vaultwarden permits only its vaultwarden container image to change to docker.io/vaultwarden/server by sha256 digest
-    - expression: >-
-        !variables.isWireguard ||
-        (((!has(dyn(object.spec).replicas) && !has(dyn(oldObject.spec).replicas)) ||
-          (has(dyn(object.spec).replicas) && has(dyn(oldObject.spec).replicas) && dyn(object.spec).replicas == dyn(oldObject.spec).replicas)) &&
-         variables.newAnnotations == variables.oldAnnotations &&
-         variables.newInitContainers.map(c, c.image) == variables.oldInitContainers.map(c, c.image) &&
-         variables.newContainers.exists(c, c.name == 'wireguard' && c.image.matches(variables.wireguardImagePattern)) &&
-         variables.newContainers.all(c, c.name == 'wireguard' ||
-           variables.oldContainers.exists(oc, oc.name == c.name && c.image == oc.image)))
-      message: wireguard-home permits only its wireguard container image to change to lscr.io/linuxserver/wireguard by sha256 digest
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -192,10 +160,10 @@ spec:
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
   variables:
     - name: excludedNamespaces
-      expression: "['kube-system', 'kube-node-lease', 'kube-public', 'longhorn-system', 'nanoclaw-remediator', 'backups', 'vaultwarden', 'wireguard-home']"
+      expression: "['kube-system', 'longhorn-system', 'nanoclaw-remediator', 'vaultwarden', 'wireguard-home']"
   validations:
     - expression: "!(request.namespace in variables.excludedNamespaces)"
-      message: scale is allowed only in Lane A namespaces
+      message: the scale subresource is allowed only in Lane A namespaces
     - expression: >-
         dyn(object).all(k, k == 'spec' || (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
         dyn(oldObject).all(k, k == 'spec' || (k in dyn(object) && dyn(oldObject)[k] == dyn(object)[k]))
@@ -204,8 +172,6 @@ spec:
         dyn(object.spec).all(k, k == 'replicas' || (k in dyn(oldObject.spec) && dyn(object.spec)[k] == dyn(oldObject.spec)[k])) &&
         dyn(oldObject.spec).all(k, k == 'replicas' || (k in dyn(object.spec) && dyn(oldObject.spec)[k] == dyn(object.spec)[k]))
       message: only spec.replicas may change
-    - expression: "!has(dyn(object.spec).replicas) || (dyn(object.spec).replicas >= 0 && dyn(object.spec).replicas <= 10)"
-      message: replicas must be between 0 and 10
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -236,10 +202,6 @@ spec:
     - name: remediator-service-account
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
   validations:
-    - expression: request.resource.resource != 'persistentvolumeclaims' || request.namespace != 'backups'
-      message: PVC deletion is forbidden in namespace backups
-    - expression: request.resource.resource != 'persistentvolumes' || !has(dyn(oldObject).spec.claimRef) || dyn(oldObject).spec.claimRef.namespace != 'backups'
-      message: PV deletion is forbidden for volumes claimed from namespace backups
     - expression: >-
         has(oldObject.metadata.annotations) &&
         'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations &&
@@ -272,8 +234,12 @@ spec:
     - name: remediator-service-account
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
   validations:
-    - expression: "!(request.namespace in ['kube-system', 'longhorn-system', 'nanoclaw-remediator', 'backups', 'vaultwarden', 'wireguard-home'])"
-      message: Job deletion is allowed only in Lane A namespaces
+    - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
+      message: kube-system and longhorn-system are written only by the break-glass identity
+    - expression: >-
+        !(request.namespace in ['vaultwarden', 'wireguard-home', 'nanoclaw-remediator']) ||
+        (has(oldObject.metadata.annotations) && 'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations)
+      message: always-ask remediation requires a proxy-verified per-action Matrix approval annotation
     - expression: >-
         has(oldObject.status.conditions) &&
         oldObject.status.conditions.exists(c, c.type in ['Complete', 'Failed'] && c.status == 'True') &&
@@ -335,8 +301,12 @@ spec:
       expression: >-
         variables.imageQualified.map(e, [e[0], e[1].matches('^docker[.]io/[^/]+$') ? 'docker.io/library/' + e[1].substring(10) : e[1]])
   validations:
-    - expression: "!(request.namespace in ['kube-system', 'kube-node-lease', 'kube-public', 'longhorn-system', 'nanoclaw-remediator', 'vaultwarden', 'wireguard-home'])"
-      message: namespace is outside the CronJob remediation lanes
+    - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
+      message: kube-system and longhorn-system are written only by the break-glass identity
+    - expression: >-
+        !(request.namespace in ['vaultwarden', 'wireguard-home', 'nanoclaw-remediator']) ||
+        (has(oldObject.metadata.annotations) && 'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations)
+      message: always-ask remediation requires a proxy-verified per-action Matrix approval annotation
     - expression: >-
         dyn(object).all(k, k in ['metadata', 'spec'] || (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
         dyn(oldObject).all(k, k in ['metadata', 'spec'] || (k in dyn(object) && dyn(oldObject)[k] == dyn(object)[k]))
@@ -449,8 +419,8 @@ spec:
     - name: pinnedImagePattern
       expression: "'^((docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io|lscr[.]io|registry[.]prophet[.]jopdorp[.]nl)/)?[a-z0-9]+([_-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
   validations:
-    - expression: request.namespace == '' || request.namespace in ['gitea', 'nextcloud', 'excalidraw', 'wiki-js', 'logging', 'trivy-operator']
-      message: the Helm path writes only the allowlisted release namespaces
+    - expression: "!(request.namespace in ['vaultwarden', 'kube-system', 'longhorn-system'])"
+      message: the Helm path never writes vaultwarden, and Lane C goes through the break-glass identity
     # A helm rollback may unpin back to the exact tag the live digest was pinned from, never to another mutable tag.
     - expression: >-
         !(request.resource.resource in ['deployments', 'statefulsets', 'daemonsets']) ||
@@ -479,9 +449,8 @@ spec:
   validationActions: [Deny, Audit]
 
 ---
-# The break-glass identity applies approved Lane C plans, helm upgrades of Lane C
-# releases included. It stays in kube-system and longhorn-system, writes only Helm
-# release Secrets, keeps each container's image repository and pins new images by digest.
+# The break-glass identity applies approved Lane C plans, helm and manifest applies included.
+# It stays in kube-system and longhorn-system (and cluster-scoped objects) and cannot rewrite RBAC.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -491,86 +460,25 @@ spec:
   matchConstraints:
     matchPolicy: Equivalent
     resourceRules:
-      - apiGroups: [apps]
-        apiVersions: [v1]
-        operations: [CREATE, UPDATE]
-        resources: [deployments, statefulsets, daemonsets, deployments/scale, statefulsets/scale]
-        scope: Namespaced
-      - apiGroups: [""]
-        apiVersions: [v1]
+      - apiGroups: ['*']
+        apiVersions: ['*']
         operations: [CREATE, UPDATE, DELETE]
-        resources: [secrets]
-        scope: Namespaced
-      - apiGroups: [rbac.authorization.k8s.io]
-        apiVersions: [v1]
-        operations: [UPDATE]
-        resources: [clusterroles, clusterrolebindings, roles, rolebindings]
+        resources: ['*']
+        scope: '*'
   matchConditions:
     - name: breakglass-service-account
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-breakglass'
-  variables:
-    - name: trustedRegistries
-      expression: "['docker.io', 'docker.gitea.com', 'cr.fluentbit.io', 'ghcr.io', 'quay.io', 'registry.k8s.io', 'mirror.gcr.io', 'lscr.io', 'registry.prophet.jopdorp.nl']"
-    - name: digestImagePattern
-      expression: "'^(docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io|lscr[.]io|registry[.]prophet[.]jopdorp[.]nl)/[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
-    - name: isWorkload
-      expression: request.resource.resource in ['deployments', 'statefulsets', 'daemonsets'] && request.subResource == ''
-    - name: newContainers
-      expression: "variables.isWorkload ? object.spec.template.spec.containers : []"
-    - name: oldContainers
-      expression: "variables.isWorkload && oldObject != null ? oldObject.spec.template.spec.containers : []"
-    - name: newInitContainers
-      expression: "variables.isWorkload && has(object.spec.template.spec.initContainers) ? object.spec.template.spec.initContainers : []"
-    - name: oldInitContainers
-      expression: "variables.isWorkload && oldObject != null && has(oldObject.spec.template.spec.initContainers) ? oldObject.spec.template.spec.initContainers : []"
-    # [image, repository] pairs, the repository canonicalised like the host's parseImage: no tag or digest, docker.io/library/ for bare names.
-    - name: imagePaths
-      expression: >-
-        (variables.newContainers + variables.oldContainers + variables.newInitContainers + variables.oldInitContainers)
-          .map(c, [string(c.image), string(c.image).find('^([^@:/]*(:[^@/]*)?/)*[^@:/]*')])
-    - name: imageQualified
-      expression: >-
-        variables.imagePaths.map(e, [e[0], variables.trustedRegistries.exists(r, e[1].startsWith(r + '/')) ? e[1] : 'docker.io/' + e[1]])
-    - name: imageRepos
-      expression: >-
-        variables.imageQualified.map(e, [e[0], e[1].matches('^docker[.]io/[^/]+$') ? 'docker.io/library/' + e[1].substring(10) : e[1]])
-    - name: secret
-      expression: "request.operation == 'DELETE' ? oldObject : object"
   validations:
     - expression: request.namespace == '' || request.namespace in ['kube-system', 'longhorn-system']
       message: the break-glass identity writes only in kube-system and longhorn-system
-    - expression: request.operation != 'CREATE' || !variables.isWorkload
-      message: the break-glass identity may not create workloads
+    # escalate and bind let it update the named chart RBAC; freezing rules and subjects keeps that from granting anything new.
     - expression: >-
-        request.resource.resource != 'secrets' ||
-        (has(variables.secret.type) && variables.secret.type == 'helm.sh/release.v1')
-      message: the break-glass identity writes only Helm release Secrets
-    - expression: >-
-        !variables.isWorkload || variables.newContainers.all(c,
-          variables.oldContainers.exists(oc, oc.name == c.name &&
-            (c.image == oc.image ||
-              (oc.image.size() == c.image.size() + 72 && oc.image.startsWith(c.image + '@sha256:') && oc.image.matches('@sha256:[0-9a-f]{64}$')) ||
-              (c.image.matches(variables.digestImagePattern) &&
-               variables.imageRepos.exists(n, n[0] == c.image &&
-                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1]))))))
-      message: a new container image must retain its repository and use a trusted registry sha256 digest
-    - expression: >-
-        !variables.isWorkload || variables.newInitContainers.all(c,
-          variables.oldInitContainers.exists(oc, oc.name == c.name &&
-            (c.image == oc.image ||
-              (oc.image.size() == c.image.size() + 72 && oc.image.startsWith(c.image + '@sha256:') && oc.image.matches('@sha256:[0-9a-f]{64}$')) ||
-              (c.image.matches(variables.digestImagePattern) &&
-               variables.imageRepos.exists(n, n[0] == c.image &&
-                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1]))))))
-      message: a new init-container image must retain its repository and use a trusted registry sha256 digest
-    # escalate and bind let these identities update the named chart RBAC; freezing rules and subjects keeps that from granting anything new.
-    - expression: >-
-        !(request.resource.resource in ['clusterroles', 'roles']) ||
+        request.operation != 'UPDATE' || !(request.resource.resource in ['clusterroles', 'roles']) ||
         ((has(dyn(object).rules) ? dyn(object).rules : []) == (has(dyn(oldObject).rules) ? dyn(oldObject).rules : []) &&
          (has(dyn(object).aggregationRule) ? dyn(object).aggregationRule : {}) == (has(dyn(oldObject).aggregationRule) ? dyn(oldObject).aggregationRule : {}))
       message: the break-glass identity may not change RBAC rules
     - expression: >-
-        !(request.resource.resource in ['clusterrolebindings', 'rolebindings']) ||
+        request.operation != 'UPDATE' || !(request.resource.resource in ['clusterrolebindings', 'rolebindings']) ||
         (has(dyn(object).subjects) ? dyn(object).subjects : []) == (has(dyn(oldObject).subjects) ? dyn(oldObject).subjects : [])
       message: the break-glass identity may not change RBAC subjects
 ---
@@ -580,6 +488,62 @@ metadata:
   name: nanoclaw-breakglass-guard
 spec:
   policyName: nanoclaw-breakglass-guard
+  validationActions: [Deny, Audit]
+---
+# The owner's NEVER list, for every identity the host holds, approved or not.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-never-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ['*']
+        apiVersions: ['*']
+        operations: [DELETE]
+        resources: ['*']
+        scope: '*'
+      - apiGroups: ['']
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [secrets]
+        scope: Namespaced
+  matchConditions:
+    - name: host-identities
+      expression: >-
+        request.userInfo.username in ['nanoclaw-remediator', 'nanoclaw-helm', 'nanoclaw-breakglass', 'nanoclaw-remediation-approver']
+          .map(n, 'system:serviceaccount:nanoclaw-remediator:' + n)
+  validations:
+    - expression: request.operation != 'DELETE' || request.namespace != 'backups'
+      message: nothing in backups is ever deleted
+    - expression: >-
+        request.operation != 'DELETE' || request.resource.group != 'longhorn.io' ||
+        !(request.resource.resource in ['backups', 'backupvolumes', 'backuptargets', 'backupbackingimages'])
+      message: Longhorn backups are never deleted
+    - expression: >-
+        request.operation != 'DELETE' || request.resource.resource != 'persistentvolumes' ||
+        !has(dyn(oldObject).spec.claimRef) || dyn(oldObject).spec.claimRef.namespace != 'backups'
+      message: volumes claimed from backups are never deleted
+    - expression: >-
+        request.operation != 'DELETE' || request.resource.group != 'longhorn.io' || request.resource.resource != 'volumes' ||
+        !has(oldObject.status) || !has(oldObject.status.kubernetesStatus) ||
+        !has(oldObject.status.kubernetesStatus.namespace) || oldObject.status.kubernetesStatus.namespace != 'backups'
+      message: Longhorn volumes claimed from backups are never deleted
+    - expression: request.resource.resource != 'secrets' || request.namespace != 'vaultwarden'
+      message: vaultwarden Secrets are never written
+    - expression: >-
+        request.operation != 'DELETE' || request.namespace != 'wireguard-home' ||
+        request.resource.resource != 'deployments' || request.name != 'wireguard'
+      message: the wireguard Deployment is never deleted
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-never-guard
+spec:
+  policyName: nanoclaw-never-guard
   validationActions: [Deny, Audit]
 
 # PSA inventory, read-only inspection on 2026-10-21:

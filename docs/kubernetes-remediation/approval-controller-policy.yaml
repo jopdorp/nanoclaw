@@ -13,6 +13,11 @@ spec:
         operations: [UPDATE]
         resources: [daemonsets, deployments, statefulsets]
         scope: Namespaced
+      - apiGroups: [batch]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [cronjobs, jobs]
+        scope: Namespaced
       - apiGroups: ['']
         apiVersions: [v1]
         operations: [UPDATE]
@@ -21,8 +26,6 @@ spec:
     - name: approval-controller
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediation-approver'
   variables:
-    - name: laneANamespaces
-      expression: "['nextcloud', 'mail', 'gitea', 'monitoring', 'wiki-js', 'logging', 'excalidraw', 'excalidraw-room', 'openclaw', 'openclaw-private', 'duckdns', 'hermes', 'mpcpi', 'prophet', 'schipperswoning', 'trivy-operator']"
     - name: key
       expression: "'remediation.nanoclaw.io/approval-id'"
     - name: newAnnotations
@@ -31,11 +34,9 @@ spec:
       expression: 'has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}'
   validations:
     - expression: >-
-        !(request.resource.resource in ['deployments', 'statefulsets', 'daemonsets']) ||
-        request.namespace in variables.laneANamespaces ||
-        (request.namespace == 'vaultwarden' && object.metadata.name == 'vaultwarden') ||
-        (request.namespace == 'wireguard-home' && object.metadata.name == 'wireguard')
-      message: approval annotations on workloads are limited to the reviewed lanes
+        request.resource.resource in ['persistentvolumes', 'persistentvolumeclaims'] ||
+        request.namespace in ['vaultwarden', 'wireguard-home', 'nanoclaw-remediator']
+      message: approval annotations on workloads belong only to the always-ask namespaces
     - expression: request.resource.resource != 'persistentvolumeclaims' || request.namespace != 'backups'
       message: backup PVCs are immutable
     - expression: >-
@@ -113,36 +114,4 @@ metadata:
   name: nanoclaw-remediation-approver-binding
 spec:
   policyName: nanoclaw-remediation-approver-binding
-  validationActions: [Deny, Audit]
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicy
-metadata:
-  name: nanoclaw-remediation-approved-write
-spec:
-  failurePolicy: Fail
-  matchConstraints:
-    matchPolicy: Equivalent
-    resourceRules:
-      - apiGroups: [apps]
-        apiVersions: [v1]
-        operations: [UPDATE]
-        resources: [daemonsets, deployments, statefulsets]
-        scope: Namespaced
-  matchConditions:
-    - name: remediator-service-account
-      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
-  validations:
-    - expression: >-
-        has(oldObject.metadata.annotations) &&
-        'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations &&
-        oldObject.metadata.annotations['remediation.nanoclaw.io/approval-id'].matches('^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
-      message: every remediator write requires a host-installed Matrix approval annotation
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicyBinding
-metadata:
-  name: nanoclaw-remediation-approved-write
-spec:
-  policyName: nanoclaw-remediation-approved-write
   validationActions: [Deny, Audit]

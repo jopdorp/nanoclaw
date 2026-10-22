@@ -3,7 +3,9 @@ import { createHash } from 'node:crypto';
 import type { RemediationLane, RemediationPlan, TargetRef, ValidatedPlan, ValuesScalar } from './types.js';
 
 /** Every write here needs approval and runs as the break-glass identity. */
-export const LANE_C_NAMESPACES = new Set(['kube-system', 'kube-node-lease', 'kube-public', 'longhorn-system']);
+export const LANE_C_NAMESPACES = new Set(['kube-system', 'longhorn-system']);
+/** Every write here needs approval; nanoclaw-remediator is Orfie modifying itself. Every other namespace is Lane A. */
+const ALWAYS_ASK_NAMESPACES = new Set(['vaultwarden', 'wireguard-home', 'nanoclaw-remediator']);
 
 const API_VERSIONS: Record<TargetRef['kind'], TargetRef['apiVersion']> = {
   Deployment: 'apps/v1',
@@ -28,8 +30,6 @@ const IMAGE_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest)$/;
 // Only the chart's own top-level key; nested ones usually size a subchart's database StatefulSet.
 const REPLICA_KEY_RE = /^(replicas|replicaCount)$/;
 const PINNED_RE = /^(?:\w[\w.-]{0,127}@)?sha256:[0-9a-f]{64}$/;
-const VAULTWARDEN_RE = /^docker\.io\/vaultwarden\/server@sha256:[0-9a-f]{64}$/;
-const WIREGUARD_RE = /^lscr\.io\/linuxserver\/wireguard@sha256:[0-9a-f]{64}$/;
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
@@ -179,9 +179,8 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
 
 export function classifyTarget(target: TargetRef): RemediationLane {
   if (target.kind === 'PersistentVolume' || target.kind === 'PersistentVolumeClaim') return 'always-ask';
-  if (target.namespace === 'vaultwarden' || target.namespace === 'wireguard-home') return 'always-ask';
+  if (target.namespace && ALWAYS_ASK_NAMESPACES.has(target.namespace)) return 'always-ask';
   if (target.namespace && LANE_C_NAMESPACES.has(target.namespace)) return 'C';
-  if (target.namespace === 'nanoclaw-remediator') throw new Error('Orfie never changes its own namespace');
   return 'A';
 }
 
@@ -200,11 +199,11 @@ function parseImage(image: string) {
   return { registry, repository, tag, digest };
 }
 
-function checkImageUpdate(beforeImage: string, afterImage: string, expected: RegExp): void {
+function checkImageUpdate(beforeImage: string, afterImage: string): void {
   const before = parseImage(beforeImage);
   const after = parseImage(afterImage);
   if (
-    !expected.test(`${after.registry}/${after.repository}@${after.digest}`) ||
+    !DIGEST_IMAGE_RE.test(`${after.registry}/${after.repository}@${after.digest}`) ||
     (after.tag !== undefined && !TAG_RE.test(after.tag))
   ) {
     throw new Error('new image is not an approved digest reference');
@@ -243,20 +242,13 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
   }
   const lane = classifyTarget(plan.target);
   let automaticWriteCap: 0 | 1 | 2 = 0;
-  if (plan.target.namespace === 'backups' && !(plan.operation.type === 'patch-image' && plan.target.kind === 'CronJob'))
-    throw new Error('backups is immutable except CronJob images');
+  const { namespace, name } = plan.target;
+  if (namespace === 'backups' && plan.operation.type.startsWith('delete-'))
+    throw new Error('nothing in backups is ever deleted');
 
   if (plan.operation.type === 'patch-image') {
-    if (!IMAGE_KINDS.includes(plan.target.kind) || (lane === 'C' && plan.target.kind === 'CronJob')) {
-      throw new Error('patch-image requires a workload target, or a CronJob outside Lane C');
-    }
-    const expected =
-      plan.target.namespace === 'vaultwarden'
-        ? VAULTWARDEN_RE
-        : plan.target.namespace === 'wireguard-home'
-          ? WIREGUARD_RE
-          : DIGEST_IMAGE_RE;
-    checkImageUpdate(plan.operation.before, plan.operation.after, expected);
+    if (!IMAGE_KINDS.includes(plan.target.kind)) throw new Error('patch-image requires a workload or CronJob target');
+    checkImageUpdate(plan.operation.before, plan.operation.after);
     // The base admission policy rejects a rollback to a mutable tag unless the
     // pinned image was derived from exactly that tag. Any other rollout gets the
     // restart attempt only; a digest-pinned or exact-tag prior image may also
@@ -265,30 +257,23 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     if (lane === 'A' && plan.target.kind !== 'CronJob')
       automaticWriteCap = DIGEST_IMAGE_RE.test(plan.operation.before) || exactTag ? 2 : 1;
   } else if (plan.operation.type === 'restart') {
-    if (lane === 'always-ask' || !WORKLOAD_KINDS.includes(plan.target.kind)) {
-      throw new Error('restart requires a Lane A or Lane C workload');
-    }
+    if (!WORKLOAD_KINDS.includes(plan.target.kind)) throw new Error('restart requires a workload');
     if (!Number.isFinite(Date.parse(plan.operation.restartedAt)))
       throw new Error('restartedAt must be an ISO timestamp');
     if (lane === 'A') automaticWriteCap = 1;
   } else if (plan.operation.type === 'scale') {
-    if (lane === 'always-ask' || !['Deployment', 'StatefulSet'].includes(plan.target.kind)) {
-      throw new Error('scale requires a Lane A or Lane C Deployment or StatefulSet');
-    }
-    if (
-      plan.operation.before < 0 ||
-      plan.operation.before > 10 ||
-      plan.operation.after < 0 ||
-      plan.operation.after > 10
-    ) {
-      throw new Error('replicas must be between 0 and 10');
-    }
+    if (!['Deployment', 'StatefulSet'].includes(plan.target.kind))
+      throw new Error('scale requires a Deployment or StatefulSet');
+    if (plan.operation.before < 0 || plan.operation.after < 0) throw new Error('replicas must not be negative');
+    if (namespace === 'wireguard-home' && name === 'wireguard' && plan.operation.after === 0)
+      throw new Error('wireguard is never scaled to 0');
     if (lane === 'A') automaticWriteCap = 1;
   } else if (plan.operation.type === 'delete-job') {
-    if (lane !== 'A' || plan.target.kind !== 'Job') throw new Error('delete-job requires a Lane A Job');
+    if (plan.target.kind !== 'Job') throw new Error('delete-job requires a Job');
   } else if (plan.operation.type === 'helm-values') {
-    if (lane === 'always-ask' || plan.target.kind !== 'Secret')
-      throw new Error('helm-values requires a Lane A or Lane C Helm release');
+    if (plan.target.kind !== 'Secret') throw new Error('helm-values requires a Helm release');
+    if (namespace === 'vaultwarden')
+      throw new Error("vaultwarden's chart renders its Secrets, so it never goes through Helm");
     for (const { path, before, after } of plan.operation.set) {
       const key = IMAGE_KEY_RE.exec(path)?.[1];
       if (!key) continue;
@@ -296,7 +281,7 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
       if (typeof after !== 'string' || (key === 'image' ? typeof before !== 'string' : !PINNED_RE.test(after))) {
         throw new Error(`${path} must pin a sha256 digest of the same image repository`);
       }
-      if (key === 'image') checkImageUpdate(before as string, after, DIGEST_IMAGE_RE);
+      if (key === 'image') checkImageUpdate(before as string, after);
     }
   } else if (plan.operation.type === 'delete-storage') {
     if (!plan.target.kind.startsWith('Persistent')) throw new Error('delete-storage requires PV or PVC');
@@ -317,11 +302,10 @@ function tagVersion(tag = ''): [number, number] | undefined {
   return match ? [Number(match[1]), Number(match[2] ?? 0)] : undefined;
 }
 
-/** Same major, and for T1 also the same minor; only an unversioned before (latest) may skip that outside T1, and a bare digest never passes. */
+/** Same major, and for T1 also the same minor; a tag without a version (latest) or no tag at all passes only outside T1. */
 function sameVersionLine(before: string | undefined, after: string | undefined, t1: boolean): boolean {
-  if (after === undefined || after.startsWith('sha256:')) return false;
   const [from, to] = [tagVersion(before), tagVersion(after)];
-  if (!from || !to) return !t1 && !from;
+  if (!from || !to) return !t1;
   return from[0] === to[0] && (!t1 || from[1] === to[1]);
 }
 
@@ -342,11 +326,10 @@ export function isAutoApproved({ lane, plan }: ValidatedPlan, t1: ReadonlySet<st
   return operation.set.every(({ path, before, after }) => {
     if (REPLICA_KEY_RE.test(path)) return !critical;
     const key = IMAGE_KEY_RE.exec(path)?.[1];
-    // A subchart image (postgresql.image.tag) usually runs a StatefulSet.
-    const strict = critical || !/^(?:image\.)?[^.]+$/.test(path);
-    if (key === 'digest') return operation.set.some((edit) => edit.path === path.replace(/digest$/, 'tag'));
-    if (key === 'tag') return sameVersionLine(String(before ?? ''), String(after), strict);
-    if (key === 'image') return sameVersionLine(parseImage(String(before)).tag, parseImage(String(after)).tag, strict);
+    if (key === 'digest') return !critical;
+    if (key === 'tag') return sameVersionLine(String(before ?? ''), String(after), critical);
+    if (key === 'image')
+      return sameVersionLine(parseImage(String(before)).tag, parseImage(String(after)).tag, critical);
     return false;
   });
 }

@@ -7,7 +7,7 @@ export const proposeKubernetesRemediation: McpToolDefinition = {
   tool: {
     name: 'propose_kubernetes_remediation',
     description:
-      'Submit one exact Kubernetes remediation plan. The host revalidates target identity, policy and expiry; low-risk Lane A plans (restart, Deployment scale, finished Job delete, same-major digest image bumps incl. CronJobs, image/replica-only helm-values; T1 and StatefulSets same-minor) apply at once and the approver is told the outcome, everything else waits for Matrix approval, and approved kube-system/longhorn-system plans run with the host break-glass identity.',
+      'Submit one exact Kubernetes remediation plan. The host revalidates target identity, policy and expiry, then sorts it by the AUTO, APPROVAL and NEVER lists in your instructions: AUTO applies at once and Jegor hears the outcome, APPROVAL waits for his answer and then applies (kube-system/longhorn-system through the break-glass identity), NEVER is rejected.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -233,6 +233,8 @@ export async function cleanupRemediationOrphans(annotator: KubernetesJsonClient)
     ['/apis/apps/v1/deployments', true],
     ['/apis/apps/v1/statefulsets', true],
     ['/apis/apps/v1/daemonsets', true],
+    ['/apis/batch/v1/cronjobs', true],
+    ['/apis/batch/v1/jobs', true],
     ['/api/v1/persistentvolumeclaims', true],
     ['/api/v1/persistentvolumes', false],
   ] as const) {

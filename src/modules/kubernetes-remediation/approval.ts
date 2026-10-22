@@ -39,6 +39,26 @@ function planInput(content: Record<string, unknown>): unknown {
   return content.plan;
 }
 
+const tagOf = (image: string) =>
+  image.split('@')[0].split('/').at(-1)?.split(':')[1] ?? image.split('@')[1]?.slice(7, 19);
+
+/** One line that tells plans apart in the approver's acks and the agent's pending list. */
+function summary({ plan }: ValidatedPlan): string {
+  const { target, operation } = plan;
+  const where = `${target.namespace ?? '_cluster'}/${target.name}`;
+  const text =
+    operation.type === 'patch-image'
+      ? `update ${where} image ${tagOf(operation.before)} → ${tagOf(operation.after)}`
+      : operation.type === 'scale'
+        ? `scale ${where} ${operation.before} → ${operation.after}`
+        : operation.type === 'restart'
+          ? `restart ${where}`
+          : operation.type === 'helm-values'
+            ? `helm ${where}: ${operation.set.map((e) => `${e.path} ${String(e.before)} → ${String(e.after)}`).join(', ')}`
+            : `delete ${target.kind} ${where}`;
+  return text.length > 80 ? `${text.slice(0, 79)}…` : text;
+}
+
 function renderQuestion({ plan, lane, digest, automaticWriteCap }: ValidatedPlan): string {
   const operation = plan.operation;
   const change =
@@ -168,7 +188,7 @@ export function registerKubernetesRemediationApproval(options: {
           agentName: 'Kubernetes Remediator',
           action: REMEDIATION_ACTION,
           payload: { plan: validated.plan, digest: validated.digest },
-          title: 'Kubernetes remediation approval',
+          title: summary(validated),
           question: renderQuestion(validated),
           approverUserId: options.approverUserId,
         });
