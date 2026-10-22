@@ -6,20 +6,31 @@ import { canonicalImage } from './policy.js';
 import type { RegistryFetch } from './registry.js';
 import type {
   ApprovalGrant,
+  BuildImagePlan,
   ExecutionResult,
   HelmSyncPlan,
   HelmValuesPlan,
+  ManifestEditPlan,
+  ManifestSyncPlan,
+  PodExecPlan,
   RemediationPlan,
   ValidatedPlan,
 } from './types.js';
 
 const APPROVAL_ANNOTATION = 'remediation.nanoclaw.io/approval-id';
+// The gateway cannot carry the API's exec WebSocket, so exec runs in-cluster as a Job under the writer's account.
+export const KUBECTL_IMAGE =
+  'registry.k8s.io/kubectl:v1.35.9@sha256:436cbaa8a019152063d638f412cf9d73ec29e56061529d28cbc231c6ab1b37a4';
+export const KANIKO_IMAGE =
+  'gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd80edc663df6def362cd22e79bcdf00ac53f';
+const OUTPUT_LIMIT = 2048;
 const TEMPORARY_BINDING_RE = /^nanoclaw-remediation-[0-9a-f-]{36}$/;
 
 export interface KubernetesJsonClient {
+  /** `text` returns the raw body (pod logs) instead of parsed JSON. */
   request(
     path: string,
-    options?: { method?: string; body?: unknown; contentType?: string; signal?: AbortSignal },
+    options?: { method?: string; body?: unknown; contentType?: string; signal?: AbortSignal; text?: boolean },
   ): Promise<unknown>;
   watch(path: string, resourceVersion: string, signal: AbortSignal): AsyncIterable<unknown>;
 }
@@ -67,7 +78,7 @@ export class OneCliKubernetesClient implements KubernetesJsonClient {
 
   async request(
     path: string,
-    options: { method?: string; body?: unknown; contentType?: string; signal?: AbortSignal } = {},
+    options: { method?: string; body?: unknown; contentType?: string; signal?: AbortSignal; text?: boolean } = {},
   ): Promise<unknown> {
     const method = options.method ?? 'GET';
     const args = [
@@ -96,6 +107,7 @@ export class OneCliKubernetesClient implements KubernetesJsonClient {
       const status = result.stdout.trim().slice(-500);
       throw new Error(`Kubernetes gateway request failed: ${result.stderr.trim() || result.code} ${status}`.trim());
     }
+    if (options.text) return result.stdout;
     return result.stdout.trim() ? JSON.parse(result.stdout) : null;
   }
 
@@ -187,9 +199,87 @@ function jobPath(plan: RemediationPlan): string {
 
 function storagePath(plan: RemediationPlan): string {
   const name = encodeURIComponent(plan.target.name);
-  return plan.target.kind === 'PersistentVolume'
-    ? `/api/v1/persistentvolumes/${name}`
-    : `/api/v1/namespaces/${encodeURIComponent(plan.target.namespace ?? '')}/persistentvolumeclaims/${name}`;
+  const namespace = encodeURIComponent(plan.target.namespace ?? '');
+  if (plan.target.kind === 'PersistentVolume') return `/api/v1/persistentvolumes/${name}`;
+  if (plan.target.kind === 'Volume') return `/apis/longhorn.io/v1beta2/namespaces/${namespace}/volumes/${name}`;
+  return `/api/v1/namespaces/${namespace}/persistentvolumeclaims/${name}`;
+}
+
+function runnerJob(plan: PodExecPlan, serviceAccount: string): Record<string, unknown> {
+  const { container, command } = plan.operation;
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: { name: `orfie-exec-${plan.id.slice(0, 8)}`, namespace: 'nanoclaw-remediator' },
+    spec: {
+      backoffLimit: 0,
+      activeDeadlineSeconds: 600,
+      ttlSecondsAfterFinished: 3600,
+      template: {
+        spec: {
+          restartPolicy: 'Never',
+          serviceAccountName: serviceAccount,
+          automountServiceAccountToken: true,
+          securityContext: { runAsNonRoot: true, runAsUser: 65532, seccompProfile: { type: 'RuntimeDefault' } },
+          containers: [
+            {
+              name: 'exec',
+              image: KUBECTL_IMAGE,
+              args: ['exec', '-n', plan.target.namespace, plan.target.name, '-c', container, '--', ...command],
+              env: [{ name: 'HOME', value: '/tmp' }],
+              volumeMounts: [{ name: 'tmp', mountPath: '/tmp' }],
+              securityContext: {
+                allowPrivilegeEscalation: false,
+                readOnlyRootFilesystem: true,
+                capabilities: { drop: ['ALL'] },
+              },
+            },
+          ],
+          volumes: [{ name: 'tmp', emptyDir: {} }],
+        },
+      },
+    },
+  };
+}
+
+function kanikoJob(plan: BuildImagePlan): Record<string, unknown> {
+  const { dockerfile, context, image } = plan.operation;
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: { name: plan.target.name, namespace: 'security' },
+    spec: {
+      backoffLimit: 0,
+      activeDeadlineSeconds: 1800,
+      ttlSecondsAfterFinished: 86400,
+      template: {
+        spec: {
+          restartPolicy: 'Never',
+          automountServiceAccountToken: false,
+          containers: [
+            {
+              name: 'kaniko',
+              image: KANIKO_IMAGE,
+              args: [
+                '--context=git://github.com/jopdorp/k8s.jegor.nl.git#refs/heads/master',
+                `--context-sub-path=${context}`,
+                `--dockerfile=${dockerfile.slice(context.length + 1)}`,
+                `--destination=${image}`,
+                '--digest-file=/dev/termination-log',
+              ],
+              volumeMounts: [{ name: 'docker', mountPath: '/kaniko/.docker' }],
+            },
+          ],
+          volumes: [
+            {
+              name: 'docker',
+              secret: { secretName: 'registry-prophet', items: [{ key: '.dockerconfigjson', path: 'config.json' }] },
+            },
+          ],
+        },
+      },
+    },
+  };
 }
 
 function mergePatch(plan: RemediationPlan): Record<string, unknown> {
@@ -233,8 +323,12 @@ interface PodTemplateHolder {
 
 interface LiveObject {
   metadata?: { uid?: string; resourceVersion?: string };
-  spec?: PodTemplateHolder & { jobTemplate?: { spec?: PodTemplateHolder } };
-  status?: { active?: number; conditions?: Array<{ type?: string; status?: string }> };
+  spec?: PodTemplateHolder & { jobTemplate?: { spec?: PodTemplateHolder }; claimRef?: { namespace?: string } };
+  status?: {
+    active?: number;
+    conditions?: Array<{ type?: string; status?: string }>;
+    kubernetesStatus?: { namespace?: string };
+  };
 }
 
 interface ListedObject {
@@ -380,12 +474,21 @@ export class GatewayRemediationExecutor {
     if (Date.parse(plan.expiresAt) <= Date.now()) throw new Error('approved plan expired');
     const executor = lane === 'C' ? this.breakGlass?.client : this.writer;
     if (!executor) throw new Error('the break-glass identity is not configured');
-    if (plan.operation.type === 'helm-values' || plan.operation.type === 'helm-sync-values') {
-      const helm = lane === 'C' ? this.breakGlass?.helm : this.helm;
-      if (!helm) throw new Error('the Helm path is not configured');
-      return plan.operation.type === 'helm-values'
-        ? helm.apply(plan as HelmValuesPlan)
-        : helm.syncValues(plan as HelmSyncPlan);
+    const repo = lane === 'C' ? this.breakGlass?.helm : this.helm;
+    switch (plan.operation.type) {
+      case 'helm-values':
+      case 'helm-sync-values':
+      case 'manifest-edit':
+      case 'manifest-sync':
+        if (!repo) throw new Error('the Helm and manifest path is not configured');
+        if (plan.operation.type === 'helm-values') return repo.apply(plan as HelmValuesPlan);
+        if (plan.operation.type === 'helm-sync-values') return repo.syncValues(plan as HelmSyncPlan);
+        if (plan.operation.type === 'manifest-edit') return repo.applyManifest(plan as ManifestEditPlan);
+        return repo.syncManifest(plan as ManifestSyncPlan);
+      case 'pod-exec':
+        return this.podExec(plan as PodExecPlan, lane === 'C' ? 'nanoclaw-breakglass' : 'nanoclaw-remediator');
+      case 'build-image':
+        return this.buildImage(plan as BuildImagePlan);
     }
 
     const path =
@@ -398,6 +501,8 @@ export class GatewayRemediationExecutor {
     if (live.metadata?.uid !== plan.target.uid || live.metadata?.resourceVersion !== plan.target.resourceVersion) {
       throw new Error('target UID or resourceVersion changed after proposal');
     }
+    if (live.spec?.claimRef?.namespace === 'backups' || live.status?.kubernetesStatus?.namespace === 'backups')
+      throw new Error('volumes claimed from backups are never deleted');
     if (plan.operation.type === 'delete-job') {
       const finished = live.status?.conditions?.some(
         (c) => (c.type === 'Complete' || c.type === 'Failed') && c.status === 'True',
@@ -449,9 +554,12 @@ export class GatewayRemediationExecutor {
         }
 
         if (plan.operation.type === 'delete-storage') {
-          const candidate = binding(currentPlan);
-          temporaryBindingPath = candidate.path;
-          await this.annotator.request(candidate.collection, { method: 'POST', body: candidate.body });
+          // Lane C (Longhorn volumes) deletes as break-glass; PVs and PVCs get a one-off binding for the writer.
+          if (lane !== 'C') {
+            const candidate = binding(currentPlan);
+            temporaryBindingPath = candidate.path;
+            await this.annotator.request(candidate.collection, { method: 'POST', body: candidate.body });
+          }
           await executor.request(path, {
             method: 'DELETE',
             body: {
@@ -530,6 +638,62 @@ export class GatewayRemediationExecutor {
       if (note) return { ...result, message: `${result.message} ${note}` };
     }
     return result;
+  }
+
+  /** Runs the plan's argv in its pod from an in-cluster Job, as the writer or, in Lane C, the break-glass account. */
+  private async podExec(plan: PodExecPlan, serviceAccount: string): Promise<ExecutionResult> {
+    const ns = encodeURIComponent(plan.target.namespace ?? '');
+    const pod = (await this.writer.request(
+      `/api/v1/namespaces/${ns}/pods/${encodeURIComponent(plan.target.name)}`,
+    )) as LiveObject;
+    if (pod.metadata?.uid !== plan.target.uid) throw new Error('target pod changed after proposal');
+    const { exitCode, output } = await this.runJob(runnerJob(plan, serviceAccount), 10 * 60_000);
+    return {
+      applied: exitCode === 0,
+      message: `exec in ${plan.target.namespace}/${plan.target.name} exited ${exitCode ?? 'without finishing'}:\n${output}`,
+      automaticWrites: 0,
+    };
+  }
+
+  private async buildImage(plan: BuildImagePlan): Promise<ExecutionResult> {
+    const { exitCode, message, output } = await this.runJob(kanikoJob(plan), 30 * 60_000);
+    const digest = /sha256:[0-9a-f]{64}/.exec(message)?.[0];
+    return exitCode === 0 && digest
+      ? { applied: true, message: `built ${plan.operation.image}@${digest}`, automaticWrites: 0 }
+      : { applied: false, message: `build of ${plan.operation.image} failed:\n${output}`, automaticWrites: 0 };
+  }
+
+  /** Creates the Job, waits for it, and returns its container's exit code, termination message and last 2 KB of output. */
+  private async runJob(job: Record<string, unknown>, timeout: number) {
+    const { name, namespace } = job.metadata as { name: string; namespace: string };
+    const jobs = `/apis/batch/v1/namespaces/${namespace}/jobs`;
+    await this.writer.request(jobs, { method: 'POST', body: job });
+    const deadline = Date.now() + timeout;
+    let done = false;
+    while (!done && Date.now() < deadline) {
+      await sleep(3_000);
+      const status = ((await this.writer.request(`${jobs}/${name}`)) as { status?: Record<string, number> }).status;
+      done = Boolean(status?.succeeded || status?.failed);
+    }
+    const pods = (await this.writer.request(
+      `/api/v1/namespaces/${namespace}/pods?labelSelector=${encodeURIComponent(`job-name=${name}`)}`,
+    )) as {
+      items?: Array<{
+        metadata?: { name?: string };
+        status?: { containerStatuses?: Array<{ state?: { terminated?: { exitCode?: number; message?: string } } }> };
+      }>;
+    };
+    const pod = pods.items?.[0];
+    const terminated = pod?.status?.containerStatuses?.[0]?.state?.terminated;
+    const log = pod?.metadata?.name
+      ? String(
+          await this.writer.request(
+            `/api/v1/namespaces/${namespace}/pods/${pod.metadata.name}/log?limitBytes=1048576`,
+            { text: true },
+          ),
+        )
+      : '';
+    return { exitCode: terminated?.exitCode, message: terminated?.message ?? '', output: log.slice(-OUTPUT_LIMIT) };
   }
 
   private async recover(plan: RemediationPlan, deadline: number, cap: 1 | 2): Promise<number> {

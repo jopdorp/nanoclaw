@@ -4,9 +4,21 @@ export const APPROVAL_ANNOTATION = 'remediation.nanoclaw.io/approval-id';
 export type RemediationLane = 'A' | 'always-ask' | 'C';
 export type WorkloadKind = 'Deployment' | 'StatefulSet' | 'DaemonSet';
 
+export type KnownKind =
+  | WorkloadKind
+  | 'CronJob'
+  | 'Job'
+  | 'PersistentVolume'
+  | 'PersistentVolumeClaim'
+  | 'Secret'
+  | 'Pod'
+  /** A Longhorn volume, longhorn.io/v1beta2. */
+  | 'Volume';
+
 export interface TargetRef {
-  apiVersion: 'apps/v1' | 'batch/v1' | 'v1';
-  kind: WorkloadKind | 'CronJob' | 'Job' | 'PersistentVolume' | 'PersistentVolumeClaim' | 'Secret';
+  apiVersion: string;
+  /** A KnownKind, or any kind a manifest-edit or manifest-sync names. */
+  kind: string;
   namespace: string | null;
   name: string;
   uid: string;
@@ -43,11 +55,21 @@ export interface JobDeletePlan extends PlanBase {
   operation: { type: 'delete-job' };
 }
 
+export interface PodExecPlan extends PlanBase {
+  operation: { type: 'pod-exec'; container: string; command: string[] };
+}
+
+export interface BuildImagePlan extends PlanBase {
+  /** `dockerfile` and `context` are k8s.jegor.nl paths; `image` is registry.prophet.jopdorp.nl/<name>:<tag>. */
+  operation: { type: 'build-image'; dockerfile: string; context: string; image: string };
+}
+
 export interface StorageDeletePlan extends PlanBase {
   operation: { type: 'delete-storage'; reclaimConfirmed: boolean };
 }
 
 export type ValuesScalar = string | number | boolean;
+export type ValuesEdit = { path: string; before: ValuesScalar | null; after: ValuesScalar };
 
 /** Targets the Helm release: `target.name` is the release, uid/resourceVersion its latest release Secret. */
 export interface HelmValuesPlan extends PlanBase {
@@ -56,8 +78,18 @@ export interface HelmValuesPlan extends PlanBase {
     file: string;
     /** The chart's repository, `https://...` or `oci://...`; optional once the host has verified and cached it. */
     chart?: { repo: string };
-    set: Array<{ path: string; before: ValuesScalar | null; after: ValuesScalar }>;
+    set: ValuesEdit[];
   };
+}
+
+/** Edits one object of a k8s.jegor.nl manifest, the plan's target, and applies it server-side. */
+export interface ManifestEditPlan extends PlanBase {
+  operation: { type: 'manifest-edit'; file: string; set: ValuesEdit[] };
+}
+
+/** Writes the target's live object to its manifest file; no cluster change. */
+export interface ManifestSyncPlan extends PlanBase {
+  operation: { type: 'manifest-sync'; file: string };
 }
 
 /** Writes the release's live user-supplied values to its values file; no cluster change. */
@@ -83,7 +115,11 @@ export type RemediationPlan =
   | JobDeletePlan
   | StorageDeletePlan
   | HelmValuesPlan
-  | HelmSyncPlan;
+  | HelmSyncPlan
+  | PodExecPlan
+  | BuildImagePlan
+  | ManifestEditPlan
+  | ManifestSyncPlan;
 
 export interface ValidatedPlan {
   plan: RemediationPlan;

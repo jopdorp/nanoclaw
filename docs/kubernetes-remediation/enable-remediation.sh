@@ -89,7 +89,7 @@ fi
 
 step '1/6 apply the approval-controller identity and admission policies idempotently'
 kubectl apply -f "$DOCS/approval-controller-rbac.yaml" >/dev/null
-kubectl apply --server-side -f "$DOCS/approval-controller-policy.yaml" >/dev/null
+kubectl apply --server-side --force-conflicts -f "$DOCS/approval-controller-policy.yaml" >/dev/null
 # It required an approval annotation on every write, so nothing could ever auto-apply.
 kubectl delete validatingadmissionpolicybinding,validatingadmissionpolicy nanoclaw-remediation-approved-write \
   --ignore-not-found >/dev/null
@@ -126,6 +126,10 @@ kubectl delete clusterrolebinding nanoclaw-remediator-reader-cluster-read nanocl
   --ignore-not-found >/dev/null
 kubectl delete clusterrole nanoclaw-breakglass-lane-c nanoclaw-remediator-reader-logs --ignore-not-found >/dev/null
 printf '%s\n' 'reader, exec and helm bindings match the live namespaces'
+kubectl get secret -n "$NAMESPACE" registry-prophet -o json \
+  | jq '{apiVersion, kind, type, data, metadata: {name: .metadata.name, namespace: "security"}}' \
+  | kubectl apply -f - >/dev/null
+printf '%s\n' 'the build-image Job in security can push to registry.prophet.jopdorp.nl'
 for account in nanoclaw-remediator nanoclaw-remediation-approver nanoclaw-helm nanoclaw-breakglass; do
   kubectl apply -f - >/dev/null <<YAML
 apiVersion: v1

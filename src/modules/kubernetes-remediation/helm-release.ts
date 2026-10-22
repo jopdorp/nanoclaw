@@ -8,6 +8,10 @@
  * installed chart version. A direct image or replica patch on a Helm-managed
  * workload is recorded as a drift item in the group's memory/open-items, so it
  * always comes back to Helm.
+ *
+ * The manifest path shares the checkout: manifest-edit edits one object of a
+ * kubernetes/**.yaml file and applies it server-side, after a dry run proves the
+ * unedited object equals live; manifest-sync writes the live object there first.
  */
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -17,7 +21,16 @@ import { isMap, isScalar, parseAllDocuments, parseDocument, stringify } from 'ya
 
 import type { KubernetesJsonClient } from './gateway-client.js';
 import { canonicalImage, imageRepository } from './policy.js';
-import type { ExecutionResult, HelmBinding, HelmSyncPlan, HelmValuesPlan, RemediationPlan } from './types.js';
+import type {
+  ExecutionResult,
+  HelmBinding,
+  HelmSyncPlan,
+  HelmValuesPlan,
+  ManifestEditPlan,
+  ManifestSyncPlan,
+  RemediationPlan,
+  TargetRef,
+} from './types.js';
 
 const exec = promisify(execFile);
 const DAY = 24 * 60 * 60_000;
@@ -134,6 +147,37 @@ function imageEdits(values: Values, set: HelmValuesPlan['operation']['set']): He
   return images;
 }
 
+/** env entries and ConfigMap data that carry a secret-looking value inline. */
+function inlineSecrets(value: unknown, at = ''): string[] {
+  if (!value || typeof value !== 'object') return [];
+  const node = value as Values;
+  const own =
+    typeof node.name === 'string' && typeof node.value === 'string' && SECRET_KEY_RE.test(node.name) ? [at] : [];
+  const data =
+    node.kind === 'ConfigMap'
+      ? Object.keys((node.data as Values | undefined) ?? {}).filter((k) => SECRET_KEY_RE.test(k))
+      : [];
+  return [
+    ...own,
+    ...data.map((k) => `data.${k}`),
+    ...Object.entries(node).flatMap(([k, v]) => inlineSecrets(v, at ? `${at}.${k}` : k)),
+  ];
+}
+
+/** What the API server owns or derives; never part of a manifest or a drift comparison. */
+function declared(object: Values): Values {
+  const { status: _status, ...rest } = object;
+  const metadata = { ...((rest.metadata as Values | undefined) ?? {}) };
+  for (const key of ['managedFields', 'resourceVersion', 'uid', 'creationTimestamp', 'generation', 'selfLink'])
+    delete metadata[key];
+  const annotations = { ...((metadata.annotations as Values | undefined) ?? {}) };
+  delete annotations['kubectl.kubernetes.io/last-applied-configuration'];
+  delete annotations['deployment.kubernetes.io/revision'];
+  if (Object.keys(annotations).length) metadata.annotations = annotations;
+  else delete metadata.annotations;
+  return { ...rest, metadata };
+}
+
 function reason(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).trim().split('\n').slice(-3).join(' ');
 }
@@ -232,6 +276,144 @@ export class HelmReleaseExecutor {
 
   syncValues(plan: HelmSyncPlan): Promise<ExecutionResult> {
     return this.serial(() => this.syncNow(plan));
+  }
+
+  bindManifest(plan: ManifestEditPlan): Promise<ManifestEditPlan> {
+    return this.serial(async () => {
+      await this.sync();
+      const { live } = await this.unchangedManifest(plan);
+      editValues(this.document(plan.operation.file, plan.target).text, plan.operation.set);
+      const { uid = '', resourceVersion = '' } = (live.metadata as { uid?: string; resourceVersion?: string }) ?? {};
+      return { ...plan, target: { ...plan.target, uid, resourceVersion } };
+    });
+  }
+
+  applyManifest(plan: ManifestEditPlan): Promise<ExecutionResult> {
+    return this.serial(async () => {
+      await this.sync();
+      const { live, path: objectPath } = await this.unchangedManifest(plan);
+      const metadata = live.metadata as { uid?: string; resourceVersion?: string } | undefined;
+      if (metadata?.uid !== plan.target.uid || metadata?.resourceVersion !== plan.target.resourceVersion)
+        throw new Error('target UID or resourceVersion changed after proposal');
+      const { file } = plan.operation;
+      const doc = this.document(file, plan.target);
+      const edited = editValues(doc.text, plan.operation.set);
+      fs.writeFileSync(path.join(this.options.checkout, file), doc.before + edited + doc.after);
+      try {
+        await this.serverSideApply(objectPath, this.object(edited, plan.target), false);
+        // eslint-disable-next-line no-catch-all/no-catch-all -- a refused apply leaves the repo as it was
+      } catch (error) {
+        await this.options.git(['checkout', '--', file]);
+        return {
+          applied: false,
+          message: `apply failed (${reason(error)}); ${file} reverted, nothing pushed.`,
+          automaticWrites: 0,
+        };
+      }
+      return this.commit(file, `Orfie: ${plan.reason.split('\n', 1)[0]}`, 'applied');
+    });
+  }
+
+  syncManifest(plan: ManifestSyncPlan): Promise<ExecutionResult> {
+    return this.serial(async () => {
+      const objectPath = await this.objectPath(plan.target);
+      const live = declared((await this.options.client.request(objectPath)) as Values);
+      const secrets = inlineSecrets(live);
+      if (secrets.length) {
+        return {
+          applied: false,
+          message: `${plan.target.kind} ${plan.target.name} holds inline secret-looking values (${secrets.join(', ')}); nothing written to the public repo.`,
+          automaticWrites: 0,
+        };
+      }
+      await this.sync();
+      const { file } = plan.operation;
+      const absolute = path.join(this.options.checkout, file);
+      const text = stringify(live);
+      if (!fs.existsSync(absolute)) {
+        fs.mkdirSync(path.dirname(absolute), { recursive: true });
+        fs.writeFileSync(absolute, text);
+      } else {
+        const doc = this.findDocument(file, plan.target);
+        fs.writeFileSync(absolute, doc ? doc.before + text + doc.after : `${this.read(file).trimEnd()}\n---\n${text}`);
+      }
+      return this.commit(
+        file,
+        `Sync ${plan.target.kind} ${plan.target.namespace ?? ''}/${plan.target.name} from live`,
+        'wrote the live object',
+      );
+    });
+  }
+
+  private findDocument(file: string, target: TargetRef) {
+    const text = this.read(file);
+    for (const doc of parseAllDocuments(text)) {
+      if (!('contents' in doc) || !doc.range) continue;
+      const object = (doc.toJS() ?? {}) as {
+        apiVersion?: string;
+        kind?: string;
+        metadata?: { name?: string; namespace?: string };
+      };
+      if (
+        object.apiVersion === target.apiVersion &&
+        object.kind === target.kind &&
+        object.metadata?.name === target.name &&
+        (object.metadata.namespace ?? target.namespace) === target.namespace
+      ) {
+        const [start, , end] = doc.range;
+        return { before: text.slice(0, start), text: text.slice(start, end), after: text.slice(end) };
+      }
+    }
+    return undefined;
+  }
+
+  private document(file: string, target: TargetRef) {
+    const doc = this.findDocument(file, target);
+    if (!doc)
+      throw new Error(`repo manifest drift; submit manifest-sync first: ${file} has no ${target.kind} ${target.name}`);
+    return doc;
+  }
+
+  private object(text: string, target: TargetRef): Values {
+    const object = parseValues(text);
+    const metadata = (object.metadata as Values | undefined) ?? {};
+    return target.namespace ? { ...object, metadata: { ...metadata, namespace: target.namespace } } : object;
+  }
+
+  /** The live object, after a server-side dry run proves the unedited manifest would not change it. */
+  private async unchangedManifest(plan: ManifestEditPlan) {
+    const objectPath = await this.objectPath(plan.target);
+    const live = (await this.options.client.request(objectPath)) as Values;
+    if (!fs.existsSync(path.join(this.options.checkout, plan.operation.file)))
+      throw new Error(`repo manifest drift; submit manifest-sync first: ${plan.operation.file} does not exist`);
+    const dry = await this.serverSideApply(
+      objectPath,
+      this.object(this.document(plan.operation.file, plan.target).text, plan.target),
+      true,
+    );
+    const drift = valuesDiff(declared(live), declared(dry));
+    if (drift.length) throw new Error(`repo manifest drift; submit manifest-sync first: ${drift.join('; ')}`);
+    return { live, path: objectPath };
+  }
+
+  private async serverSideApply(objectPath: string, object: Values, dryRun: boolean): Promise<Values> {
+    const query = `?fieldManager=orfie&force=true${dryRun ? '&dryRun=All' : ''}`;
+    return (await this.options.client.request(`${objectPath}${query}`, {
+      method: 'PATCH',
+      body: object,
+      contentType: 'application/apply-patch+yaml',
+    })) as Values;
+  }
+
+  private async objectPath({ apiVersion, kind, namespace, name }: TargetRef): Promise<string> {
+    const base = apiVersion.includes('/') ? `/apis/${apiVersion}` : `/api/${apiVersion}`;
+    const list = (await this.options.client.request(base)) as {
+      resources?: Array<{ name: string; kind: string; namespaced: boolean }>;
+    };
+    const resource = list.resources?.find((r) => r.kind === kind && !r.name.includes('/'));
+    if (!resource) throw new Error(`the API server does not serve ${apiVersion} ${kind}`);
+    const scope = resource.namespaced ? `/namespaces/${encodeURIComponent(namespace ?? 'default')}` : '';
+    return `${base}${scope}/${resource.name}/${encodeURIComponent(name)}`;
   }
 
   /** Binds the plan to the release's latest revision Secret, its verified chart and its live values. */

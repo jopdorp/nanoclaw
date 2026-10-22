@@ -490,6 +490,52 @@ spec:
   policyName: nanoclaw-breakglass-guard
   validationActions: [Deny, Audit]
 ---
+# The writer creates only the pod-exec runner and the build-image Job, exactly as the host builds them.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-remediator-job-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [batch]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [jobs]
+        scope: Namespaced
+  matchConditions:
+    - name: remediator-service-account
+      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
+  variables:
+    - name: pod
+      expression: object.spec.template.spec
+    - name: volumes
+      expression: "has(variables.pod.volumes) ? variables.pod.volumes : []"
+  validations:
+    - expression: "!has(variables.pod.initContainers) && variables.pod.containers.size() == 1"
+      message: a remediation Job runs exactly one container
+    - expression: >-
+        request.namespace != 'nanoclaw-remediator' ||
+        (variables.pod.containers[0].image == 'registry.k8s.io/kubectl:v1.35.9@sha256:436cbaa8a019152063d638f412cf9d73ec29e56061529d28cbc231c6ab1b37a4' &&
+         has(variables.pod.serviceAccountName) && variables.pod.serviceAccountName in ['nanoclaw-remediator', 'nanoclaw-breakglass'] &&
+         variables.volumes.all(v, has(v.emptyDir)))
+      message: the pod-exec runner is the pinned kubectl image under the writer or break-glass account
+    - expression: >-
+        request.namespace != 'security' ||
+        (variables.pod.containers[0].image == 'gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd80edc663df6def362cd22e79bcdf00ac53f' &&
+         variables.volumes.all(v, has(v.secret) && v.secret.secretName == 'registry-prophet'))
+      message: the build Job is the pinned kaniko image with only the registry credentials
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-remediator-job-guard
+spec:
+  policyName: nanoclaw-remediator-job-guard
+  validationActions: [Deny, Audit]
+---
 # The owner's NEVER list, for every identity the host holds, approved or not.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy

@@ -6,7 +6,14 @@ import { pickApprovalDelivery } from '../approvals/primitive.js';
 import { isAutoApproved, validateRemediationPlan } from './policy.js';
 import type { HelmReleaseExecutor } from './helm-release.js';
 import { tagMatchesDigest, type RegistryFetch } from './registry.js';
-import { REMEDIATION_ACTION, type HelmValuesPlan, type RemediationExecutor, type ValidatedPlan } from './types.js';
+import {
+  REMEDIATION_ACTION,
+  type HelmValuesPlan,
+  type ManifestEditPlan,
+  type RemediationExecutor,
+  type ValidatedPlan,
+  type ValuesEdit,
+} from './types.js';
 import type { Session } from '../../types.js';
 
 const AUTO_APPROVER = 'auto:low-risk';
@@ -52,45 +59,59 @@ function planInput(content: Record<string, unknown>): unknown {
 const tagOf = (image: string) =>
   image.split('@')[0].split('/').at(-1)?.split(':')[1] ?? image.split('@')[1]?.slice(7, 19);
 
-/** One line that tells plans apart in the approver's acks and the agent's pending list. */
-function summary({ plan }: ValidatedPlan): string {
-  const { target, operation } = plan;
+const edits = (set: ValuesEdit[], arrow = '→') =>
+  set.map((e) => `${e.path} ${JSON.stringify(e.before)} ${arrow} ${JSON.stringify(e.after)}`).join(', ');
+
+/** What the plan does, in one line; `full` spells out every value and argument for the approval question. */
+function describe({ plan }: ValidatedPlan, full: boolean): string {
+  const { target, operation: op } = plan;
   const where = `${target.namespace ?? '_cluster'}/${target.name}`;
-  const text =
-    operation.type === 'patch-image'
-      ? `update ${where} image ${tagOf(operation.before)} → ${tagOf(operation.after)}`
-      : operation.type === 'scale'
-        ? `scale ${where} ${operation.before} → ${operation.after}`
-        : operation.type === 'restart'
-          ? `restart ${where}`
-          : operation.type === 'helm-values'
-            ? `helm ${where}: ${operation.set.map((e) => `${e.path} ${String(e.before)} → ${String(e.after)}`).join(', ')}`
-            : operation.type === 'helm-sync-values'
-              ? `sync helm values of ${where} from live`
-              : `delete ${target.kind} ${where}`;
+  switch (op.type) {
+    case 'patch-image':
+      return full
+        ? `${op.containers.map((c) => (c.initContainer ? `init:${c.name}` : c.name)).join(', ')}: ${op.before} -> ${op.after}`
+        : `update ${where} image ${tagOf(op.before)} → ${tagOf(op.after)}`;
+    case 'scale':
+      return `scale ${where} ${op.before} → ${op.after}`;
+    case 'restart':
+      return full ? `restart at ${op.restartedAt}` : `restart ${where}`;
+    case 'helm-values':
+      return full
+        ? `helm release ${target.name}, ${op.file}: ${edits(op.set, '->')}`
+        : `helm ${where}: ${edits(op.set)}`;
+    case 'helm-sync-values':
+      return `sync helm values of ${where} from live into its values file`;
+    case 'manifest-edit':
+      return full
+        ? `${op.file}, ${target.kind} ${where}: ${edits(op.set, '->')}`
+        : `edit ${target.kind} ${where}: ${edits(op.set)}`;
+    case 'manifest-sync':
+      return `sync ${target.kind} ${where} from live into ${op.file}`;
+    case 'pod-exec':
+      return full
+        ? `exec in ${where} container ${op.container}: ${JSON.stringify(op.command)}`
+        : `exec in ${where}: ${op.command.join(' ')}`;
+    case 'build-image':
+      return `build ${op.image} from ${op.dockerfile}`;
+    default:
+      return `delete ${target.kind} ${where}`;
+  }
+}
+
+/** One line that tells plans apart in the approver's acks and the agent's pending list. */
+function summary(validated: ValidatedPlan): string {
+  const text = describe(validated, false);
   return text.length > 80 ? `${text.slice(0, 79)}…` : text;
 }
 
-function renderQuestion({ plan, lane, digest, automaticWriteCap }: ValidatedPlan, diff: string[] = []): string {
-  const operation = plan.operation;
-  const change =
-    operation.type === 'patch-image'
-      ? `${operation.containers.map((c) => (c.initContainer ? `init:${c.name}` : c.name)).join(', ')}: ${operation.before} -> ${operation.after}`
-      : operation.type === 'scale'
-        ? `replicas: ${operation.before} -> ${operation.after}`
-        : operation.type === 'restart'
-          ? `restart at ${operation.restartedAt}`
-          : operation.type === 'delete-storage' || operation.type === 'delete-job'
-            ? `delete ${plan.target.kind}`
-            : operation.type === 'helm-sync-values'
-              ? `write the live values of helm release ${plan.target.name} to its values file`
-              : `helm release ${plan.target.name}, ${operation.file}: ${operation.set.map((e) => `${e.path}: ${JSON.stringify(e.before)} -> ${JSON.stringify(e.after)}`).join(', ')}`;
+function renderQuestion(validated: ValidatedPlan, diff: string[] = []): string {
+  const { plan, lane, digest, automaticWriteCap } = validated;
   return [
     `lane: ${lane === 'C' ? 'C, applied with the break-glass identity' : lane}`,
     `target: ${plan.target.namespace ?? '_cluster'}/${plan.target.kind}/${plan.target.name}`,
     `uid: ${plan.target.uid}`,
     `resourceVersion: ${plan.target.resourceVersion}`,
-    `change: ${change}`,
+    `change: ${describe(validated, true)}`,
     ...(diff.length ? [`values diff against live: ${diff.join('; ')}`] : []),
     `reason: ${plan.reason}`,
     `automatic same-target recovery writes: ${automaticWriteCap}`,
@@ -142,16 +163,21 @@ export function registerKubernetesRemediationApproval(options: {
   const prepare = async (content: Record<string, unknown>): Promise<Prepared> => {
     let validated = validateRemediationPlan(planInput(content));
     const { operation } = validated.plan;
-    if (operation.type !== 'helm-values') {
-      await verify(operation.type === 'patch-image' ? [operation.after] : []);
-      return { validated, auto: isAutoApproved(validated, t1), diff: [] };
+    const repo = validated.lane === 'C' ? options.breakGlassHelm : options.helm;
+    if (operation.type === 'helm-values' || operation.type === 'manifest-edit') {
+      if (!repo) throw new Error('the Helm and manifest path is not configured');
+      if (operation.type === 'manifest-edit') {
+        await verify(operation.set.filter((e) => /(?:^|\.)image$/.test(e.path)).map((e) => String(e.after)));
+        validated = validateRemediationPlan(await repo.bindManifest(validated.plan as ManifestEditPlan));
+        return { validated, auto: isAutoApproved(validated, t1), diff: [] };
+      }
+      const binding = await repo.bind(validated.plan as HelmValuesPlan);
+      await verify(Object.values(binding.images).map((image) => image.after));
+      validated = validateRemediationPlan(binding.plan);
+      return { validated, auto: isAutoApproved(validated, t1, binding), diff: binding.diff };
     }
-    const helm = validated.lane === 'C' ? options.breakGlassHelm : options.helm;
-    if (!helm) throw new Error('the Helm path is not configured');
-    const binding = await helm.bind(validated.plan as HelmValuesPlan);
-    await verify(Object.values(binding.images).map((image) => image.after));
-    validated = validateRemediationPlan(binding.plan);
-    return { validated, auto: isAutoApproved(validated, t1, binding), diff: binding.diff };
+    await verify(operation.type === 'patch-image' ? [operation.after] : []);
+    return { validated, auto: isAutoApproved(validated, t1), diff: [] };
   };
   const precheck = async (content: Record<string, unknown>, session: Session) => {
     if (session.agent_group_id !== options.agentGroupId) return false;

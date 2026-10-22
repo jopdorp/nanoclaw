@@ -102,6 +102,45 @@ rules:
   - apiGroups: ['']
     resources: [pods, persistentvolumeclaims]
     verbs: [get, list]
+  # The pod-exec runner Job runs kubectl in-cluster under this account.
+  - apiGroups: ['']
+    resources: [pods/exec]
+    verbs: [create, get]
+---
+# The pod-exec runner in nanoclaw-remediator and the build-image Job in security;
+# admission-policy.yaml pins what these Jobs may run.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: security
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nanoclaw-remediator-jobs
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, delete]
+  - apiGroups: ['']
+    resources: [pods, pods/log]
+    verbs: [get, list]
+---
+apiVersion: v1
+kind: List
+items:
+  - &jobs-binding
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: { name: nanoclaw-remediator-jobs, namespace: nanoclaw-remediator }
+    roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-remediator-jobs }
+    subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator, namespace: nanoclaw-remediator }]
+  - <<: *jobs-binding
+    metadata: { name: nanoclaw-remediator-jobs, namespace: security }
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

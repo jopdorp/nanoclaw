@@ -1,13 +1,22 @@
 import { createHash } from 'node:crypto';
 
-import type { HelmBinding, RemediationLane, RemediationPlan, TargetRef, ValidatedPlan, ValuesScalar } from './types.js';
+import type {
+  HelmBinding,
+  KnownKind,
+  RemediationLane,
+  RemediationPlan,
+  TargetRef,
+  ValidatedPlan,
+  ValuesEdit,
+  ValuesScalar,
+} from './types.js';
 
 /** Every write here needs approval and runs as the break-glass identity. */
 export const LANE_C_NAMESPACES = new Set(['kube-system', 'longhorn-system']);
 /** Every write here needs approval; nanoclaw-remediator is Orfie modifying itself. Every other namespace is Lane A. */
 const ALWAYS_ASK_NAMESPACES = new Set(['vaultwarden', 'wireguard-home', 'nanoclaw-remediator']);
 
-const API_VERSIONS: Record<TargetRef['kind'], TargetRef['apiVersion']> = {
+const API_VERSIONS: Record<KnownKind, string> = {
   Deployment: 'apps/v1',
   StatefulSet: 'apps/v1',
   DaemonSet: 'apps/v1',
@@ -16,6 +25,8 @@ const API_VERSIONS: Record<TargetRef['kind'], TargetRef['apiVersion']> = {
   PersistentVolume: 'v1',
   PersistentVolumeClaim: 'v1',
   Secret: 'v1',
+  Pod: 'v1',
+  Volume: 'longhorn.io/v1beta2',
 };
 const WORKLOAD_KINDS = ['Deployment', 'StatefulSet', 'DaemonSet'];
 const IMAGE_KINDS = [...WORKLOAD_KINDS, 'CronJob'];
@@ -30,6 +41,11 @@ const IMAGE_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest)$/;
 // Only the chart's own top-level key; nested ones usually size a subchart's database StatefulSet.
 const REPLICA_KEY_RE = /^(replicas|replicaCount)$/;
 const PINNED_RE = /^(?:\w[\w.-]{0,127}@)?sha256:[0-9a-f]{64}$/;
+const MANIFEST_FILE_RE = /^kubernetes\/(?:[\w-][\w.-]*\/)*[\w-][\w.-]*\.ya?ml$/;
+const REPO_PATH_RE = /^[\w-][\w.-]*(?:\/[\w-][\w.-]*)*$/;
+const BUILD_IMAGE_RE = /^registry\.prophet\.jopdorp\.nl\/[a-z0-9]+(?:[._/-][a-z0-9]+)*:\w[\w.-]{0,127}$/;
+const DNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?$/;
+const API_VERSION_RE = /^(?:[a-z0-9.-]+\/)?v\d+(?:(?:alpha|beta)\d+)?$/;
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
@@ -55,19 +71,24 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[], labe
   if (extra) throw new Error(`${label}.${extra} is not allowed`);
 }
 
-function targetFrom(value: unknown): TargetRef {
+/** A manifest target may be any kind, cluster-scoped ones included. */
+function targetFrom(value: unknown, manifest: boolean): TargetRef {
   const input = record(value, 'target');
   exactKeys(input, ['apiVersion', 'kind', 'namespace', 'name', 'uid', 'resourceVersion'], 'target');
-  const kind = string(input.kind, 'target.kind') as TargetRef['kind'];
-  if (!Object.hasOwn(API_VERSIONS, kind)) throw new Error('target.kind is unsupported');
-  const apiVersion = string(input.apiVersion, 'target.apiVersion');
-  if (apiVersion !== API_VERSIONS[kind]) throw new Error('target.apiVersion does not match target.kind');
+  const kind = string(input.kind, 'target.kind', 63);
+  const apiVersion = string(input.apiVersion, 'target.apiVersion', 128);
   const namespace = input.namespace === null ? null : string(input.namespace, 'target.namespace', 63);
-  if ((kind === 'PersistentVolume') !== (namespace === null)) {
-    throw new Error('only PersistentVolume targets may omit namespace');
+  if (manifest) {
+    if (!/^[A-Z][A-Za-z0-9]*$/.test(kind) || !API_VERSION_RE.test(apiVersion))
+      throw new Error('target.kind and target.apiVersion must name a Kubernetes kind');
+  } else {
+    if (!Object.hasOwn(API_VERSIONS, kind)) throw new Error('target.kind is unsupported');
+    if (apiVersion !== API_VERSIONS[kind as KnownKind]) throw new Error('target.apiVersion does not match target.kind');
+    if ((kind === 'PersistentVolume') !== (namespace === null))
+      throw new Error('only PersistentVolume targets may omit namespace');
   }
   return {
-    apiVersion: API_VERSIONS[kind],
+    apiVersion,
     kind,
     namespace,
     name: string(input.name, 'target.name', 253),
@@ -87,16 +108,16 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
   }
   const incidentIds = input.incidentIds.map((entry, index) => string(entry, `plan.incidentIds[${index}]`, 256));
   if (new Set(incidentIds).size !== incidentIds.length) throw new Error('plan.incidentIds must be unique');
+  const operation = record(input.operation, 'plan.operation');
+  const type = string(operation.type, 'plan.operation.type');
   const base = {
     schemaVersion: 1 as const,
     id,
     incidentIds,
-    target: targetFrom(input.target),
+    target: targetFrom(input.target, type === 'manifest-edit' || type === 'manifest-sync'),
     reason: string(input.reason, 'plan.reason', 2000),
     expiresAt: string(input.expiresAt, 'plan.expiresAt', 64),
   };
-  const operation = record(input.operation, 'plan.operation');
-  const type = string(operation.type, 'plan.operation.type');
   if (type === 'patch-image') {
     exactKeys(operation, ['type', 'containers', 'before', 'after'], 'plan.operation');
     if (!Array.isArray(operation.containers) || operation.containers.length === 0 || operation.containers.length > 16) {
@@ -166,27 +187,60 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
       if (!CHART_REPO_RE.test(repo)) throw new Error('plan.operation.chart.repo must be an https:// or oci:// URL');
       chart = { repo };
     }
-    if (!Array.isArray(operation.set) || operation.set.length === 0 || operation.set.length > 8) {
-      throw new Error('plan.operation.set must contain 1 through 8 edits');
-    }
-    const set = operation.set.map((entry, index) => {
-      const edit = record(entry, `plan.operation.set[${index}]`);
-      exactKeys(edit, ['path', 'before', 'after'], `plan.operation.set[${index}]`);
-      const path = string(edit.path, `plan.operation.set[${index}].path`, 256);
-      if (!VALUES_PATH_RE.test(path)) throw new Error(`plan.operation.set[${index}].path must be a dotted values path`);
-      return {
-        path,
-        before: edit.before === null ? null : scalar(edit.before, `plan.operation.set[${index}].before`),
-        after: scalar(edit.after, `plan.operation.set[${index}].after`),
-      };
-    });
-    if (new Set(set.map((edit) => edit.path)).size !== set.length)
-      throw new Error('plan.operation.set paths must be unique');
-    return { ...base, operation: { type, file, ...(chart ? { chart } : {}), set } };
+    return { ...base, operation: { type, file, ...(chart ? { chart } : {}), set: editsFrom(operation.set) } };
+  }
+  if (type === 'manifest-edit' || type === 'manifest-sync') {
+    exactKeys(operation, type === 'manifest-edit' ? ['type', 'file', 'set'] : ['type', 'file'], 'plan.operation');
+    const file = string(operation.file, 'plan.operation.file', 256);
+    if (!MANIFEST_FILE_RE.test(file) || file.split('/').includes('..'))
+      throw new Error('plan.operation.file must be a kubernetes/**.yaml path in k8s.jegor.nl');
+    return type === 'manifest-edit'
+      ? { ...base, operation: { type, file, set: editsFrom(operation.set) } }
+      : { ...base, operation: { type, file } };
+  }
+  if (type === 'pod-exec') {
+    exactKeys(operation, ['type', 'container', 'command'], 'plan.operation');
+    if (!Array.isArray(operation.command) || operation.command.length === 0 || operation.command.length > 64)
+      throw new Error('plan.operation.command must be an argv of 1 through 64 strings');
+    const command = operation.command.map((arg, index) => string(arg, `plan.operation.command[${index}]`, 4096));
+    const container = string(operation.container, 'plan.operation.container', 63);
+    return { ...base, operation: { type, container, command } };
+  }
+  if (type === 'build-image') {
+    exactKeys(operation, ['type', 'dockerfile', 'context', 'image'], 'plan.operation');
+    const dockerfile = string(operation.dockerfile, 'plan.operation.dockerfile', 256);
+    const context = string(operation.context, 'plan.operation.context', 256);
+    const clean = (p: string) => REPO_PATH_RE.test(p) && !p.split('/').includes('..');
+    if (!clean(dockerfile) || !clean(context) || !dockerfile.startsWith(`${context}/`))
+      throw new Error('plan.operation.dockerfile must be a k8s.jegor.nl path inside plan.operation.context');
+    const image = string(operation.image, 'plan.operation.image', 256);
+    if (!BUILD_IMAGE_RE.test(image))
+      throw new Error('plan.operation.image must be registry.prophet.jopdorp.nl/<name>:<tag>');
+    return { ...base, operation: { type, dockerfile, context, image } };
   }
   throw new Error(
-    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values or helm-sync-values',
+    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values, helm-sync-values, pod-exec, manifest-edit, manifest-sync or build-image',
   );
+}
+
+function editsFrom(value: unknown): ValuesEdit[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 8) {
+    throw new Error('plan.operation.set must contain 1 through 8 edits');
+  }
+  const set = value.map((entry, index) => {
+    const edit = record(entry, `plan.operation.set[${index}]`);
+    exactKeys(edit, ['path', 'before', 'after'], `plan.operation.set[${index}]`);
+    const path = string(edit.path, `plan.operation.set[${index}].path`, 256);
+    if (!VALUES_PATH_RE.test(path)) throw new Error(`plan.operation.set[${index}].path must be a dotted values path`);
+    return {
+      path,
+      before: edit.before === null ? null : scalar(edit.before, `plan.operation.set[${index}].before`),
+      after: scalar(edit.after, `plan.operation.set[${index}].after`),
+    };
+  });
+  if (new Set(set.map((edit) => edit.path)).size !== set.length)
+    throw new Error('plan.operation.set paths must be unique');
+  return set;
 }
 
 export function classifyTarget(target: TargetRef): RemediationLane {
@@ -305,7 +359,28 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     if (namespace === 'vaultwarden')
       throw new Error("vaultwarden's chart renders its Secrets, so it never goes through Helm");
   } else if (plan.operation.type === 'delete-storage') {
-    if (!plan.target.kind.startsWith('Persistent')) throw new Error('delete-storage requires PV or PVC');
+    if (!['PersistentVolume', 'PersistentVolumeClaim', 'Volume'].includes(plan.target.kind))
+      throw new Error('delete-storage requires a PV, PVC or Longhorn volume');
+    if (plan.target.kind === 'Volume' && namespace !== 'longhorn-system')
+      throw new Error('Longhorn volumes live in longhorn-system');
+  } else if (plan.operation.type === 'pod-exec') {
+    if (plan.target.kind !== 'Pod') throw new Error('pod-exec requires a Pod');
+  } else if (plan.operation.type === 'build-image') {
+    if (plan.target.kind !== 'Job' || namespace !== 'security' || !DNS_LABEL_RE.test(name))
+      throw new Error('build-image targets the build Job to create in security, named as a DNS label');
+  } else {
+    if (plan.target.kind === 'Secret') throw new Error('Secrets never go into the public k8s.jegor.nl repo');
+    if (plan.operation.type === 'manifest-edit') {
+      for (const { path, before, after } of plan.operation.set) {
+        if (/(?:^|\.)image$/.test(path)) {
+          if (typeof before !== 'string' || typeof after !== 'string')
+            throw new Error(`${path} must be an image reference`);
+          checkImageUpdate(before, after);
+        }
+        if (namespace === 'wireguard-home' && name === 'wireguard' && path === 'spec.replicas' && after === 0)
+          throw new Error('wireguard is never scaled to 0');
+      }
+    }
   }
 
   const canonical = canonicalPlan(plan);
@@ -339,12 +414,19 @@ export function isAutoApproved(
   t1: ReadonlySet<string>,
   helm?: Pick<HelmBinding, 'images' | 'statefulRepositories' | 'hasStatefulSet'>,
 ): boolean {
-  if (plan.operation.type === 'helm-sync-values') return true;
-  if (lane !== 'A') return false;
   const { target, operation } = plan;
+  if (operation.type === 'helm-sync-values' || operation.type === 'manifest-sync') return true;
+  if (lane !== 'A') return false;
   const critical =
     target.kind === 'StatefulSet' || t1.has(target.namespace ?? '') || t1.has(`${target.namespace}/${target.name}`);
-  if (operation.type === 'restart' || operation.type === 'delete-job') return true;
+  if (['restart', 'delete-job', 'pod-exec', 'build-image'].includes(operation.type)) return true;
+  if (operation.type === 'manifest-edit') {
+    return operation.set.every(({ path, before, after }) =>
+      /(?:^|\.)image$/.test(path)
+        ? sameVersionLine(parseImage(String(before)).tag, parseImage(String(after)).tag, critical)
+        : path === 'spec.replicas' && target.kind === 'Deployment',
+    );
+  }
   if (operation.type === 'scale') return target.kind === 'Deployment';
   if (operation.type === 'patch-image')
     return sameVersionLine(parseImage(operation.before).tag, parseImage(operation.after).tag, critical);

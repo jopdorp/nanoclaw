@@ -108,6 +108,22 @@ describe('Kubernetes remediation policy', () => {
     ]);
   });
 
+  it('auto-applies pod-exec in an ordinary namespace and holds it where exec needs approval', () => {
+    const exec = (namespace: string) =>
+      isAutoApproved(
+        validateRemediationPlan(
+          {
+            ...base(namespace),
+            target: { ...base(namespace).target, apiVersion: 'v1', kind: 'Pod', name: 'app-0' },
+            operation: { type: 'pod-exec', container: 'app', command: ['rm', '/tmp/x'] },
+          },
+          now,
+        ),
+        new Set(),
+      );
+    expect(['security', 'vaultwarden', 'kube-system'].map(exec)).toEqual([true, false, false]);
+  });
+
   it('never deletes anything in backups', () => {
     const target = (kind: string) => ({ ...base('backups').target, apiVersion: 'batch/v1', kind });
     const cron = validateRemediationPlan(
