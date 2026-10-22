@@ -16,11 +16,12 @@
  * request with a `template` ref is stamped from that template instead, under
  * the same authorization (the grant is bound to the ref, ./guard.ts).
  */
+import fs from 'fs';
 import path from 'path';
 
 import { GROUPS_DIR } from '../../config.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
-import { getContainerConfig } from '../../db/container-configs.js';
+import { getContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
 import { groupFolderExistsOnDisk } from '../../group-folder.js';
@@ -48,6 +49,8 @@ async function notifyAgent(session: Session, text: string): Promise<void> {
   const fresh = await getSession(session.id);
   if (fresh) await requestWake(fresh, 'agent-created');
 }
+
+const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
 
 function templateRef(content: Record<string, unknown>): string | undefined {
   return typeof content.template === 'string' && content.template ? content.template : undefined;
@@ -87,8 +90,9 @@ export async function validateCreateAgent(content: Record<string, unknown>, sess
 export function createAgentHoldPayload(content: Record<string, unknown>): Record<string, unknown> {
   const name = typeof content.name === 'string' ? content.name : '';
   const template = templateRef(content);
-  if (template) return { name, instructions: null, template };
-  return { name, instructions: typeof content.instructions === 'string' ? content.instructions : null };
+  const child = { provider: content.provider, model: content.model, role: content.role };
+  if (template) return { name, instructions: null, template, ...child };
+  return { name, instructions: typeof content.instructions === 'string' ? content.instructions : null, ...child };
 }
 
 /** The approval card's template sentence: which template, and whether approving downloads it. */
@@ -133,7 +137,7 @@ export async function createAgent(
   options?: CreateAgentOptions,
 ): Promise<void> {
   const name = typeof content.name === 'string' ? content.name : '';
-  const instructions = typeof content.instructions === 'string' ? content.instructions : null;
+  let instructions = typeof content.instructions === 'string' ? content.instructions : null;
   const template = templateRef(content);
   const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!name || !sourceGroup) return; // precheck already answered the requester
@@ -149,14 +153,31 @@ export async function createAgent(
   // Subagent path: a child inherits its creator's EFFECTIVE provider, NOT the
   // instance-wide default — so a child is never spawned on a runtime the parent
   // can't reach (e.g. a codex-only install where claude isn't authenticated).
-  // A NULL parent resolves to claude. The operator can still flip a child
-  // later with `ncl groups config update --provider`.
-  const parentProvider = (await getContainerConfig(sourceGroup.id))?.provider ?? 'claude';
+  // A NULL parent resolves to claude. The creator may name another provider
+  // and model; the operator can still flip a child with `ncl groups config update`.
+  const child = {
+    provider: str(content.provider) ?? (await getContainerConfig(sourceGroup.id))?.provider ?? 'claude',
+    model: str(content.model),
+  };
+
+  // The creator's helper.md and the chosen .claude/agents role lead the child's persona.
+  const role = str(content.role);
+  if (role && !/^[a-z0-9-]+$/.test(role)) return notify(`Cannot create agent "${name}": bad role "${role}".`);
+  const root = path.resolve(GROUPS_DIR, sourceGroup.folder);
+  const own = (file: string) => {
+    const at = path.join(root, file);
+    // The creator can write its own folder, so a symlink must not pull host files into the persona.
+    if (!fs.existsSync(at) || !fs.realpathSync(at).startsWith(fs.realpathSync(root) + path.sep)) return undefined;
+    return fs.readFileSync(at, 'utf-8').replace(/^---\n[\s\S]*?\n---\n/, '');
+  };
+  const persona = role && own(path.join('.claude', 'agents', `${role}.md`));
+  if (role && !persona) return notify(`Cannot create agent "${name}": no role "${role}" in .claude/agents.`);
+  instructions = [own('helper.md'), persona, instructions].filter(Boolean).join('\n\n') || null;
 
   if (template) {
-    await createFromTemplate(template, name, localName, parentProvider, session, sourceGroup, notify, options);
+    await createFromTemplate(template, name, localName, child, session, sourceGroup, notify, options);
   } else {
-    await performCreateAgent(name, localName, instructions, parentProvider, session, sourceGroup, notify, options);
+    await performCreateAgent(name, localName, instructions, child, session, sourceGroup, notify, options);
   }
 }
 
@@ -169,7 +190,7 @@ async function createFromTemplate(
   template: string,
   name: string,
   localName: string,
-  parentProvider: string,
+  child: { provider: string; model?: string },
   session: Session,
   sourceGroup: AgentGroup,
   notify: (text: string) => Promise<void>,
@@ -188,7 +209,7 @@ async function createFromTemplate(
 
   let stamped: Awaited<ReturnType<typeof createAgentFromTemplate>>;
   try {
-    stamped = await createAgentFromTemplate(template, { name, provider: parentProvider });
+    stamped = await createAgentFromTemplate(template, { name, provider: child.provider });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await notify(`Cannot create agent "${name}": template "${template}" could not be applied: ${msg}.`);
@@ -196,6 +217,7 @@ async function createFromTemplate(
     return;
   }
 
+  if (child.model) await updateContainerConfigScalars(stamped.group.id, { model: child.model });
   await wireNewAgent(sourceGroup.id, localName, stamped.group.id, session);
 
   if (!options?.suppressCreatedNotify) {
@@ -227,7 +249,7 @@ async function performCreateAgent(
   name: string,
   localName: string,
   instructions: string | null,
-  parentProvider: string,
+  child: { provider: string; model?: string },
   session: Session,
   sourceGroup: AgentGroup,
   notify: (text: string) => Promise<void>,
@@ -266,7 +288,8 @@ async function performCreateAgent(
   };
   await createAgentGroup(newGroup);
   // Passing the provider pins the child's scaffold and stamps its config row in one step.
-  await initGroupFilesystem(newGroup, { instructions: instructions ?? undefined, provider: parentProvider });
+  await initGroupFilesystem(newGroup, { instructions: instructions ?? undefined, provider: child.provider });
+  if (child.model) await updateContainerConfigScalars(agentGroupId, { model: child.model });
   await wireNewAgent(sourceGroup.id, localName, agentGroupId, session);
 
   if (!options?.suppressCreatedNotify) {

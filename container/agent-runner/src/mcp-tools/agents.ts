@@ -46,6 +46,16 @@ export const createAgent: McpToolDefinition = {
           description:
             'Optional template ref the user chose (e.g. "sales/sdr"), from `ncl templates list`. The template supplies the persona; `instructions` is ignored.',
         },
+        provider: {
+          type: 'string',
+          description: 'Optional provider for the new agent ("claude" or "codex"); defaults to yours',
+        },
+        model: { type: 'string', description: 'Optional model for the new agent, e.g. "gpt-5.6-sol" or "opus"' },
+        role: {
+          type: 'string',
+          description:
+            'Optional role file from your .claude/agents (e.g. "sre-engineer"), prepended to its instructions',
+        },
       },
       required: ['name'],
     },
@@ -64,6 +74,9 @@ export const createAgent: McpToolDefinition = {
         name,
         instructions: (args.instructions as string) || null,
         ...(typeof args.template === 'string' && args.template ? { template: args.template } : {}),
+        provider: args.provider,
+        model: args.model,
+        role: args.role,
       }),
     });
 

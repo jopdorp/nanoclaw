@@ -9,7 +9,8 @@ import { promisify } from 'node:util';
 
 import { DATA_DIR } from '../../config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { getContainerConfig } from '../../db/container-configs.js';
+import { getContainerConfig, updateContainerConfigJson } from '../../db/container-configs.js';
+import { materializeContainerJson } from '../../container-config.js';
 import { registerDeliveryAction } from '../../delivery.js';
 import { unguarded } from '../../guard/index.js';
 import { onOneCliAgentEnsured } from '../../gateway-providers/onecli.js';
@@ -83,6 +84,17 @@ async function scopeHelperSecrets(agentGroupId: string): Promise<void> {
   await exec('onecli', ['agents', 'set-secret-mode', '--id', agent.id, '--mode', 'selective']);
   if (wanted.sort().join() !== [...current].sort().join())
     await exec('onecli', ['agents', 'set-secrets', '--id', agent.id, '--secret-ids', wanted.join(',')]);
+}
+
+/** Helpers get Orfie's shared-mind server; container.json is rewritten because this runs after spawn materialized it. */
+async function shareMemory(orfieId: string, helperId: string): Promise<void> {
+  const servers = async (id: string) =>
+    JSON.parse((await getContainerConfig(id))?.mcp_servers ?? '{}') as Record<string, unknown>;
+  const memory = (await servers(orfieId))['shared-mind'];
+  const own = await servers(helperId);
+  if (!memory || own['shared-mind']) return;
+  await updateContainerConfigJson(helperId, 'mcp_servers', { ...own, 'shared-mind': memory });
+  await materializeContainerJson(helperId);
 }
 
 export async function startKubernetesRemediation(
@@ -159,7 +171,9 @@ export async function startKubernetesRemediation(
     unguarded('stops only a team agent’s container; it respawns on its next message'),
   );
   onOneCliAgentEnsured(async (groupId) => {
-    if (groupId !== config.agentGroupId && (await team(groupId))) await scopeHelperSecrets(groupId);
+    if (groupId === config.agentGroupId || !(await team(groupId))) return;
+    await scopeHelperSecrets(groupId);
+    await shareMemory(config.agentGroupId, groupId);
   });
   registerStandingApprovals({
     approverUserId: config.matrixApproverUserId,
