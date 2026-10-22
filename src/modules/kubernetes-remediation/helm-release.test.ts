@@ -181,3 +181,17 @@ it('appends a sequence item when the index is the current length and before is n
     'spec:\n  imagePullSecrets:\n    - name: registry\n    - name: "gitea"\n  containers: []\n',
   );
 });
+
+it('reuses missing parents and a new sequence item across edits', () => {
+  expect(
+    editValues('existing: true\n', [
+      { path: 'gitea.config.actions.ENABLED', before: null, after: true },
+      { path: 'deployment.env.0.name', before: null, after: 'X' },
+      { path: 'deployment.env.0.valueFrom.secretKeyRef.name', before: null, after: 'Y' },
+      { path: 'deployment.env.0.valueFrom.secretKeyRef.key', before: null, after: 'Z' },
+      { path: 'service.annotations', before: null, after: { owner: 'orfie', ports: [80, 443] } },
+    ]),
+  ).toBe(
+    'service:\n  annotations:\n    owner: orfie\n    ports:\n      - 80\n      - 443\ndeployment:\n  env:\n    - name: "X"\n      valueFrom:\n        secretKeyRef:\n          key: "Z"\n          name: "Y"\ngitea:\n  config:\n    actions:\n      ENABLED: true\nexisting: true\n',
+  );
+});

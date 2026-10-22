@@ -10,6 +10,7 @@ import type {
   ValidatedPlan,
   ValuesEdit,
   ValuesScalar,
+  ValuesValue,
 } from './types.js';
 
 /** Every write here needs approval and runs as the break-glass identity. */
@@ -77,6 +78,14 @@ const VALUE_MAX = 65536;
 function scalar(value: unknown, label: string): ValuesScalar {
   if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return value;
   return string(value, label, VALUE_MAX);
+}
+
+function valuesValue(value: unknown, label: string): ValuesValue {
+  if (value === null || typeof value !== 'object') return scalar(value, label);
+  const serialized = JSON.stringify(value);
+  if (!serialized || serialized.length > VALUE_MAX)
+    throw new Error(`${label} must be a YAML value no longer than ${VALUE_MAX} characters`);
+  return value as ValuesValue;
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
@@ -325,8 +334,8 @@ function editsFrom(value: unknown): ValuesEdit[] {
     if (!VALUES_PATH_RE.test(path)) throw new Error(`plan.operation.set[${index}].path must be a dotted values path`);
     return {
       path,
-      before: edit.before === null ? null : scalar(edit.before, `plan.operation.set[${index}].before`),
-      after: edit.after === null ? null : scalar(edit.after, `plan.operation.set[${index}].after`),
+      before: edit.before === null ? null : valuesValue(edit.before, `plan.operation.set[${index}].before`),
+      after: edit.after === null ? null : valuesValue(edit.after, `plan.operation.set[${index}].after`),
     };
   });
   if (new Set(set.map((edit) => edit.path)).size !== set.length)
@@ -335,7 +344,8 @@ function editsFrom(value: unknown): ValuesEdit[] {
 }
 
 /** Helm --set paths, where `\.` is a literal dot inside a key. */
-export const valuesKeys = (path: string) => path.split(/(?<!\\)\./).map((key) => key.replaceAll('\\.', '.'));
+export const valuesKeys = (path: string) =>
+  path.split(/(?<!\\)\./).map((key) => (/^\d+$/.test(key) ? Number(key) : key.replaceAll('\\.', '.')));
 
 export function secretKeys(value: unknown, prefix = ''): string[] {
   if (!value || typeof value !== 'object') return [];

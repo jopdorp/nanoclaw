@@ -183,38 +183,53 @@ export function editValues(text: string, set: HelmValuesPlan['operation']['set']
       while (depth > 0 && !doc.hasIn(keys.slice(0, depth))) depth--;
       const parent = depth ? doc.getIn(keys.slice(0, depth), true) : doc.contents;
       const last = isSeq(parent) && !parent.flow ? parent.items.at(-1) : undefined;
-      if (
-        node === undefined &&
-        keys[depth] === String(isSeq(parent) && parent.items.length) &&
-        isNode(last) &&
-        last.range
-      ) {
+      if (node === undefined && isSeq(parent) && keys[depth] === parent.items.length && isNode(last) && last.range) {
         const at = result.indexOf('\n', last.range[1] - 1) + 1;
         const dash = ' '.repeat(last.range[0] - result.lastIndexOf('\n', last.range[0]) - 3);
         const rest = keys.slice(depth + 1);
-        const item = rest.length
-          ? rest.map((key, i) => `${'  '.repeat(i)}${key}:${i === rest.length - 1 ? ` ${JSON.stringify(after)}` : ''}`)
-          : [JSON.stringify(after)];
+        const added = parseDocument('');
+        added.setIn(
+          [0, ...rest],
+          after !== null && typeof after === 'object'
+            ? added.createNode(after)
+            : parseDocument(JSON.stringify(after)).contents,
+        );
         result =
-          result.slice(0, at) + item.map((line, i) => `${dash}${i ? '  ' : '- '}${line}\n`).join('') + result.slice(at);
+          result.slice(0, at) +
+          String(added)
+            .split('\n')
+            .slice(0, -1)
+            .map((line) => `${dash}${line}\n`)
+            .join('') +
+          result.slice(at);
         continue;
       }
-      const first = isMap(parent) && !parent.flow ? parent.items[0]?.key : undefined;
+      const firstPair = isMap(parent) && !parent.flow ? parent.items[0] : undefined;
+      const first = firstPair?.key;
       if (node !== undefined || !isScalar(first) || !first.range) {
         throw new Error(`repo drift: ${dotted} ${node === undefined ? 'has no block map to join' : 'already exists'}`);
       }
       const lineStart = result.lastIndexOf('\n', first.range[0]) + 1;
       const indent = first.range[0] - lineStart;
-      const lines = keys
-        .slice(depth)
-        .map(
-          (key, i, added) =>
-            `${' '.repeat(indent + 2 * i)}${key}:${i === added.length - 1 ? ` ${JSON.stringify(after)}` : ''}\n`,
-        );
-      result = result.slice(0, lineStart) + lines.join('') + result.slice(lineStart);
+      const added = parseDocument('');
+      added.setIn(
+        keys.slice(depth),
+        after !== null && typeof after === 'object'
+          ? added.createNode(after)
+          : parseDocument(JSON.stringify(after)).contents,
+      );
+      const lines = String(added)
+        .split('\n')
+        .slice(0, -1)
+        .map((line) => `${' '.repeat(indent)}${line}\n`);
+      const firstValue = firstPair?.value;
+      const at = result.slice(lineStart, first.range[0]).includes('- ')
+        ? result.indexOf('\n', (isNode(firstValue) && firstValue.range ? firstValue.range[1] : first.range[1]) - 1) + 1
+        : lineStart;
+      result = result.slice(0, at) + lines.join('') + result.slice(at);
       continue;
     }
-    if (!isScalar(node) || !node.range || node.value !== before) {
+    if (!isNode(node) || !node.range || !isDeepStrictEqual(node.toJSON(), before)) {
       const actual = isScalar(node) ? JSON.stringify(node.value) : 'not a scalar';
       throw new Error(
         `repo drift: ${dotted} is ${ECHOED_KEY_RE.test(dotted) ? actual : 'different'}, not ${JSON.stringify(before)}`,
@@ -227,6 +242,12 @@ export function editValues(text: string, set: HelmValuesPlan['operation']['set']
       result = result.slice(0, result.lastIndexOf('\n', key.range[0]) + 1) + result.slice(node.range[2]);
       continue;
     }
+    if ((before !== null && typeof before === 'object') || (after !== null && typeof after === 'object')) {
+      doc.setIn(keys, doc.createNode(after));
+      result = String(doc);
+      continue;
+    }
+    if (!isScalar(node)) throw new Error(`repo drift: ${dotted} is not a scalar`);
     const literal =
       typeof after !== 'string'
         ? String(after)
@@ -242,7 +263,7 @@ export function editValues(text: string, set: HelmValuesPlan['operation']['set']
     if (after === null) expected.deleteIn(valuesKeys(dotted));
     else expected.setIn(valuesKeys(dotted), expected.createNode(after));
   if (!isDeepStrictEqual(parseDocument(result).toJS(), expected.toJS()))
-    throw new Error('the edit changes more than the given scalar paths');
+    throw new Error('the edit changes more than the given paths');
   return result;
 }
 
@@ -441,26 +462,46 @@ export class HelmReleaseExecutor {
       const existed = fs.existsSync(absolute);
       if (existed && this.read(file) === content)
         return { applied: true, message: `${file} already holds that content.`, automaticWrites: 0 };
-      const objects: Array<{ path: string; object: Values }> = [];
+      const objects: Array<{ path: string; object: Values; namespace: string; newNamespace?: string }> = [];
       for (const object of plan.commitOnly ? [] : repoObjects(content)) {
         const { name = '', namespace = null } = object.metadata ?? {};
         const objectPath = await this.objectPath({ ...plan.target, ...object, name, namespace });
+        const checkLive =
+          object.kind === 'Namespace' || ['Deployment', 'StatefulSet', 'DaemonSet', 'CronJob'].includes(object.kind);
+        const live = checkLive
+          ? await this.options.client.request(objectPath).then(
+              () => true,
+              () => false,
+            )
+          : false;
         // Existing workloads change through manifest-edit, which holds the owner's version and scale rules.
-        if (['Deployment', 'StatefulSet', 'DaemonSet', 'CronJob'].includes(object.kind)) {
-          const live = await this.options.client.request(objectPath).then(
-            () => true,
-            () => false,
-          );
-          if (live) throw new Error(`${object.kind} ${namespace}/${name} exists; change it with manifest-edit`);
-        }
-        await this.serverSideApply(objectPath, object as Values, true);
-        objects.push({ path: objectPath, object: object as Values });
+        if (object.kind !== 'Namespace' && live)
+          throw new Error(`${object.kind} ${namespace}/${name} exists; change it with manifest-edit`);
+        objects.push({
+          path: objectPath,
+          object: object as Values,
+          namespace: String(namespace ?? ''),
+          ...(!live && object.kind === 'Namespace' ? { newNamespace: name } : {}),
+        });
       }
+      const newNamespaces = new Set(objects.flatMap(({ newNamespace }) => (newNamespace ? [newNamespace] : [])));
+      for (const { path: objectPath, object, namespace } of objects)
+        if (!newNamespaces.has(namespace)) await this.serverSideApply(objectPath, object, true);
       fs.mkdirSync(path.dirname(absolute), { recursive: true });
       fs.writeFileSync(absolute, content);
       let applied = 0;
       try {
-        for (const { path: objectPath, object } of plan.commitOnly ? [] : objects) {
+        for (const { path: objectPath, object, newNamespace } of objects.filter(
+          ({ object }) => object.kind === 'Namespace',
+        )) {
+          await this.serverSideApply(objectPath, object, false);
+          applied++;
+          if (newNamespace) await this.waitForNamespace(newNamespace);
+        }
+        for (const { path: objectPath, object, namespace } of objects.filter(
+          ({ object }) => object.kind !== 'Namespace',
+        )) {
+          if (newNamespaces.has(namespace)) await this.serverSideApply(objectPath, object, true);
           await this.serverSideApply(objectPath, object, false);
           applied++;
         }
@@ -605,6 +646,23 @@ export class HelmReleaseExecutor {
       body: object,
       contentType: 'application/apply-patch+yaml',
     })) as Values;
+  }
+
+  private async waitForNamespace(namespace: string): Promise<void> {
+    const deadline = Date.now() + 180_000;
+    do {
+      const review = (await this.options.client.request('/apis/authorization.k8s.io/v1/selfsubjectaccessreviews', {
+        method: 'POST',
+        body: {
+          apiVersion: 'authorization.k8s.io/v1',
+          kind: 'SelfSubjectAccessReview',
+          spec: { resourceAttributes: { namespace, verb: 'create', group: '', resource: 'serviceaccounts' } },
+        },
+      })) as { status?: { allowed?: boolean } };
+      if (review.status?.allowed) return;
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    } while (Date.now() < deadline);
+    throw new Error(`namespace binder did not grant nanoclaw-helm access to ${namespace}`);
   }
 
   private async objectPath({ apiVersion, kind, namespace, name }: TargetRef): Promise<string> {
