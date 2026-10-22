@@ -17,6 +17,7 @@ import type {
   PodExecPlan,
   RemediationPlan,
   RepoWritePlan,
+  SnapshotDeletePlan,
   ValidatedPlan,
 } from './types.js';
 
@@ -499,6 +500,8 @@ export class GatewayRemediationExecutor {
         return this.podExec(plan as PodExecPlan, lane === 'C' ? 'nanoclaw-breakglass' : 'nanoclaw-remediator');
       case 'build-image':
         return this.buildImage(plan as BuildImagePlan);
+      case 'delete-snapshot':
+        return this.deleteSnapshot(plan as SnapshotDeletePlan, executor);
     }
 
     const path =
@@ -661,6 +664,34 @@ export class GatewayRemediationExecutor {
     return {
       applied: exitCode === 0,
       message: `exec in ${plan.target.namespace}/${plan.target.name} exited ${exitCode ?? 'without finishing'}:\n${output}`,
+      automaticWrites: 0,
+    };
+  }
+
+  private async deleteSnapshot(plan: SnapshotDeletePlan, client: KubernetesJsonClient): Promise<ExecutionResult> {
+    const base = '/apis/longhorn.io/v1beta2/namespaces/longhorn-system';
+    const { uid, resourceVersion, name } = plan.target;
+    const path = `${base}/snapshots/${encodeURIComponent(name)}`;
+    const live = (await client.request(path)) as LiveObject & { spec?: { volume?: string } };
+    if (live.metadata?.uid !== uid || live.metadata?.resourceVersion !== resourceVersion)
+      throw new Error('target UID or resourceVersion changed after proposal');
+    if (live.spec?.volume !== plan.operation.volume)
+      throw new Error(`snapshot ${name} is not of volume ${plan.operation.volume}`);
+    const volume = (await client.request(`${base}/volumes/${encodeURIComponent(plan.operation.volume)}`)) as LiveObject;
+    if (volume.status?.kubernetesStatus?.namespace === 'backups')
+      throw new Error('snapshots of volumes claimed from backups are never deleted');
+    const backups = (await client.request(`${base}/backups`)) as {
+      items?: Array<{ spec?: { snapshotName?: string }; status?: { snapshotName?: string } }>;
+    };
+    if (backups.items?.some((b) => b.spec?.snapshotName === name || b.status?.snapshotName === name))
+      throw new Error(`a Longhorn backup references snapshot ${name}; it is never deleted`);
+    await client.request(path, {
+      method: 'DELETE',
+      body: { apiVersion: 'v1', kind: 'DeleteOptions', preconditions: { uid, resourceVersion } },
+    });
+    return {
+      applied: true,
+      message: `Deleted Longhorn snapshot ${name} of volume ${plan.operation.volume}.`,
       automaticWrites: 0,
     };
   }

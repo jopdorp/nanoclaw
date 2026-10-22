@@ -13,7 +13,8 @@ export type KnownKind =
   | 'Secret'
   | 'Pod'
   /** A Longhorn volume, longhorn.io/v1beta2. */
-  | 'Volume';
+  | 'Volume'
+  | 'Snapshot';
 
 export interface TargetRef {
   apiVersion: string;
@@ -66,6 +67,11 @@ export interface BuildImagePlan extends PlanBase {
 
 export interface StorageDeletePlan extends PlanBase {
   operation: { type: 'delete-storage'; reclaimConfirmed: boolean };
+}
+
+/** A Longhorn snapshot of `volume`; never one a backup references. */
+export interface SnapshotDeletePlan extends PlanBase {
+  operation: { type: 'delete-snapshot'; volume: string };
 }
 
 export type ValuesScalar = string | number | boolean;
@@ -128,6 +134,7 @@ export type RemediationPlan =
   | ScalePlan
   | JobDeletePlan
   | StorageDeletePlan
+  | SnapshotDeletePlan
   | HelmValuesPlan
   | HelmSyncPlan
   | HelmInstallPlan

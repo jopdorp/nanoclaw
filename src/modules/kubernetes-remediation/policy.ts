@@ -28,6 +28,7 @@ const API_VERSIONS: Record<KnownKind, string> = {
   Secret: 'v1',
   Pod: 'v1',
   Volume: 'longhorn.io/v1beta2',
+  Snapshot: 'longhorn.io/v1beta2',
 };
 const WORKLOAD_KINDS = ['Deployment', 'StatefulSet', 'DaemonSet'];
 const IMAGE_KINDS = [...WORKLOAD_KINDS, 'CronJob'];
@@ -192,6 +193,10 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     exactKeys(operation, ['type', 'file'], 'plan.operation');
     return { ...base, operation: { type, file: valuesFile() } };
   }
+  if (type === 'delete-snapshot') {
+    exactKeys(operation, ['type', 'volume'], 'plan.operation');
+    return { ...base, operation: { type, volume: string(operation.volume, 'plan.operation.volume', 253) } };
+  }
   if (type === 'helm-uninstall') {
     exactKeys(operation, ['type'], 'plan.operation');
     return { ...base, operation: { type } };
@@ -264,7 +269,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     return { ...base, operation: { type, dockerfile, context, image } };
   }
   throw new Error(
-    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, pod-exec, manifest-edit, manifest-sync, repo-write or build-image',
+    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, pod-exec, manifest-edit, manifest-sync, repo-write or build-image',
   );
 }
 
@@ -451,6 +456,9 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
       throw new Error('delete-storage requires a PV, PVC or Longhorn volume');
     if (plan.target.kind === 'Volume' && namespace !== 'longhorn-system')
       throw new Error('Longhorn volumes live in longhorn-system');
+  } else if (plan.operation.type === 'delete-snapshot') {
+    if (plan.target.kind !== 'Snapshot' || namespace !== 'longhorn-system')
+      throw new Error('delete-snapshot targets a Longhorn Snapshot in longhorn-system');
   } else if (plan.operation.type === 'pod-exec') {
     if (plan.target.kind !== 'Pod') throw new Error('pod-exec requires a Pod');
   } else if (plan.operation.type === 'build-image') {

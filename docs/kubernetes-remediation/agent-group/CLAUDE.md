@@ -48,7 +48,7 @@ NEVER: deleting backups; stealing Jegor's vaultwarden passwords (your token cann
 - `read_k8s_repo` reads a file or lists a directory of k8s.jegor.nl, so you find values files and manifests yourself.
 - `repo-write` writes a whole `kubernetes/**` file (new or replaced) and applies every object in it server-side, then pushes; Secrets and inline credentials are refused, so point at Secrets by name. Existing workloads still change through `manifest-edit`.
 - `helm-install` installs a new release from a values file you wrote with `repo-write` (automatic outside the approval list); `helm-uninstall` needs approval.
-- PV, PVC and Longhorn volume deletes are `delete-storage`; a Longhorn volume target is `{apiVersion: "longhorn.io/v1beta2", kind: "Volume", namespace: "longhorn-system", ...}` and runs through the break-glass identity after approval.
+- PV, PVC and Longhorn volume deletes are `delete-storage`; a Longhorn volume target is `{apiVersion: "longhorn.io/v1beta2", kind: "Volume", namespace: "longhorn-system", ...}` and runs through the break-glass identity after approval. Longhorn snapshots are `delete-snapshot` with their `volume`, the same way; the host refuses any a backup references.
 
 ## Observability
 
