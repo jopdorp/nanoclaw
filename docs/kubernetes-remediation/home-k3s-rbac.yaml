@@ -510,26 +510,6 @@ metadata:
   annotations:
     kubernetes.io/service-account.name: nanoclaw-helm
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: nanoclaw-helm-cluster-read
-rules:
-  - apiGroups: [rbac.authorization.k8s.io]
-    resources: [clusterroles, clusterrolebindings]
-    verbs: [get]
-  - apiGroups: [aquasecurity.github.io]
-    resources: [clustercompliancereports]
-    verbs: [get]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: nanoclaw-helm-cluster-read
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-helm-cluster-read }
-subjects:
-  - { kind: ServiceAccount, name: nanoclaw-helm, namespace: nanoclaw-remediator }
----
 apiVersion: v1
 kind: List
 items:
@@ -567,15 +547,7 @@ items:
     rules: *helm-release-rules
   - apiVersion: rbac.authorization.k8s.io/v1
     kind: Role
-    metadata: { name: nanoclaw-helm-release, namespace: logging }
-    rules: *helm-release-rules
-  - apiVersion: rbac.authorization.k8s.io/v1
-    kind: Role
     metadata: { name: nanoclaw-helm-release, namespace: excalidraw }
-    rules: *helm-release-rules
-  - apiVersion: rbac.authorization.k8s.io/v1
-    kind: Role
-    metadata: { name: nanoclaw-helm-release, namespace: trivy-operator }
     rules: *helm-release-rules
   - apiVersion: rbac.authorization.k8s.io/v1
     kind: Role
@@ -594,17 +566,7 @@ items:
     subjects: *helm-subject
   - apiVersion: rbac.authorization.k8s.io/v1
     kind: RoleBinding
-    metadata: { name: nanoclaw-helm-release, namespace: logging }
-    roleRef: *helm-release-role
-    subjects: *helm-subject
-  - apiVersion: rbac.authorization.k8s.io/v1
-    kind: RoleBinding
     metadata: { name: nanoclaw-helm-release, namespace: excalidraw }
-    roleRef: *helm-release-role
-    subjects: *helm-subject
-  - apiVersion: rbac.authorization.k8s.io/v1
-    kind: RoleBinding
-    metadata: { name: nanoclaw-helm-release, namespace: trivy-operator }
     roleRef: *helm-release-role
     subjects: *helm-subject
   - apiVersion: rbac.authorization.k8s.io/v1

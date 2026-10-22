@@ -290,10 +290,12 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
           ? WIREGUARD_RE
           : DIGEST_IMAGE_RE;
     checkImageUpdate(plan.operation.before, plan.operation.after, expected);
-    // The base admission policy rejects a rollback to a mutable tag. Such a
-    // rollout gets the restart attempt only; a digest-pinned prior image may
-    // also use the second, rollback write.
-    automaticWriteCap = lane === 'A' ? (DIGEST_IMAGE_RE.test(plan.operation.before) ? 2 : 1) : 0;
+    // The base admission policy rejects a rollback to a mutable tag unless the
+    // pinned image was derived from exactly that tag. Any other rollout gets the
+    // restart attempt only; a digest-pinned or exact-tag prior image may also
+    // use the second, rollback write.
+    const exactTag = plan.operation.after.startsWith(`${plan.operation.before}@sha256:`);
+    automaticWriteCap = lane === 'A' ? (DIGEST_IMAGE_RE.test(plan.operation.before) || exactTag ? 2 : 1) : 0;
   } else if (plan.operation.type === 'restart') {
     if (lane !== 'A' || !WORKLOAD_KINDS.includes(plan.target.kind)) {
       throw new Error('restart requires a Lane A workload');

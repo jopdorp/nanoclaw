@@ -193,11 +193,9 @@ export class HelmReleaseExecutor {
 
     const diff = await this.driftDiff(release, ns).catch((error: unknown) => [`drift check failed: ${reason(error)}`]);
     if (diff.length) {
-      const imageRegressed = diff.some((line) => !line.includes(' replicas '));
-      const outcome = imageRegressed ? await this.rollback(release, ns, metadata.revision) : 'kept the upgrade';
       return {
-        applied: !imageRegressed,
-        message: `helm result differs from patch: ${diff.join('; ')}; ${outcome}; nothing pushed, the drift item stays open.`,
+        applied: false,
+        message: `helm result differs from patch: ${diff.join('; ')}; ${await this.rollback(release, ns, metadata.revision)}; nothing pushed, the drift item stays open.`,
         automaticWrites: 0,
       };
     }
@@ -224,7 +222,7 @@ export class HelmReleaseExecutor {
       };
     }
     const sha = (await this.options.git(['rev-parse', '--short', 'HEAD'])).trim();
-    this.resolveDrift(release, plan.id);
+    this.resolveDrift(ns, release, plan.id);
     return { applied: true, message: `helm matches live; pushed ${sha} to k8s.jegor.nl.`, automaticWrites: 0 };
   }
 
@@ -247,7 +245,7 @@ export class HelmReleaseExecutor {
       lines.push(`${stamp} replicas ${op.after}`);
     }
     if (!lines.length) return '';
-    const file = this.driftFile(release);
+    const file = this.driftFile(plan.target.namespace ?? '', release);
     const current = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
     const head = [
       '---',
@@ -347,12 +345,12 @@ export class HelmReleaseExecutor {
     }
   }
 
-  private driftFile(release: string): string {
-    return path.join(this.options.memoryDir, 'open-items', `helm-drift-${release}.md`);
+  private driftFile(ns: string, release: string): string {
+    return path.join(this.options.memoryDir, 'open-items', `helm-drift-${ns}--${release}.md`);
   }
 
   private async driftDiff(release: string, ns: string): Promise<string[]> {
-    const file = this.driftFile(release);
+    const file = this.driftFile(ns, release);
     const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
     if (text.includes('\n- resolved ')) return [];
     const expected = new Map<string, { kind: string; name: string; field: string; value: string }>();
@@ -378,8 +376,8 @@ export class HelmReleaseExecutor {
     return diff;
   }
 
-  private resolveDrift(release: string, planId: string): void {
-    const file = this.driftFile(release);
+  private resolveDrift(ns: string, release: string, planId: string): void {
+    const file = this.driftFile(ns, release);
     if (fs.existsSync(file))
       fs.appendFileSync(file, `- resolved ${new Date().toISOString()} by helm-values plan ${planId}\n`);
   }

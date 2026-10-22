@@ -15,12 +15,14 @@ API_SERVER=https://192.168.1.11:6443
 API_HOST=192.168.1.11
 EXECUTOR=nanoclaw-remediation-executor
 ANNOTATOR=nanoclaw-remediation-annotator
+HELM=nanoclaw-helm
+HELM_SECRET='Kubernetes helm'
 READ_SECRET=nanoclaw-remediator-kubernetes
 APPROVER_SECRET=nanoclaw-remediation-approver-kubernetes
 LOGIN_JOB=nanoclaw-provider-login
 LOGIN_POD=
 CREATED_LOGIN_JOB=0
-TOKEN_FILES=(/tmp/nanoclaw-remediator.token /tmp/nanoclaw-remediation-approver.token)
+TOKEN_FILES=(/tmp/nanoclaw-remediator.token /tmp/nanoclaw-remediation-approver.token /tmp/nanoclaw-helm.token)
 
 step() { printf '\n==> %s\n' "$*"; }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -88,6 +90,21 @@ step '1/6 apply the approval-controller identity and admission policies idempote
 kubectl apply -f "$DOCS/approval-controller-rbac.yaml" >/dev/null
 kubectl apply --server-side -f "$DOCS/approval-controller-policy.yaml" >/dev/null
 printf '%s\n' 'approval-controller RBAC and policies are present'
+kubectl apply -f - >/dev/null <<'YAML'
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: nanoclaw-helm, namespace: nanoclaw-remediator }
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/service-account-token
+metadata:
+  name: nanoclaw-helm-token
+  namespace: nanoclaw-remediator
+  annotations: { kubernetes.io/service-account.name: nanoclaw-helm }
+YAML
+printf '%s\n' 'nanoclaw-helm ServiceAccount and token Secret are present'
 
 step '2/6 start or reuse the disposable OneCLI setup Job'
 if kubectl get job -n "$NAMESPACE" "$LOGIN_JOB" >/dev/null 2>&1; then
@@ -213,8 +230,11 @@ onecli_cli agents set-secret-mode --id "$EXECUTOR_AGENT_ID" --mode selective >/d
 ensure_agent "$ANNOTATOR" 'NanoClaw Remediation Annotator' true
 ANNOTATOR_AGENT_ID=$ENSURED_AGENT_ID
 onecli_cli agents set-secret-mode --id "$ANNOTATOR_AGENT_ID" --mode selective >/dev/null
+ensure_agent "$HELM" 'NanoClaw Helm Executor' true
+HELM_AGENT_ID=$ENSURED_AGENT_ID
+onecli_cli agents set-secret-mode --id "$HELM_AGENT_ID" --mode selective >/dev/null
 AGENTS=$(onecli_cli agents list)
-for id in "$PRIMARY_AGENT_ID" "$EXECUTOR_AGENT_ID" "$ANNOTATOR_AGENT_ID"; do
+for id in "$PRIMARY_AGENT_ID" "$EXECUTOR_AGENT_ID" "$ANNOTATOR_AGENT_ID" "$HELM_AGENT_ID"; do
   jq -e --arg id "$id" '.data[] | select(.id == $id and .secretMode == "selective")' <<<"$AGENTS" >/dev/null \
     || fail "OneCLI agent $id is not in selective secret mode"
 done
@@ -227,12 +247,23 @@ kubectl create token -n "$NAMESPACE" nanoclaw-remediator --duration=1h \
 kubectl create token -n "$NAMESPACE" nanoclaw-remediation-approver --duration=1h \
   | kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- \
       sh -c 'umask 077; cat > /tmp/nanoclaw-remediation-approver.token'
-printf '%s\n' 'created fresh one-hour tokens without printing their values'
+for _ in $(seq 30); do
+  HELM_TOKEN_B64=$(kubectl get secret -n "$NAMESPACE" nanoclaw-helm-token -o jsonpath='{.data.token}')
+  [[ -n "$HELM_TOKEN_B64" ]] && break
+  sleep 1
+done
+[[ -n "$HELM_TOKEN_B64" ]] || todo 'the nanoclaw-helm-token Secret has no token yet'
+base64 -d <<<"$HELM_TOKEN_B64" | kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- \
+  sh -c 'umask 077; cat > /tmp/nanoclaw-helm.token'
+unset HELM_TOKEN_B64
+printf '%s\n' 'created fresh one-hour tokens and copied the nanoclaw-helm token without printing their values'
 
 READ_SECRET_ID=$(upsert_kubernetes_secret "$READ_SECRET" "${TOKEN_FILES[0]}") \
   || todo "could not create or rotate OneCLI secret $READ_SECRET"
 APPROVER_SECRET_ID=$(upsert_kubernetes_secret "$APPROVER_SECRET" "${TOKEN_FILES[1]}") \
   || todo "could not create or rotate OneCLI secret $APPROVER_SECRET"
+HELM_SECRET_ID=$(upsert_kubernetes_secret "$HELM_SECRET" "${TOKEN_FILES[2]}") \
+  || todo "could not create or rotate OneCLI secret $HELM_SECRET"
 kubectl exec -n "$NAMESPACE" "$LOGIN_POD" -c login -- rm -f "${TOKEN_FILES[@]}"
 
 PRIMARY_SECRET_IDS=$(onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" \
@@ -240,21 +271,22 @@ PRIMARY_SECRET_IDS=$(onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" \
 onecli_cli agents set-secrets --id "$PRIMARY_AGENT_ID" --secret-ids "$PRIMARY_SECRET_IDS" >/dev/null
 onecli_cli agents set-secrets --id "$EXECUTOR_AGENT_ID" --secret-ids "$READ_SECRET_ID" >/dev/null
 onecli_cli agents set-secrets --id "$ANNOTATOR_AGENT_ID" --secret-ids "$APPROVER_SECRET_ID" >/dev/null
+onecli_cli agents set-secrets --id "$HELM_AGENT_ID" --secret-ids "$HELM_SECRET_ID" >/dev/null
 onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" | jq -e --arg id "$READ_SECRET_ID" '.data | index($id)' >/dev/null
 onecli_cli agents secrets --id "$EXECUTOR_AGENT_ID" | jq -e --arg id "$READ_SECRET_ID" '.data == [$id]' >/dev/null
 onecli_cli agents secrets --id "$ANNOTATOR_AGENT_ID" | jq -e --arg id "$APPROVER_SECRET_ID" '.data == [$id]' >/dev/null
-printf '%s\n' 'stored and assigned both Kubernetes credentials; values were not printed'
+onecli_cli agents secrets --id "$HELM_AGENT_ID" | jq -e --arg id "$HELM_SECRET_ID" '.data == [$id]' >/dev/null
+printf '%s\n' 'stored and assigned the Kubernetes credentials; values were not printed'
 printf '%s\n' 'WARNING: these TokenRequest credentials expire after one hour; production still requires the reviewed refresher.'
 
 step '5/6 write the approval-required runtime config atomically into the state PVC'
 # Releases whose live values equal their k8s.jegor.nl file. mail/docker-mailserver and logging/vlogs
 # have drifted from their files, and hermes is a local chart, so they stay off the Helm path.
+# fluent-bit and trivy-operator stay off too: their charts write ClusterRoles the helm SA cannot.
 HELM_RELEASES='{
   "gitea/gitea": {"chart": "gitea", "repo": "https://dl.gitea.com/charts/", "file": "kubernetes/helm-charts/gitea-values.yaml"},
   "nextcloud/nextcloud": {"chart": "nextcloud", "repo": "https://nextcloud.github.io/helm/", "file": "kubernetes/helm-charts/nextcloud-values.yaml"},
-  "logging/fluent-bit": {"chart": "fluent-bit", "repo": "https://fluent.github.io/helm-charts", "file": "kubernetes/helm-charts/fluent-bit-values.yaml"},
   "excalidraw/excalidraw": {"chart": "excalidraw", "repo": "https://pmoscode-helm.github.io/excalidraw/", "file": "kubernetes/helm-charts/excalidraw-values.yaml"},
-  "trivy-operator/trivy-operator": {"chart": "trivy-operator", "repo": "https://aquasecurity.github.io/helm-charts/", "file": "kubernetes/helm-charts/trivy-operator-values.yaml"},
   "wiki-js/wiki-js": {"chart": "wiki", "repo": "https://charts.js.wiki", "file": "kubernetes/helm-charts/wiki-js-values.yaml"}
 }'
 jq -n \
@@ -264,11 +296,12 @@ jq -n \
   --arg executorOneCliAgent "$EXECUTOR" \
   --arg annotatorOneCliAgent "$ANNOTATOR" \
   --arg falcoBearerFile /run/nanoclaw/falco/bearer \
+  --arg helmOneCliAgent "$HELM" \
   --argjson helmReleases "$HELM_RELEASES" \
   '{agentGroupId:$agentGroupId,matrixApproverUserId:$matrixApproverUserId,apiServer:$apiServer,
     executorOneCliAgent:$executorOneCliAgent,annotatorOneCliAgent:$annotatorOneCliAgent,
     falcoBearerFile:$falcoBearerFile,approvalRequired:true,
-    helmOneCliAgent:"nanoclaw-helm",helmReleases:$helmReleases}' \
+    helmOneCliAgent:$helmOneCliAgent,helmReleases:$helmReleases}' \
   | kubectl exec -i -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -c orchestrator -- \
       sh -c 'set -eu; umask 077; file=/opt/nanoclaw/data/kubernetes-remediation.json; cat > "$file.tmp"; mv "$file.tmp" "$file"'
 kubectl exec -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -c orchestrator -- \

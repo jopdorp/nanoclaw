@@ -9,7 +9,7 @@ import { gitWithDeployKey, HelmReleaseExecutor } from './helm-release.js';
 import { validateRemediationPlan } from './policy.js';
 import type { HelmValuesPlan } from './types.js';
 
-it('a values file that drifted from before gets no helm upgrade and no commit', async () => {
+function fixture(before: string, workload: unknown = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'helm-release-'));
   const remote = path.join(dir, 'remote.git');
   const seed = path.join(dir, 'seed');
@@ -27,9 +27,10 @@ it('a values file that drifted from before gets no helm upgrade and no commit', 
   const checkout = path.join(dir, 'checkout');
   const executor = new HelmReleaseExecutor({
     client: {
-      request: async () => ({
-        items: [{ metadata: { uid: 'uid-1', resourceVersion: '42', labels: { version: '10' } } }],
-      }),
+      request: async (url: string) =>
+        url.includes('/secrets?')
+          ? { items: [{ metadata: { uid: 'uid-1', resourceVersion: '42', labels: { version: '10' } } }] }
+          : workload,
       watch: async function* () {},
     },
     charts: {
@@ -62,11 +63,34 @@ it('a values file that drifted from before gets no helm upgrade and no commit', 
     operation: {
       type: 'helm-values',
       file: 'kubernetes/helm-charts/gitea-values.yaml',
-      set: [{ path: 'image.tag', before: '1.26.0', after: `1.26.0@sha256:${'a'.repeat(64)}` }],
+      set: [{ path: 'image.tag', before, after: `${before}@sha256:${'a'.repeat(64)}` }],
     },
   });
+  const commits = () => git(remote, 'rev-list', '--count', 'master').trim();
+  return { dir, executor, helm, plan: plan as HelmValuesPlan, commits };
+}
 
-  await expect(executor.apply(plan as HelmValuesPlan)).rejects.toThrow('repo drift: image.tag is "1.27.0"');
+it('a values file that drifted from before gets no helm upgrade and no commit', async () => {
+  const { executor, helm, plan, commits } = fixture('1.26.0');
+  await expect(executor.apply(plan)).rejects.toThrow('repo drift: image.tag is "1.27.0"');
   expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['get']);
-  expect(git(remote, 'rev-list', '--count', 'master').trim()).toBe('1');
+  expect(commits()).toBe('1');
+});
+
+it('a helm result that differs from the recorded patch rolls back and pushes nothing', async () => {
+  const { dir, executor, helm, plan, commits } = fixture('1.27.0', {
+    spec: {
+      replicas: 1,
+      template: { spec: { containers: [{ name: 'gitea', image: 'docker.gitea.com/gitea:1.27.0' }] } },
+    },
+  });
+  fs.mkdirSync(path.join(dir, 'memory/open-items'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'memory/open-items/helm-drift-gitea--gitea.md'),
+    `- 2026-10-22T00:00:00.000Z plan ${randomUUID()} Deployment/gitea replicas 2\n`,
+  );
+  const result = await executor.apply(plan);
+  expect(result).toMatchObject({ applied: false, message: expect.stringContaining('live 1, patch 2') });
+  expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['get', 'upgrade', 'rollback']);
+  expect(commits()).toBe('1');
 });

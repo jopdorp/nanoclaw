@@ -41,6 +41,10 @@ Checkpoint: rerun the existing adversarial CEL/RBAC suite on disposable k3s firs
 
 ## 4. [operator=me] Create runtime Secrets and start only OneCLI
 
+Create a write deploy key on `jopdorp/k8s.jegor.nl` from a fresh `ssh-keygen -t ed25519 -N '' -f id_ed25519`, then pin GitHub's host key with `ssh-keyscan github.com > known_hosts` checked against GitHub's published fingerprints.
+Store both as `kubectl create secret generic -n nanoclaw-remediator orfie-git-deploy-key --from-file=id_ed25519 --from-file=known_hosts`, and shred the local files.
+The orchestrator mounts it read-only at `/run/nanoclaw/git` for the Helm path's `git push`; without it helm-values plans fail before any upgrade.
+
 Create `onecli-runtime` with strong `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `DATABASE_URL`, `NEXTAUTH_SECRET`, and `SECRET_ENCRYPTION_KEY`. Create `nanoclaw-runtime` with `onecli-api-key`, `matrix-access-token`, and `falco-webhook-bearer`; use private temporary files or stdin, not shell arguments, and delete the inputs. Then:
 
 ```bash

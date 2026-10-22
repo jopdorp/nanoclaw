@@ -48,6 +48,17 @@ spec:
       expression: "has(object.spec.template.spec.initContainers) ? object.spec.template.spec.initContainers : []"
     - name: oldInitContainers
       expression: "has(oldObject.spec.template.spec.initContainers) ? oldObject.spec.template.spec.initContainers : []"
+    # [image, repository] pairs, the repository canonicalised like the host's parseImage: no tag or digest, docker.io/library/ for bare names.
+    - name: imagePaths
+      expression: >-
+        (variables.newContainers + variables.oldContainers + variables.newInitContainers + variables.oldInitContainers)
+          .map(c, [string(c.image), string(c.image).find('^([^@:/]*(:[^@/]*)?/)*[^@:/]*')])
+    - name: imageQualified
+      expression: >-
+        variables.imagePaths.map(e, [e[0], variables.trustedRegistries.exists(r, e[1].startsWith(r + '/')) ? e[1] : 'docker.io/' + e[1]])
+    - name: imageRepos
+      expression: >-
+        variables.imageQualified.map(e, [e[0], e[1].matches('^docker[.]io/[^/]+$') ? 'docker.io/library/' + e[1].substring(10) : e[1]])
     - name: isVaultwarden
       expression: request.namespace == 'vaultwarden' && request.resource.resource == 'deployments' && object.metadata.name == 'vaultwarden'
     - name: isWireguard
@@ -113,25 +124,24 @@ spec:
       message: init-container count/order/names, env, envFrom, volumeMounts, securityContext, hostPort and all fields other than image are immutable
     - expression: "!has(dyn(object.spec).replicas) || (dyn(object.spec).replicas >= 0 && dyn(object.spec).replicas <= 10)"
       message: replicas must be between 0 and 10
+    # A rollback may unpin back to the exact tag the live digest was pinned from, never to another mutable tag.
     - expression: >-
         variables.isVaultwarden || variables.isWireguard || variables.newContainers.all(c,
           variables.oldContainers.exists(oc, oc.name == c.name &&
             (c.image == oc.image ||
+              (oc.image.size() == c.image.size() + 72 && oc.image.startsWith(c.image + '@sha256:') && oc.image.matches('@sha256:[0-9a-f]{64}$')) ||
               (c.image.matches(variables.digestImagePattern) &&
-               c.image.split('@')[0] ==
-                 (variables.trustedRegistries.exists(r, oc.image.startsWith(r + '/'))
-                   ? oc.image.split('@')[0].split(':')[0]
-                   : 'docker.io/' + oc.image.split('@')[0].split(':')[0])))))
+               variables.imageRepos.exists(n, n[0] == c.image &&
+                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1]))))))
       message: a new container image must retain its repository and use a trusted registry sha256 digest
     - expression: >-
         variables.isVaultwarden || variables.isWireguard || variables.newInitContainers.all(c,
           variables.oldInitContainers.exists(oc, oc.name == c.name &&
             (c.image == oc.image ||
+              (oc.image.size() == c.image.size() + 72 && oc.image.startsWith(c.image + '@sha256:') && oc.image.matches('@sha256:[0-9a-f]{64}$')) ||
               (c.image.matches(variables.digestImagePattern) &&
-               c.image.split('@')[0] ==
-                 (variables.trustedRegistries.exists(r, oc.image.startsWith(r + '/'))
-                   ? oc.image.split('@')[0].split(':')[0]
-                   : 'docker.io/' + oc.image.split('@')[0].split(':')[0])))))
+               variables.imageRepos.exists(n, n[0] == c.image &&
+                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1]))))))
       message: a new init-container image must retain its repository and use a trusted registry sha256 digest
     - expression: >-
         !variables.isVaultwarden ||
@@ -312,11 +322,13 @@ spec:
     - name: pinnedImagePattern
       expression: "'^((docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io)/)?[a-z0-9]+([_-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
   validations:
-    - expression: request.namespace in ['gitea', 'nextcloud', 'logging', 'excalidraw', 'trivy-operator', 'wiki-js']
+    - expression: request.namespace in ['gitea', 'nextcloud', 'excalidraw', 'wiki-js']
       message: the Helm path writes only the allowlisted release namespaces
+    # A helm rollback may unpin back to the exact tag the live digest was pinned from, never to another mutable tag.
     - expression: >-
         request.resource.resource == 'secrets' ||
-        variables.newImages.all(i, i in variables.oldImages || i.matches(variables.pinnedImagePattern))
+        variables.newImages.all(i, i in variables.oldImages || i.matches(variables.pinnedImagePattern) ||
+          variables.oldImages.exists(o, o.size() == i.size() + 72 && o.startsWith(i + '@sha256:') && o.matches('@sha256:[0-9a-f]{64}$')))
       message: a new or changed image from the Helm path must come from a trusted registry pinned by sha256 digest
     - expression: request.resource.resource != 'secrets' || object.type != 'kubernetes.io/service-account-token'
       message: the Helm path may not create ServiceAccount token Secrets

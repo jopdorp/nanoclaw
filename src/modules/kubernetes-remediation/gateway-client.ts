@@ -83,7 +83,11 @@ export class OneCliKubernetesClient implements KubernetesJsonClient {
     }
     args.push(new URL(path, this.apiServer).toString());
     const result = await run(this.onecli, args, { input, signal: options.signal });
-    if (result.code !== 0) throw new Error(`Kubernetes gateway request failed: ${result.stderr.trim() || result.code}`);
+    if (result.code !== 0) {
+      // curl --fail-with-body leaves the API Status, and with it the reason, on stdout.
+      const status = result.stdout.trim().slice(-500);
+      throw new Error(`Kubernetes gateway request failed: ${result.stderr.trim() || result.code} ${status}`.trim());
+    }
     return result.stdout.trim() ? JSON.parse(result.stdout) : null;
   }
 
