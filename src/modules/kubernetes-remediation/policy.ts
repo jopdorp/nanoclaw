@@ -313,14 +313,15 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
 }
 
 function tagVersion(tag = ''): [number, number] | undefined {
-  const match = /^v?(\d+)(?:\.(\d+))?(?:[.+_-]|$)/.exec(tag.split('@')[0]);
+  const match = /^v?(\d+)(?:\.(\d+)(?:[.+_-].*)?|[+_-].*)?$/.exec(tag.split('@')[0]);
   return match ? [Number(match[1]), Number(match[2] ?? 0)] : undefined;
 }
 
-/** Same major, and for T1 also the same minor; a tag without a version (latest, sha-1234) passes only outside T1. */
+/** Same major, and for T1 also the same minor; only an unversioned before (latest) may skip that outside T1, and a bare digest never passes. */
 function sameVersionLine(before: string | undefined, after: string | undefined, t1: boolean): boolean {
+  if (after === undefined || after.startsWith('sha256:')) return false;
   const [from, to] = [tagVersion(before), tagVersion(after)];
-  if (!from || !to) return !t1;
+  if (!from || !to) return !t1 && !from;
   return from[0] === to[0] && (!t1 || from[1] === to[1]);
 }
 
@@ -341,10 +342,11 @@ export function isAutoApproved({ lane, plan }: ValidatedPlan, t1: ReadonlySet<st
   return operation.set.every(({ path, before, after }) => {
     if (REPLICA_KEY_RE.test(path)) return !critical;
     const key = IMAGE_KEY_RE.exec(path)?.[1];
-    if (key === 'digest') return true;
-    if (key === 'tag') return sameVersionLine(String(before ?? ''), String(after), critical);
-    if (key === 'image')
-      return sameVersionLine(parseImage(String(before)).tag, parseImage(String(after)).tag, critical);
+    // A subchart image (postgresql.image.tag) usually runs a StatefulSet.
+    const strict = critical || !/^(?:image\.)?[^.]+$/.test(path);
+    if (key === 'digest') return operation.set.some((edit) => edit.path === path.replace(/digest$/, 'tag'));
+    if (key === 'tag') return sameVersionLine(String(before ?? ''), String(after), strict);
+    if (key === 'image') return sameVersionLine(parseImage(String(before)).tag, parseImage(String(after)).tag, strict);
     return false;
   });
 }

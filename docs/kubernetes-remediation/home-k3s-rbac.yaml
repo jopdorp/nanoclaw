@@ -118,7 +118,6 @@ items:
             limitranges,
             persistentvolumeclaims,
             pods,
-            pods/log,
             resourcequotas,
             serviceaccounts,
             services,

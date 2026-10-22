@@ -242,10 +242,9 @@ ensure_agent "$BREAKGLASS" 'NanoClaw Break-glass Executor' true
 BREAKGLASS_AGENT_ID=$ENSURED_AGENT_ID
 onecli_cli agents set-secret-mode --id "$BREAKGLASS_AGENT_ID" --mode selective >/dev/null
 AGENTS=$(onecli_cli agents list)
-for id in "$PRIMARY_AGENT_ID" "$EXECUTOR_AGENT_ID" "$ANNOTATOR_AGENT_ID" "$HELM_AGENT_ID" "$BREAKGLASS_AGENT_ID"; do
-  jq -e --arg id "$id" '.data[] | select(.id == $id and .secretMode == "selective")' <<<"$AGENTS" >/dev/null \
-    || fail "OneCLI agent $id is not in selective secret mode"
-done
+# An agent in "all" mode would be injected the writer, helm and break-glass tokens the moment they are stored.
+OPEN_AGENTS=$(jq -r '[.data[] | select(.secretMode != "selective") | .identifier] | join(" ")' <<<"$AGENTS")
+[[ -z "$OPEN_AGENTS" ]] || todo "switch these OneCLI agents to selective secret mode first: $OPEN_AGENTS"
 printf '%s\n' 'selective OneCLI identities and orchestrator write blocks are active'
 
 step '4/6 copy the ServiceAccount tokens into the OneCLI vault'
@@ -268,11 +267,17 @@ for i in 0 1 2 3 4; do
 done
 kubectl exec -n "$NAMESPACE" "$LOGIN_POD" -c login -- rm -f "${TOKEN_FILES[@]}"
 
-# The agent holds only the read-only reader; each host identity holds exactly its own token.
-PRIMARY_SECRET_IDS=$(onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" \
-  | jq -r --arg read "${SECRET_IDS[0]}" --argjson others "$(printf '%s\n' "${SECRET_IDS[@]:1}" | jq -R . | jq -s .)" \
-      '[(.data - $others)[], $read] | unique | join(",")')
-onecli_cli agents set-secrets --id "$PRIMARY_AGENT_ID" --secret-ids "$PRIMARY_SECRET_IDS" >/dev/null
+# The agents hold only the read-only reader, never another API token (older runs' included); each host identity holds exactly its own.
+API_SECRET_IDS=$(onecli_cli secrets list | jq -c --arg host "$API_HOST" --arg read "${SECRET_IDS[0]}" \
+  '[.data[] | select(.hostPattern == $host and .id != $read) | .id]')
+for agent in $(jq -r '.data[].id' <<<"$AGENTS"); do
+  [[ " $EXECUTOR_AGENT_ID $ANNOTATOR_AGENT_ID $HELM_AGENT_ID $BREAKGLASS_AGENT_ID " == *" $agent "* ]] && continue
+  current=$(onecli_cli agents secrets --id "$agent" | jq -c '.data | unique')
+  wanted=$(jq -c --argjson api "$API_SECRET_IDS" --arg read "${SECRET_IDS[0]}" --arg add "$([[ $agent == "$PRIMARY_AGENT_ID" ]] && echo 1)" \
+    '[(. - $api)[], (if $add == "1" then $read else empty end)] | unique' <<<"$current")
+  [[ "$wanted" == "$current" ]] \
+    || onecli_cli agents set-secrets --id "$agent" --secret-ids "$(jq -r 'join(",")' <<<"$wanted")" >/dev/null
+done
 onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" | jq -e --arg id "${SECRET_IDS[0]}" '.data | index($id)' >/dev/null
 for pair in "$EXECUTOR_AGENT_ID:1" "$ANNOTATOR_AGENT_ID:2" "$HELM_AGENT_ID:3" "$BREAKGLASS_AGENT_ID:4"; do
   agent=${pair%:*} id=${SECRET_IDS[${pair#*:}]}
@@ -312,7 +317,7 @@ jq -n \
     executorOneCliAgent:$executorOneCliAgent,annotatorOneCliAgent:$annotatorOneCliAgent,
     falcoBearerFile:$falcoBearerFile,
     helmOneCliAgent:$helmOneCliAgent,breakGlassOneCliAgent:$breakGlassOneCliAgent,helmReleases:$helmReleases,
-    t1:["nextcloud","mail","gitea"]}' \
+    t1:(($current.t1 // []) + ["nextcloud","mail","gitea"] | unique)}' \
   | kubectl exec -i -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -c orchestrator -- \
       sh -c 'set -eu; umask 077; file=/opt/nanoclaw/data/kubernetes-remediation.json; cat > "$file.tmp"; mv "$file.tmp" "$file"'
 kubectl exec -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -c orchestrator -- \

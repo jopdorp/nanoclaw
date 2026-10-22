@@ -86,6 +86,7 @@ describe('Kubernetes remediation policy', () => {
     });
     expect(auto('duckdns', image('ghcr.io/x/app:v1.2.3', 'ghcr.io/x/app:v1.9.0'))).toBe(true);
     expect(auto('duckdns', image('ghcr.io/x/app:1.2.3', 'ghcr.io/x/app:2.0.0'))).toBe(false);
+    expect(auto('duckdns', image('ghcr.io/x/app:1.2.3', 'ghcr.io/x/app'))).toBe(false);
     expect(auto('duckdns', image('matrixdotorg/synapse:latest', 'docker.io/matrixdotorg/synapse:v1.140.0'))).toBe(true);
     expect(auto('nextcloud', image('nextcloud:31.0.1', 'docker.io/library/nextcloud:31.0.9-apache'))).toBe(true);
     expect(auto('nextcloud', image('nextcloud:31.0.1', 'docker.io/library/nextcloud:31.1.0'))).toBe(false);

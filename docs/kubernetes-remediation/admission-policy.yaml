@@ -29,9 +29,9 @@ spec:
     - name: digestImagePattern
       expression: "'^(docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io|lscr[.]io|registry[.]prophet[.]jopdorp[.]nl)/[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
     - name: vaultwardenImagePattern
-      expression: "'^docker[.]io/vaultwarden/server@sha256:[0-9a-f]{64}$'"
+      expression: "'^docker[.]io/vaultwarden/server(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
     - name: wireguardImagePattern
-      expression: "'^lscr[.]io/linuxserver/wireguard@sha256:[0-9a-f]{64}$'"
+      expression: "'^lscr[.]io/linuxserver/wireguard(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
     - name: newAnnotations
       expression: "has(object.spec.template.metadata.annotations) ? object.spec.template.metadata.annotations : {}"
     - name: oldAnnotations
@@ -238,6 +238,8 @@ spec:
   validations:
     - expression: request.resource.resource != 'persistentvolumeclaims' || request.namespace != 'backups'
       message: PVC deletion is forbidden in namespace backups
+    - expression: request.resource.resource != 'persistentvolumes' || !has(oldObject.spec.claimRef) || oldObject.spec.claimRef.namespace != 'backups'
+      message: PV deletion is forbidden for volumes claimed from namespace backups
     - expression: >-
         has(oldObject.metadata.annotations) &&
         'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations &&

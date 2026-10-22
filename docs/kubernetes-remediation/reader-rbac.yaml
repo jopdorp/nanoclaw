@@ -1,7 +1,8 @@
 # Read-only identity for the bot itself; writes go only through the approval-gated executor.
-# It reads every namespace but no Secrets, and may exec into pods for read-only
-# inspection everywhere except vaultwarden, wireguard-home, backups, kube-system
-# and nanoclaw-remediator.
+# It reads every namespace but no Secrets, and may read logs and exec into pods for
+# read-only inspection everywhere except vaultwarden, wireguard-home, backups,
+# kube-system and nanoclaw-remediator. falco, longhorn-system and trivy-operator get
+# logs only: their privileged or host-root pods would hand over the node.
 apiVersion: v1
 kind: ServiceAccount
 metadata: { name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }
@@ -261,15 +262,11 @@ items:
   - <<: *inspect-binding
     metadata: { name: nanoclaw-remediator-reader-inspect, namespace: excalidraw-room }
   - <<: *inspect-binding
-    metadata: { name: nanoclaw-remediator-reader-inspect, namespace: falco }
-  - <<: *inspect-binding
     metadata: { name: nanoclaw-remediator-reader-inspect, namespace: gitea }
   - <<: *inspect-binding
     metadata: { name: nanoclaw-remediator-reader-inspect, namespace: hermes }
   - <<: *inspect-binding
     metadata: { name: nanoclaw-remediator-reader-inspect, namespace: logging }
-  - <<: *inspect-binding
-    metadata: { name: nanoclaw-remediator-reader-inspect, namespace: longhorn-system }
   - <<: *inspect-binding
     metadata: { name: nanoclaw-remediator-reader-inspect, namespace: mail }
   - <<: *inspect-binding
@@ -289,6 +286,26 @@ items:
   - <<: *inspect-binding
     metadata: { name: nanoclaw-remediator-reader-inspect, namespace: system-upgrade }
   - <<: *inspect-binding
-    metadata: { name: nanoclaw-remediator-reader-inspect, namespace: trivy-operator }
-  - <<: *inspect-binding
     metadata: { name: nanoclaw-remediator-reader-inspect, namespace: wiki-js }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: nanoclaw-remediator-reader-logs }
+rules:
+  - apiGroups: ['']
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: v1
+kind: List
+items:
+  - &logs-binding
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: { name: nanoclaw-remediator-reader-logs, namespace: falco }
+    roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-remediator-reader-logs }
+    subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+  - <<: *logs-binding
+    metadata: { name: nanoclaw-remediator-reader-logs, namespace: longhorn-system }
+  - <<: *logs-binding
+    metadata: { name: nanoclaw-remediator-reader-logs, namespace: trivy-operator }
