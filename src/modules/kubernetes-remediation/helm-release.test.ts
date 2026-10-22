@@ -9,7 +9,7 @@ import { gitWithDeployKey, HelmReleaseExecutor } from './helm-release.js';
 import { validateRemediationPlan } from './policy.js';
 import type { HelmValuesPlan } from './types.js';
 
-function fixture(before: string, workload: unknown = {}) {
+function fixture(before: string, workload: unknown = {}, live = 'image:\n  tag: "1.27.0"\n') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'helm-release-'));
   const remote = path.join(dir, 'remote.git');
   const seed = path.join(dir, 'seed');
@@ -23,7 +23,15 @@ function fixture(before: string, workload: unknown = {}) {
   git(seed, 'commit', '-q', '-m', 'seed');
   git(seed, 'push', '-q', remote, 'HEAD:master');
 
-  const helm = vi.fn(async (_args: string[]) => JSON.stringify({ chart: 'gitea', version: '12.6.0', revision: 10 }));
+  const helm = vi.fn(async (args: string[]) =>
+    args[0] === 'show'
+      ? 'name: gitea\nversion: 12.6.0\n'
+      : args[1] === 'values'
+        ? live
+        : args[1] === 'manifest'
+          ? ''
+          : JSON.stringify({ chart: 'gitea', version: '12.6.0', revision: 10 }),
+  );
   const checkout = path.join(dir, 'checkout');
   const executor = new HelmReleaseExecutor({
     client: {
@@ -40,6 +48,7 @@ function fixture(before: string, workload: unknown = {}) {
         file: 'kubernetes/helm-charts/gitea-values.yaml',
       },
     },
+    remember: () => undefined,
     checkout,
     memoryDir: path.join(dir, 'memory'),
     helm,
@@ -73,8 +82,15 @@ function fixture(before: string, workload: unknown = {}) {
 it('a values file that drifted from before gets no helm upgrade and no commit', async () => {
   const { executor, helm, plan, commits } = fixture('1.26.0');
   await expect(executor.apply(plan)).rejects.toThrow('repo drift: image.tag is "1.27.0"');
-  expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['get']);
+  expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['get', 'show', 'get']);
   expect(commits()).toBe('1');
+});
+
+it('a values file that differs from the live release values needs helm-sync-values first', async () => {
+  const { executor, plan } = fixture('1.27.0', {}, 'image:\n  tag: "1.28.0"\n');
+  await expect(executor.bind(plan)).rejects.toThrow(
+    'repo values drift; submit helm-sync-values first: image.tag: "1.28.0" -> "1.27.0"',
+  );
 });
 
 it('a helm result that differs from the recorded patch rolls back and pushes nothing', async () => {
@@ -91,6 +107,6 @@ it('a helm result that differs from the recorded patch rolls back and pushes not
   );
   const result = await executor.apply(plan);
   expect(result).toMatchObject({ applied: false, message: expect.stringContaining('live 1, patch 2') });
-  expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['get', 'upgrade', 'rollback']);
+  expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['get', 'show', 'get', 'upgrade', 'rollback']);
   expect(commits()).toBe('1');
 });

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { RemediationLane, RemediationPlan, TargetRef, ValidatedPlan, ValuesScalar } from './types.js';
+import type { HelmBinding, RemediationLane, RemediationPlan, TargetRef, ValidatedPlan, ValuesScalar } from './types.js';
 
 /** Every write here needs approval and runs as the break-glass identity. */
 export const LANE_C_NAMESPACES = new Set(['kube-system', 'longhorn-system']);
@@ -24,7 +24,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const DIGEST_IMAGE_RE =
   /^(docker\.io|docker\.gitea\.com|cr\.fluentbit\.io|ghcr\.io|quay\.io|registry\.k8s\.io|mirror\.gcr\.io|lscr\.io|registry\.prophet\.jopdorp\.nl)\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/;
 const TAG_RE = /^\w[\w.-]{0,127}$/;
-const VALUES_FILE_RE = /^kubernetes\/helm-charts\/[a-z0-9]+(?:-[a-z0-9]+)*-values\.yaml$/;
+const CHART_REPO_RE = /^(?:https|oci):\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[\w.~%-]+)*\/?$/;
 const VALUES_PATH_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
 const IMAGE_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest)$/;
 // Only the chart's own top-level key; nested ones usually size a subchart's database StatefulSet.
@@ -149,11 +149,23 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     if (operation.reclaimConfirmed !== true) throw new Error('storage deletion requires reclaimConfirmed=true');
     return { ...base, operation: { type, reclaimConfirmed: true } };
   }
+  if (type === 'helm-sync-values') {
+    exactKeys(operation, ['type'], 'plan.operation');
+    return { ...base, operation: { type } };
+  }
   if (type === 'helm-values') {
-    exactKeys(operation, ['type', 'file', 'set'], 'plan.operation');
+    exactKeys(operation, ['type', 'file', 'chart', 'set'], 'plan.operation');
     const file = string(operation.file, 'plan.operation.file', 256);
-    if (!VALUES_FILE_RE.test(file))
-      throw new Error('plan.operation.file must be kubernetes/helm-charts/<name>-values.yaml');
+    if (file !== `kubernetes/helm-charts/${base.target.name}-values.yaml`)
+      throw new Error('plan.operation.file must be kubernetes/helm-charts/<release>-values.yaml');
+    let chart: { repo: string } | undefined;
+    if (operation.chart !== undefined) {
+      const input = record(operation.chart, 'plan.operation.chart');
+      exactKeys(input, ['repo'], 'plan.operation.chart');
+      const repo = string(input.repo, 'plan.operation.chart.repo', 512);
+      if (!CHART_REPO_RE.test(repo)) throw new Error('plan.operation.chart.repo must be an https:// or oci:// URL');
+      chart = { repo };
+    }
     if (!Array.isArray(operation.set) || operation.set.length === 0 || operation.set.length > 8) {
       throw new Error('plan.operation.set must contain 1 through 8 edits');
     }
@@ -170,10 +182,10 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     });
     if (new Set(set.map((edit) => edit.path)).size !== set.length)
       throw new Error('plan.operation.set paths must be unique');
-    return { ...base, operation: { type, file, set } };
+    return { ...base, operation: { type, file, ...(chart ? { chart } : {}), set } };
   }
   throw new Error(
-    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage or helm-values',
+    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values or helm-sync-values',
   );
 }
 
@@ -211,6 +223,11 @@ function checkImageUpdate(beforeImage: string, afterImage: string): void {
   if (`${before.registry}/${before.repository}` !== `${after.registry}/${after.repository}`) {
     throw new Error('image repository may not change');
   }
+}
+
+export function imageRepository(image: string): string {
+  const { registry, repository } = parseImage(image);
+  return `${registry}/${repository}`;
 }
 
 export function canonicalImage(image: string): string {
@@ -283,6 +300,10 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
       }
       if (key === 'image') checkImageUpdate(before as string, after);
     }
+  } else if (plan.operation.type === 'helm-sync-values') {
+    if (plan.target.kind !== 'Secret') throw new Error('helm-sync-values requires a Helm release');
+    if (namespace === 'vaultwarden')
+      throw new Error("vaultwarden's chart renders its Secrets, so it never goes through Helm");
   } else if (plan.operation.type === 'delete-storage') {
     if (!plan.target.kind.startsWith('Persistent')) throw new Error('delete-storage requires PV or PVC');
   }
@@ -313,7 +334,12 @@ function sameVersionLine(before: string | undefined, after: string | undefined, 
  * Plans the host applies without a Matrix card; the approver still hears what ran.
  * `t1` holds `namespace` or `namespace/name` entries; every StatefulSet is T1 too.
  */
-export function isAutoApproved({ lane, plan }: ValidatedPlan, t1: ReadonlySet<string>): boolean {
+export function isAutoApproved(
+  { lane, plan }: ValidatedPlan,
+  t1: ReadonlySet<string>,
+  helm?: Pick<HelmBinding, 'images' | 'statefulRepositories' | 'hasStatefulSet'>,
+): boolean {
+  if (plan.operation.type === 'helm-sync-values') return true;
   if (lane !== 'A') return false;
   const { target, operation } = plan;
   const critical =
@@ -322,14 +348,13 @@ export function isAutoApproved({ lane, plan }: ValidatedPlan, t1: ReadonlySet<st
   if (operation.type === 'scale') return target.kind === 'Deployment';
   if (operation.type === 'patch-image')
     return sameVersionLine(parseImage(operation.before).tag, parseImage(operation.after).tag, critical);
-  if (operation.type !== 'helm-values') return false;
-  return operation.set.every(({ path, before, after }) => {
-    if (REPLICA_KEY_RE.test(path)) return !critical;
-    const key = IMAGE_KEY_RE.exec(path)?.[1];
-    if (key === 'digest') return !critical;
-    if (key === 'tag') return sameVersionLine(String(before ?? ''), String(after), critical);
-    if (key === 'image')
-      return sameVersionLine(parseImage(String(before)).tag, parseImage(String(after)).tag, critical);
-    return false;
+  if (operation.type !== 'helm-values' || !helm) return false;
+  return operation.set.every(({ path }) => {
+    // Which workload a replica key sizes is chart-specific, so a release with a StatefulSet asks.
+    if (REPLICA_KEY_RE.test(path)) return !critical && !helm.hasStatefulSet;
+    const image = IMAGE_KEY_RE.test(path) ? helm.images[path] : undefined;
+    if (!image?.after) return false;
+    const strict = critical || helm.statefulRepositories.includes(imageRepository(image.after));
+    return sameVersionLine(parseImage(image.before ?? '').tag, parseImage(image.after).tag, strict);
   });
 }

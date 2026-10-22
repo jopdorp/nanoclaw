@@ -12,10 +12,19 @@ const AUTO_APPROVER = 'auto:low-risk';
 // The guard is module-scoped, so the T1 list from the runtime config lands here at registration.
 let t1: ReadonlySet<string> = new Set();
 
+/** A plan after the host's async checks; precheck, guard and handler of one consult share it. */
+interface Prepared {
+  validated: ValidatedPlan;
+  auto: boolean;
+  diff: string[];
+}
+const preparedFor = new WeakMap<Record<string, unknown>, Prepared>();
+
 function decide(input: GuardInput) {
   if (input.actor.kind !== 'agent') return DENY('remediation proposals must originate from the dedicated agent group');
-  return isAutoApproved(validateRemediationPlan(input.payload.plan), t1)
-    ? ALLOW('low-risk Lane A plan is auto-approved')
+  validateRemediationPlan(input.payload.plan);
+  return preparedFor.get(input.payload)?.auto
+    ? ALLOW('the owner lists this plan as automatic')
     : HOLD('this remediation plan requires an explicit Matrix approval');
 }
 
@@ -55,11 +64,13 @@ function summary({ plan }: ValidatedPlan): string {
           ? `restart ${where}`
           : operation.type === 'helm-values'
             ? `helm ${where}: ${operation.set.map((e) => `${e.path} ${String(e.before)} → ${String(e.after)}`).join(', ')}`
-            : `delete ${target.kind} ${where}`;
+            : operation.type === 'helm-sync-values'
+              ? `sync helm values of ${where} from live`
+              : `delete ${target.kind} ${where}`;
   return text.length > 80 ? `${text.slice(0, 79)}…` : text;
 }
 
-function renderQuestion({ plan, lane, digest, automaticWriteCap }: ValidatedPlan): string {
+function renderQuestion({ plan, lane, digest, automaticWriteCap }: ValidatedPlan, diff: string[] = []): string {
   const operation = plan.operation;
   const change =
     operation.type === 'patch-image'
@@ -70,13 +81,16 @@ function renderQuestion({ plan, lane, digest, automaticWriteCap }: ValidatedPlan
           ? `restart at ${operation.restartedAt}`
           : operation.type === 'delete-storage' || operation.type === 'delete-job'
             ? `delete ${plan.target.kind}`
-            : `helm release ${plan.target.name}, ${operation.file}: ${operation.set.map((e) => `${e.path}: ${JSON.stringify(e.before)} -> ${JSON.stringify(e.after)}`).join(', ')}`;
+            : operation.type === 'helm-sync-values'
+              ? `write the live values of helm release ${plan.target.name} to its values file`
+              : `helm release ${plan.target.name}, ${operation.file}: ${operation.set.map((e) => `${e.path}: ${JSON.stringify(e.before)} -> ${JSON.stringify(e.after)}`).join(', ')}`;
   return [
     `lane: ${lane === 'C' ? 'C, applied with the break-glass identity' : lane}`,
     `target: ${plan.target.namespace ?? '_cluster'}/${plan.target.kind}/${plan.target.name}`,
     `uid: ${plan.target.uid}`,
     `resourceVersion: ${plan.target.resourceVersion}`,
     `change: ${change}`,
+    ...(diff.length ? [`values diff against live: ${diff.join('; ')}`] : []),
     `reason: ${plan.reason}`,
     `automatic same-target recovery writes: ${automaticWriteCap}`,
     `expires: ${plan.expiresAt}`,
@@ -117,10 +131,21 @@ export function registerKubernetesRemediationApproval(options: {
   t1: ReadonlySet<string>;
 }): void {
   t1 = options.t1;
-  const validate = async (content: Record<string, unknown>, session: Session) => {
+  const prepare = async (content: Record<string, unknown>): Promise<Prepared> => {
+    let validated = validateRemediationPlan(planInput(content));
+    if (validated.plan.operation.type !== 'helm-values') {
+      return { validated, auto: isAutoApproved(validated, t1), diff: [] };
+    }
+    const helm = validated.lane === 'C' ? options.breakGlassHelm : options.helm;
+    if (!helm) throw new Error('the Helm path is not configured');
+    const binding = await helm.bind(validated.plan as HelmValuesPlan);
+    validated = validateRemediationPlan(binding.plan);
+    return { validated, auto: isAutoApproved(validated, t1, binding), diff: binding.diff };
+  };
+  const precheck = async (content: Record<string, unknown>, session: Session) => {
     if (session.agent_group_id !== options.agentGroupId) return false;
     try {
-      validateRemediationPlan(planInput(content));
+      preparedFor.set(content, await prepare(content));
       return true;
       // eslint-disable-next-line no-catch-all/no-catch-all -- agent proposals are untrusted input
     } catch (error) {
@@ -135,16 +160,14 @@ export function registerKubernetesRemediationApproval(options: {
   registerDeliveryAction(
     REMEDIATION_ACTION,
     async (content, session) => {
-      let validated = validateRemediationPlan(planInput(content));
-      const auto = isAutoApproved(validated, t1);
+      const prepared = preparedFor.get(content) ?? (await prepare(content));
+      const auto = prepared.auto;
       if (!auto && content.approvedBy !== options.approverUserId)
         throw new Error('approval came from the wrong Matrix user');
+      // An approved plan runs exactly as approved, never re-bound.
+      const validated = auto ? prepared.validated : validateRemediationPlan(planInput(content));
       let message: string;
       try {
-        if (auto && validated.plan.operation.type === 'helm-values') {
-          if (!options.helm) throw new Error('the Helm path is not configured');
-          validated = validateRemediationPlan(await options.helm.bind(validated.plan as HelmValuesPlan));
-        }
         const result = await options.executor.execute(validated, {
           approvalRowId: auto ? '' : String(content.approvalRowId ?? ''),
           approverUserId: auto ? AUTO_APPROVER : String(content.approvedBy),
@@ -160,36 +183,22 @@ export function registerKubernetesRemediationApproval(options: {
       if (auto) {
         await notifyApprover(
           options.approverUserId,
-          `Auto-applied remediation\n${renderQuestion(validated)}\noutcome: ${message}`,
+          `Auto-applied remediation\n${renderQuestion(validated, prepared.diff)}\noutcome: ${message}`,
         );
       }
     },
     {
       guardAction: remediationGuard,
-      precheck: validate,
+      precheck,
       requestHold: async (content, session) => {
-        let validated = validateRemediationPlan(planInput(content));
-        if (validated.plan.operation.type === 'helm-values') {
-          try {
-            const helm = validated.lane === 'C' ? options.breakGlassHelm : options.helm;
-            if (!helm) throw new Error('the Helm path is not configured');
-            validated = validateRemediationPlan(await helm.bind(validated.plan as HelmValuesPlan));
-            // eslint-disable-next-line no-catch-all/no-catch-all -- the agent hears why its plan got no card
-          } catch (error) {
-            await notifyAgent(
-              session,
-              `kubernetes remediation rejected: ${error instanceof Error ? error.message : String(error)}`,
-            );
-            return;
-          }
-        }
+        const { validated, diff } = preparedFor.get(content) ?? (await prepare(content));
         await requestApproval({
           session,
           agentName: 'Kubernetes Remediator',
           action: REMEDIATION_ACTION,
           payload: { plan: validated.plan, digest: validated.digest },
           title: summary(validated),
-          question: renderQuestion(validated),
+          question: renderQuestion(validated, diff),
           approverUserId: options.approverUserId,
         });
       },

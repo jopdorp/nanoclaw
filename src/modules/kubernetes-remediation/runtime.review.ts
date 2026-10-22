@@ -20,7 +20,6 @@ import {
   OneCliKubernetesClient,
 } from './gateway-client.js';
 import { gitWithDeployKey, helmThroughOneCli, HelmReleaseExecutor, type HelmChart } from './helm-release.js';
-import { LANE_C_NAMESPACES } from './policy.js';
 import { createFalcoWebhookHandler, runTrivyWatchers } from './triggers.js';
 import type { RemediationIncident } from './types.js';
 
@@ -34,7 +33,7 @@ export interface KubernetesRemediationConfig {
   helmOneCliAgent?: string;
   /** Applies approved Lane C plans, including the Lane C releases in helmReleases. */
   breakGlassOneCliAgent?: string;
-  /** Keyed `<namespace>/<release>`. */
+  /** Verified chart sources keyed `<namespace>/<release>`, cached by the host; hints only. */
   helmReleases?: Record<string, HelmChart>;
   /** `namespace` or `namespace/name`: image updates there need approval beyond a patch version. */
   t1: string[];
@@ -52,14 +51,21 @@ export async function startKubernetesRemediation(
   if (!Array.isArray(config.t1)) throw new Error('kubernetes-remediation.json needs a t1 list');
   const group = await getAgentGroup(config.agentGroupId);
   // Each identity gets its own checkout, so the two executors never share a working tree.
+  const charts = config.helmReleases ?? {};
+  const remember = (key: string, chart: HelmChart) => {
+    charts[key] = chart;
+    const file = path.join(DATA_DIR, 'kubernetes-remediation.json');
+    const current = JSON.parse(fs.readFileSync(file, 'utf8')) as KubernetesRemediationConfig;
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify({ ...current, helmReleases: charts }, null, 2), { mode: 0o600 });
+    fs.renameSync(`${file}.tmp`, file);
+  };
   const helmFor = (agent: string | undefined, laneC: boolean) => {
-    if (!agent || !config.helmReleases || !group) return undefined;
+    if (!agent || !group) return undefined;
     const checkout = path.join(DATA_DIR, laneC ? 'k8s.jegor.nl-breakglass' : 'k8s.jegor.nl');
     return new HelmReleaseExecutor({
       client: new OneCliKubernetesClient(agent, config.apiServer),
-      charts: Object.fromEntries(
-        Object.entries(config.helmReleases).filter(([key]) => LANE_C_NAMESPACES.has(key.split('/')[0]) === laneC),
-      ),
+      charts,
+      remember,
       checkout,
       memoryDir: path.join(resolveGroupFolderPath(group.folder), 'memory'),
       helm: helmThroughOneCli(agent, config.apiServer, path.join(DATA_DIR, 'helm')),

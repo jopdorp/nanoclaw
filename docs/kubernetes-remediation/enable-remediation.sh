@@ -322,10 +322,7 @@ done
 printf '%s\n' 'stored and assigned the Kubernetes credentials; values were not printed'
 
 step '5/6 merge the runtime config atomically into the state PVC'
-# Releases whose live values equal their k8s.jegor.nl file. hermes is a local chart, so it stays off
-# the Helm path.
-# longhorn's file is ahead of live (defaultSettings), so its first upgrade applies that too.
-# vaultwarden stays off because its chart renders the admin-token Secret, and cert-manager has no file.
+# Chart sources the host has seen, as hints: any release works once a plan names its chart repo, and the host re-verifies it every time.
 HELM_RELEASES='{
   "gitea/gitea": {"chart": "gitea", "repo": "https://dl.gitea.com/charts/", "file": "kubernetes/helm-charts/gitea-values.yaml"},
   "nextcloud/nextcloud": {"chart": "nextcloud", "repo": "https://nextcloud.github.io/helm/", "file": "kubernetes/helm-charts/nextcloud-values.yaml"},

@@ -1,26 +1,31 @@
 /**
- * The Helm path. A helm-values plan edits a values file in a k8s.jegor.nl
- * checkout, runs `helm upgrade` with it as the nanoclaw-helm identity, and
- * commits and pushes only once the release is healthy and still matches any
- * direct patch recorded as Helm drift. A direct image or replica patch on a
- * Helm-managed workload is recorded as such a drift item in the group's
- * memory/open-items, so it always comes back to Helm.
+ * The Helm path, for any release. A helm-values plan edits the release's values
+ * file in a k8s.jegor.nl checkout, runs `helm upgrade` with it, and commits and
+ * pushes only once the release is healthy and still matches any direct patch
+ * recorded as Helm drift. The file must equal the release's live user-supplied
+ * values before the edit; helm-sync-values writes them there first. The chart
+ * source comes from the plan or an earlier verified hint, and must serve the
+ * installed chart version. A direct image or replica patch on a Helm-managed
+ * workload is recorded as a drift item in the group's memory/open-items, so it
+ * always comes back to Helm.
  */
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
-import { isMap, isScalar, parseDocument } from 'yaml';
+import { isMap, isScalar, parseAllDocuments, parseDocument, stringify } from 'yaml';
 
 import type { KubernetesJsonClient } from './gateway-client.js';
-import { canonicalImage } from './policy.js';
-import type { ExecutionResult, HelmValuesPlan, RemediationPlan } from './types.js';
+import { canonicalImage, imageRepository } from './policy.js';
+import type { ExecutionResult, HelmBinding, HelmSyncPlan, HelmValuesPlan, RemediationPlan } from './types.js';
 
 const exec = promisify(execFile);
 const DAY = 24 * 60 * 60_000;
 // Only these leaves are echoed back on a before mismatch; anything else may be a credential.
 const ECHOED_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest|replicas|replicaCount|enabled)$/;
 const RELEASE_RE = /^[a-z0-9][a-z0-9.-]{0,52}$/;
+// Values under such keys are never shown, and never written to the public values repo.
+const SECRET_KEY_RE = /password|token|secret|key/i;
 const ENTRY_RE =
   /^- (\S+) plan (\S+) (Deployment|StatefulSet|DaemonSet)\/(\S+) (container:\S+|init:\S+|replicas) (\S+)$/;
 
@@ -32,7 +37,9 @@ export interface HelmChart {
 
 export interface HelmReleaseOptions {
   client: KubernetesJsonClient;
+  /** Verified chart sources keyed `<namespace>/<release>`; hints only, every plan re-verifies. */
   charts: Record<string, HelmChart>;
+  remember: (key: string, chart: HelmChart) => void;
   checkout: string;
   memoryDir: string;
   helm: (args: string[]) => Promise<string>;
@@ -51,6 +58,80 @@ interface Workload {
 /** A digest pins the image whatever tag the chart renders next to it. */
 function pinnedImage(image = ''): string {
   return canonicalImage(image).replace(/:[^/:@]+@/, '@');
+}
+
+type Values = Record<string, unknown>;
+
+function parseValues(text: string): Values {
+  const doc = parseDocument(text);
+  if (doc.errors.length) throw new Error(`values do not parse: ${doc.errors[0].code}`);
+  const value: unknown = doc.toJS();
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Values) : {};
+}
+
+function leaves(value: unknown, prefix = '', out = new Map<string, unknown>()): Map<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const [key, child] of Object.entries(value)) leaves(child, prefix ? `${prefix}.${key}` : key, out);
+  } else if (prefix) out.set(prefix, value);
+  return out;
+}
+
+/** One line per differing leaf, `path: live -> file`, with secret-looking and structured values hidden. */
+function valuesDiff(live: Values, file: Values): string[] {
+  const [a, b] = [leaves(live), leaves(file)];
+  const show = (path: string, value: unknown) =>
+    value === undefined
+      ? 'absent'
+      : SECRET_KEY_RE.test(path) || (value !== null && typeof value === 'object')
+        ? 'set'
+        : JSON.stringify(value);
+  return [...new Set([...a.keys(), ...b.keys()])]
+    .sort()
+    .filter((path) => !isDeepStrictEqual(a.get(path), b.get(path)))
+    .map((path) => `${path}: ${show(path, a.get(path))} -> ${show(path, b.get(path))}`);
+}
+
+function secretKeys(value: unknown, prefix = ''): string[] {
+  if (!value || typeof value !== 'object') return [];
+  return Object.entries(value).flatMap(([key, child]) => {
+    const at = prefix ? `${prefix}.${key}` : key;
+    return [...(SECRET_KEY_RE.test(key) ? [at] : []), ...secretKeys(child, at)];
+  });
+}
+
+function valueAt(values: Values, dotted: string): unknown {
+  return dotted.split('.').reduce<unknown>((node, key) => (node as Values | undefined)?.[key], values);
+}
+
+/** Full image references for each image-key edit, assembled from the edit and its repository/registry/tag/digest siblings. */
+function imageEdits(values: Values, set: HelmValuesPlan['operation']['set']): HelmBinding['images'] {
+  const images: HelmBinding['images'] = {};
+  const planned = new Map(set.map((edit) => [edit.path, edit.after]));
+  for (const { path: dotted, before, after } of set) {
+    const key = /(?:^|\.)(image|tag|digest)$/.exec(dotted)?.[1];
+    if (key === 'image') {
+      images[dotted] = { before: before === null ? undefined : String(before), after: String(after) };
+      continue;
+    }
+    if (!key) continue;
+    const parent = dotted.slice(0, -key.length);
+    const repository = valueAt(values, `${parent}repository`);
+    if (typeof repository !== 'string') continue;
+    const registry = valueAt(values, `${parent}registry`);
+    const ref = (side: 'before' | 'after') => {
+      const pick = (leaf: string) => {
+        const value =
+          side === 'after' && planned.has(`${parent}${leaf}`)
+            ? planned.get(`${parent}${leaf}`)
+            : valueAt(values, `${parent}${leaf}`);
+        return value === undefined || value === null || value === '' ? '' : String(value);
+      };
+      const [tag, digest] = [pick('tag'), pick('digest').replace(/^@/, '')];
+      return `${typeof registry === 'string' && registry ? `${registry}/` : ''}${repository}${tag ? `:${tag}` : ''}${digest && !tag.includes('@') ? `@${digest}` : ''}`;
+    };
+    images[dotted] = { before: ref('before'), after: ref('after') };
+  }
+  return images;
 }
 
 function reason(error: unknown): string {
@@ -141,7 +222,7 @@ export class HelmReleaseExecutor {
 
   constructor(private readonly options: HelmReleaseOptions) {}
 
-  bind(plan: HelmValuesPlan): Promise<HelmValuesPlan> {
+  bind(plan: HelmValuesPlan): Promise<HelmBinding> {
     return this.serial(() => this.bindNow(plan));
   }
 
@@ -149,36 +230,48 @@ export class HelmReleaseExecutor {
     return this.serial(() => this.applyNow(plan));
   }
 
-  /** Binds the plan to the release's latest revision Secret and checks every `before` against the repo. */
-  private async bindNow(plan: HelmValuesPlan): Promise<HelmValuesPlan> {
-    this.chart(plan);
+  syncValues(plan: HelmSyncPlan): Promise<ExecutionResult> {
+    return this.serial(() => this.syncNow(plan));
+  }
+
+  /** Binds the plan to the release's latest revision Secret, its verified chart and its live values. */
+  private async bindNow(plan: HelmValuesPlan): Promise<HelmBinding> {
+    const { name: release, namespace } = plan.target;
+    const ns = namespace ?? '';
+    await this.resolveChart(plan);
     const anchor = await this.latestRelease(plan);
     await this.sync();
-    editValues(this.read(plan), plan.operation.set);
-    return { ...plan, target: { ...plan.target, ...anchor } };
+    const text = await this.unchangedFromLive(plan);
+    const live = parseValues(text);
+    const stateful = parseAllDocuments(await this.options.helm(['get', 'manifest', release, '-n', ns]))
+      .map((doc) => doc.toJS() as { kind?: string; spec?: Workload['spec'] } | null)
+      .filter((object): object is { kind: string; spec?: Workload['spec'] } => object?.kind === 'StatefulSet');
+    return {
+      plan: { ...plan, target: { ...plan.target, ...anchor } },
+      diff: valuesDiff(live, parseValues(editValues(text, plan.operation.set))),
+      images: imageEdits(live, plan.operation.set),
+      statefulRepositories: stateful.flatMap(({ spec }) =>
+        [...(spec?.template?.spec?.containers ?? []), ...(spec?.template?.spec?.initContainers ?? [])].map((c) =>
+          imageRepository(c.image ?? ''),
+        ),
+      ),
+      hasStatefulSet: stateful.length > 0,
+    };
   }
 
   private async applyNow(plan: HelmValuesPlan): Promise<ExecutionResult> {
-    const chart = this.chart(plan);
     const { name: release, namespace } = plan.target;
     const ns = namespace ?? '';
     const anchor = await this.latestRelease(plan);
     if (anchor.uid !== plan.target.uid || anchor.resourceVersion !== plan.target.resourceVersion) {
       throw new Error('Helm release changed after proposal');
     }
-    const metadata = JSON.parse(await this.options.helm(['get', 'metadata', release, '-n', ns, '-o', 'json'])) as {
-      chart?: string;
-      version?: string;
-      revision?: number;
-    };
-    if (metadata.chart !== chart.chart || !metadata.version || !metadata.revision) {
-      throw new Error(`release ${ns}/${release} runs chart ${metadata.chart}, not ${chart.chart}`);
-    }
+    const { chart, metadata } = await this.resolveChart(plan);
     await this.sync();
     const file = path.join(this.options.checkout, plan.operation.file);
-    fs.writeFileSync(file, editValues(this.read(plan), plan.operation.set));
+    fs.writeFileSync(file, editValues(await this.unchangedFromLive(plan), plan.operation.set));
 
-    const upgrade = ['upgrade', release, chart.chart, '--repo', chart.repo, '--version', metadata.version];
+    const upgrade = ['upgrade', release, ...this.chartRef(chart), '--version', metadata.version];
     try {
       await this.options.helm([...upgrade, '-n', ns, '-f', file, '--wait', '--timeout', '10m']);
       // eslint-disable-next-line no-catch-all/no-catch-all -- every upgrade failure rolls back
@@ -200,7 +293,18 @@ export class HelmReleaseExecutor {
       };
     }
 
+    const result = await this.commit(
+      plan.operation.file,
+      `Orfie: ${plan.reason.split('\n', 1)[0]}`,
+      'helm matches live',
+    );
+    if (result.message.includes('pushed ')) this.resolveDrift(ns, release, plan.id);
+    return result;
+  }
+
+  private async commit(file: string, message: string, done: string): Promise<ExecutionResult> {
     try {
+      await this.options.git(['add', '--', file]);
       await this.options.git([
         '-c',
         'user.name=Orfie',
@@ -208,22 +312,21 @@ export class HelmReleaseExecutor {
         'user.email=orfie@claw.jopdorp.nl',
         'commit',
         '-m',
-        `Orfie: ${plan.reason.split('\n', 1)[0]}`,
+        message,
         '--',
-        plan.operation.file,
+        file,
       ]);
       await this.options.git(['push', 'origin', 'HEAD:master']);
-      // eslint-disable-next-line no-catch-all/no-catch-all -- the release is live either way; the approver hears the push failed
+      // eslint-disable-next-line no-catch-all/no-catch-all -- the change is live either way; the approver hears the push failed
     } catch (error) {
       return {
         applied: true,
-        message: `helm matches live, but the values commit was not pushed: ${reason(error)}`,
+        message: `${done}, but the values commit was not pushed: ${reason(error)}`,
         automaticWrites: 0,
       };
     }
     const sha = (await this.options.git(['rev-parse', '--short', 'HEAD'])).trim();
-    this.resolveDrift(ns, release, plan.id);
-    return { applied: true, message: `helm matches live; pushed ${sha} to k8s.jegor.nl.`, automaticWrites: 0 };
+    return { applied: true, message: `${done}; pushed ${sha} to k8s.jegor.nl.`, automaticWrites: 0 };
   }
 
   /** Records a direct patch on a Helm-managed workload; returns the Matrix note, or '' when Helm does not own it. */
@@ -290,14 +393,67 @@ export class HelmReleaseExecutor {
       .join('\n');
   }
 
-  private chart(plan: HelmValuesPlan): HelmChart {
-    const chart = this.options.charts[`${plan.target.namespace}/${plan.target.name}`];
-    if (!chart || chart.file !== plan.operation.file) {
-      throw new Error(
-        `${plan.target.namespace}/${plan.target.name} with ${plan.operation.file} is not an allowlisted Helm release`,
-      );
+  private chartRef({ chart, repo }: HelmChart): string[] {
+    return repo.startsWith('oci://') ? [`${repo.replace(/\/$/, '')}/${chart}`] : [chart, '--repo', repo];
+  }
+
+  /** The installed chart and version, from a source that is verified to serve exactly that version. */
+  private async resolveChart(plan: HelmValuesPlan) {
+    const { name: release, namespace } = plan.target;
+    const ns = namespace ?? '';
+    const key = `${ns}/${release}`;
+    const metadata = JSON.parse(await this.options.helm(['get', 'metadata', release, '-n', ns, '-o', 'json'])) as {
+      chart?: string;
+      version?: string;
+      revision?: number;
+    };
+    if (!metadata.chart || !metadata.version || !metadata.revision) throw new Error(`no Helm release ${key}`);
+    const repo = plan.operation.chart?.repo ?? this.options.charts[key]?.repo;
+    if (!repo) throw new Error(`${key}: the host knows no source for chart ${metadata.chart}; add chart: { repo }`);
+    const chart = { chart: metadata.chart, repo, file: plan.operation.file };
+    const shown = parseValues(
+      await this.options.helm(['show', 'chart', ...this.chartRef(chart), '--version', metadata.version]),
+    );
+    if (shown.name !== metadata.chart || shown.version !== metadata.version) {
+      throw new Error(`${repo} does not serve ${metadata.chart} ${metadata.version}`);
     }
-    return chart;
+    if (!isDeepStrictEqual(this.options.charts[key], chart)) this.options.remember(key, chart);
+    return { chart, metadata: { version: metadata.version, revision: metadata.revision } };
+  }
+
+  /** The values file, which must hold exactly the release's live user-supplied values. */
+  private async unchangedFromLive(plan: HelmValuesPlan): Promise<string> {
+    const { name: release, namespace } = plan.target;
+    const live = parseValues(await this.options.helm(['get', 'values', release, '-n', namespace ?? '', '-o', 'yaml']));
+    const file = path.join(this.options.checkout, plan.operation.file);
+    if (!fs.existsSync(file))
+      throw new Error(`repo values drift; submit helm-sync-values first: ${plan.operation.file} does not exist`);
+    const text = this.read(plan.operation.file);
+    const drift = valuesDiff(live, parseValues(text));
+    if (drift.length) throw new Error(`repo values drift; submit helm-sync-values first: ${drift.join('; ')}`);
+    return text;
+  }
+
+  private async syncNow(plan: HelmSyncPlan): Promise<ExecutionResult> {
+    const { name: release, namespace } = plan.target;
+    const live = parseValues(await this.options.helm(['get', 'values', release, '-n', namespace ?? '', '-o', 'yaml']));
+    const secrets = secretKeys(live);
+    if (secrets.length) {
+      return {
+        applied: false,
+        message: `live values of ${namespace}/${release} hold secret-looking keys (${secrets.join(', ')}); nothing written to the public values repo.`,
+        automaticWrites: 0,
+      };
+    }
+    await this.sync();
+    const relative = `kubernetes/helm-charts/${release}-values.yaml`;
+    const file = path.join(this.options.checkout, relative);
+    if (fs.existsSync(file) && !valuesDiff(live, parseValues(this.read(relative))).length) {
+      return { applied: true, message: `${relative} already matches live.`, automaticWrites: 0 };
+    }
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, stringify(live));
+    return this.commit(relative, `Sync ${release} values from live`, 'wrote the live values');
   }
 
   private async latestRelease(plan: HelmValuesPlan): Promise<{ uid: string; resourceVersion: string }> {
@@ -329,9 +485,9 @@ export class HelmReleaseExecutor {
     return next;
   }
 
-  private read(plan: HelmValuesPlan): string {
-    const file = path.join(fs.realpathSync(this.options.checkout), plan.operation.file);
-    if (fs.realpathSync(file) !== file) throw new Error(`${plan.operation.file} is a symlink`);
+  private read(relative: string): string {
+    const file = path.join(fs.realpathSync(this.options.checkout), relative);
+    if (fs.realpathSync(file) !== file) throw new Error(`${relative} is a symlink`);
     return fs.readFileSync(file, 'utf8');
   }
 

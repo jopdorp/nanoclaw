@@ -3,7 +3,14 @@ import { createInterface } from 'node:readline';
 
 import type { HelmReleaseExecutor } from './helm-release.js';
 import { canonicalImage } from './policy.js';
-import type { ApprovalGrant, ExecutionResult, HelmValuesPlan, RemediationPlan, ValidatedPlan } from './types.js';
+import type {
+  ApprovalGrant,
+  ExecutionResult,
+  HelmSyncPlan,
+  HelmValuesPlan,
+  RemediationPlan,
+  ValidatedPlan,
+} from './types.js';
 
 const APPROVAL_ANNOTATION = 'remediation.nanoclaw.io/approval-id';
 const TEMPORARY_BINDING_RE = /^nanoclaw-remediation-[0-9a-f-]{36}$/;
@@ -342,10 +349,12 @@ export class GatewayRemediationExecutor {
     if (Date.parse(plan.expiresAt) <= Date.now()) throw new Error('approved plan expired');
     const executor = lane === 'C' ? this.breakGlass?.client : this.writer;
     if (!executor) throw new Error('the break-glass identity is not configured');
-    if (plan.operation.type === 'helm-values') {
+    if (plan.operation.type === 'helm-values' || plan.operation.type === 'helm-sync-values') {
       const helm = lane === 'C' ? this.breakGlass?.helm : this.helm;
       if (!helm) throw new Error('the Helm path is not configured');
-      return helm.apply(plan as HelmValuesPlan);
+      return plan.operation.type === 'helm-values'
+        ? helm.apply(plan as HelmValuesPlan)
+        : helm.syncValues(plan as HelmSyncPlan);
     }
 
     const path =

@@ -54,11 +54,36 @@ export interface HelmValuesPlan extends PlanBase {
   operation: {
     type: 'helm-values';
     file: string;
+    /** The chart's repository, `https://...` or `oci://...`; optional once the host has verified and cached it. */
+    chart?: { repo: string };
     set: Array<{ path: string; before: ValuesScalar | null; after: ValuesScalar }>;
   };
 }
 
-export type RemediationPlan = ImagePlan | RestartPlan | ScalePlan | JobDeletePlan | StorageDeletePlan | HelmValuesPlan;
+/** Writes the release's live user-supplied values to its values file; no cluster change. */
+export interface HelmSyncPlan extends PlanBase {
+  operation: { type: 'helm-sync-values' };
+}
+
+/** What the host learned while binding a helm-values plan to its release and values file. */
+export interface HelmBinding {
+  plan: HelmValuesPlan;
+  /** Every values change the upgrade would apply, file after the edits against live. */
+  diff: string[];
+  /** Full image references before and after, keyed by the edited path. */
+  images: Record<string, { before?: string; after?: string }>;
+  statefulRepositories: string[];
+  hasStatefulSet: boolean;
+}
+
+export type RemediationPlan =
+  | ImagePlan
+  | RestartPlan
+  | ScalePlan
+  | JobDeletePlan
+  | StorageDeletePlan
+  | HelmValuesPlan
+  | HelmSyncPlan;
 
 export interface ValidatedPlan {
   plan: RemediationPlan;

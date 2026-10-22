@@ -168,14 +168,14 @@ describe('Kubernetes remediation policy', () => {
     ).toThrow('within the next 15 minutes');
   });
 
-  it('keeps helm-values to Lane A values files', () => {
+  it('keeps helm-values to the release values file and off vaultwarden', () => {
     const helmValues = (namespace: string, file: string) => ({
       ...base(namespace),
       target: { apiVersion: 'v1', kind: 'Secret', namespace, name: namespace, uid: '-', resourceVersion: '-' },
       operation: { type: 'helm-values', file, set: [{ path: 'replicaCount', before: 1, after: 2 }] },
     });
     expect(() => validateRemediationPlan(helmValues('gitea', 'ansible/inventory-values.yaml'), now)).toThrow(
-      'kubernetes/helm-charts/<name>-values.yaml',
+      'kubernetes/helm-charts/<release>-values.yaml',
     );
     expect(() =>
       validateRemediationPlan(helmValues('vaultwarden', 'kubernetes/helm-charts/vaultwarden-values.yaml'), now),
