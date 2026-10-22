@@ -433,6 +433,8 @@ export class ClaudeProvider implements AgentProvider {
       events: translateEvents(),
       abort: () => {
         aborted = true;
+        // Ending input alone lets the in-flight turn run on and write the transcript the next query resumes.
+        sdkResult.interrupt().catch(() => {});
         stream.end();
       },
     };

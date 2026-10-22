@@ -455,6 +455,20 @@ it('does not push accumulated-only follow-ups into an active query', async () =>
   expect(getPendingMessages().map((m) => m.id)).toEqual(['m1']);
 });
 
+it('a human message mid-turn aborts the turn instead of being pushed', async () => {
+  const pushes: string[] = [];
+  let aborted = false;
+  async function* events(): AsyncGenerator<ProviderEvent> {
+    yield { type: 'init', continuation: 'sess-1' };
+    insertMessage('m1', 'chat', { senderId: 'matrix:@jopdorp', text: 'hey' });
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
+  const query = { push: (m: string) => pushes.push(m), end: () => {}, events: events(), abort: () => (aborted = true) };
+  await processQuery(query, ERR_ROUTING, [], 'claude', undefined, 'prompt', undefined);
+  expect([pushes.length, aborted]).toEqual([0, true]);
+  expect(getPendingMessages().map((m) => m.id)).toEqual(['m1']);
+});
+
 describe('error result with no <message> envelope', () => {
   it('delivers a safe failure notice to the triggering channel and does not nudge', async () => {
     const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';

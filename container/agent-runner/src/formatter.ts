@@ -150,6 +150,15 @@ export function isRunnerCommand(msg: MessageInRow, providerName: string): boolea
   return cat === 'admin' || cat === 'passthrough';
 }
 
+/** A person typing in chat: not a bot, a cli: injection, an echo, or another agent. */
+export function isHumanChat(msg: MessageInRow): boolean {
+  if ((msg.kind !== 'chat' && msg.kind !== 'chat-sdk') || msg.trigger !== 1 || msg.channel_type === 'agent') return false;
+  if (isSessionEcho(msg) || isFailureNotice(msg)) return false;
+  const content = parseContent(msg.content);
+  const senderId = extractSenderId(msg, content);
+  return !!senderId && !senderId.startsWith('cli:') && content?.author?.isBot !== true;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractSenderId(msg: MessageInRow, content: any): string | null {
   const raw: string | null = content?.senderId || content?.author?.userId || null;

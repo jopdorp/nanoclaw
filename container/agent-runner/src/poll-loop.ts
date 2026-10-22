@@ -26,6 +26,7 @@ import {
   FAILURE_NOTICE_FIELD,
   GENERIC_FAILURE_NOTICE,
   isClearCommand,
+  isHumanChat,
   isRunnerCommand,
   isSessionEcho,
   stripInternalTags,
@@ -41,6 +42,10 @@ const ACTIVE_POLL_INTERVAL_MS = 500;
 
 /** Consecutive driver-classified failures before a fresh runner is required. */
 const MAILBOX_FAILURE_STREAK_EXIT = 10;
+// Human messages that interrupted a turn; their prompt gets INTERRUPT_PREFIX.
+const interruptedBy = new Set<string>();
+const INTERRUPT_PREFIX =
+  '[Jegor wrote this while you were mid-task. Answer him first in one or two lines, then continue the task where you left off.]';
 
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
@@ -236,7 +241,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
+    const resumed = keep.filter((m) => interruptedBy.delete(m.id)).length > 0;
+    const prompt =
+      (resumed ? `${INTERRUPT_PREFIX}\n` : '') + formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
@@ -485,6 +492,17 @@ export async function processQuery(
         // long as the turn takes.
         if (pending.some((m) => isRunnerCommand(m, providerName))) {
           log('Pending slash command — aborting active stream so outer loop can process');
+          endedForCommand = true;
+          query.abort();
+          return;
+        }
+
+        // A pushed follow-up waits for the whole tool-call chain to finish, so a
+        // human mid-turn aborts it; the outer loop resumes the session with their message.
+        const human = answering ? pending.filter(isHumanChat) : [];
+        if (human.length > 0) {
+          log('Human message mid-turn — interrupting so the outer loop answers it first');
+          human.forEach((m) => interruptedBy.add(m.id));
           endedForCommand = true;
           query.abort();
           return;
