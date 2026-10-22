@@ -56,9 +56,9 @@ test "$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
   || fail "kubeconfig does not point at HOME ($API_SERVER)"
 
 step 'precheck: prove the latest Investigator turn used working gateway routing'
-GROUPS=$(ncl groups list --json --limit 100000)
+AGENT_GROUPS=$(ncl groups list --json --limit 100000)
 for group_id in "$ORCHESTRATOR_GROUP" "$INVESTIGATOR_GROUP" "$VERIFIER_GROUP"; do
-  jq -e --arg id "$group_id" '.data[] | select(.id == $id)' <<<"$GROUPS" >/dev/null \
+  jq -e --arg id "$group_id" '.data[] | select(.id == $id)' <<<"$AGENT_GROUPS" >/dev/null \
     || todo "agent group $group_id is absent; update the pinned IDs before enabling remediation"
 done
 
@@ -174,7 +174,7 @@ upsert_kubernetes_secret() {
   local name=$1 token_file=$2
   kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- \
     node - "$name" "$token_file" <<'NODE'
-const fs = require('node:fs');
+import fs from 'node:fs';
 
 const [name, file] = process.argv.slice(2);
 const base = process.env.ONECLI_URL?.replace(/\/+$/, '');
@@ -245,25 +245,35 @@ CODEX_SECRET_COUNT=$(jq -r '[.data[] | select(.name == "Codex" and .type == "ope
   || todo 'the Codex-primary orchestrator requires exactly one OneCLI Codex credential'
 CODEX_SECRET_ID=$(jq -er '.data[] | select(.name == "Codex" and .type == "openai") | .id' <<<"$SECRETS")
 
-ensure_block_rule() {
-  local method=$1 name="nanoclaw-remediator-kubernetes-block-${1,,}" rules count id
-  rules=$(onecli_cli rules list)
-  count=$(jq -r --arg name "$name" '[.data[] | select(.name == $name)] | length' <<<"$rules")
-  (( count <= 1 )) || todo "multiple OneCLI rules are named $name"
-  if (( count == 0 )); then
-    onecli_cli rules create --name "$name" --host-pattern "$API_HOST" --action block \
-      --method "$method" --agent-id "$PRIMARY_AGENT_ID" --enabled >/dev/null
-    printf 'created orchestrator block rule for %s\n' "$method"
-  else
-    id=$(jq -er --arg name "$name" '.data[] | select(.name == $name) | .id' <<<"$rules")
-    onecli_cli rules update --id "$id" --name "$name" --host-pattern "$API_HOST" --action block \
-      --method "$method" --agent-id "$PRIMARY_AGENT_ID" --enabled >/dev/null
-    printf 'confirmed orchestrator block rule for %s\n' "$method"
-  fi
+# OneCLI 2.x serves custom rules only through its policy API, and a draft rule takes effect once published.
+onecli_policy() {
+  kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- sh -c 'curl -fsS -X "$1" -H "Authorization: Bearer $ONECLI_API_KEY" \
+    -H "Content-Type: application/json" --data-binary @- "$ONECLI_URL/v1/policy$2"' sh "$@"
 }
+
+ensure_block_rule() {
+  local method=$1 name="nanoclaw-remediator-kubernetes-block-${1,,}" rule ids
+  rule=$(jq -nc --arg name "$name" --arg host "$API_HOST" --arg method "$method" --arg agent "$PRIMARY_AGENT_ID" \
+    '{name: $name, action: "block", enabled: true, identities: [{type: "agent", id: $agent}],
+      targets: [{kind: "network", hostPattern: $host, method: $method}]}')
+  ids=$(onecli_policy GET /rules </dev/null | jq -r --arg name "$name" '[.[] | select(.name == $name) | .id] | join(" ")')
+  case $ids in
+    '') onecli_policy POST /rules <<<"$rule" >/dev/null; printf 'created orchestrator block rule for %s\n' "$method" ;;
+    *' '*) todo "multiple OneCLI rules are named $name" ;;
+    *) onecli_policy PATCH "/rules/$ids" <<<"$rule" >/dev/null; printf 'confirmed orchestrator block rule for %s\n' "$method" ;;
+  esac
+}
+
 ensure_agent "$ORCHESTRATOR_GROUP" 'Kubernetes Remediator' false
 PRIMARY_AGENT_ID=$ENSURED_AGENT_ID
 for method in POST PUT PATCH DELETE; do ensure_block_rule "$method"; done
+onecli_policy GET /rules </dev/null \
+  | jq -c '{orderedIds: sort_by(.name | startswith("nanoclaw-remediator-kubernetes-block-") | not) | map(.id)}' \
+  | onecli_policy PUT /rules/order >/dev/null
+onecli_policy POST /publish </dev/null >/dev/null
+onecli_policy GET '/rules?status=published' </dev/null \
+  | jq -e '[.[] | select(.name | startswith("nanoclaw-remediator-kubernetes-block-"))] | length == 4' >/dev/null \
+  || todo 'the orchestrator block rules are not published'
 
 PRIMARY_PROVIDER_IDS=$(onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" \
   | jq -r --arg codex "$CODEX_SECRET_ID" '[.data[], $codex] | unique | join(",")')
