@@ -14,6 +14,12 @@ VERIFIER_GROUP=ag-e95b148c-8c90-4247-b6d1-0b75db805138
 APPROVER='matrix:@jopdorp:matrix.org'
 API_SERVER=https://192.168.1.11:6443
 API_HOST=192.168.1.11
+GITEA_NAMESPACE=gitea
+GITEA_USER=orfie-repo-read
+GITEA_REPOSITORY=k8s.jegor.nl
+GITEA_TOKEN_NAME=onecli-read
+GITEA_HOSTS=(gitea-http.gitea.svc gitea.claw.jopdorp.nl)
+GITEA_SECRET_NAMES=('Gitea repository reader (gitea-http.gitea.svc:3000)' 'Gitea repository reader (gitea.claw.jopdorp.nl)')
 EXECUTOR=nanoclaw-remediation-executor
 ANNOTATOR=nanoclaw-remediation-annotator
 HELM=nanoclaw-helm
@@ -25,6 +31,7 @@ LOGIN_POD=
 CREATED_LOGIN_JOB=0
 TOKEN_FILES=(/tmp/nanoclaw-remediator-reader.token /tmp/nanoclaw-remediator.token /tmp/nanoclaw-remediation-approver.token
   /tmp/nanoclaw-helm.token /tmp/nanoclaw-breakglass.token)
+GITEA_TOKEN_FILE=/tmp/nanoclaw-gitea-reader.token
 
 step() { printf '\n==> %s\n' "$*"; }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -42,7 +49,7 @@ onecli_cli() {
 cleanup() {
   if [[ -n "$LOGIN_POD" ]]; then
     kubectl exec -n "$NAMESPACE" "$LOGIN_POD" -c login -- \
-      rm -f "${TOKEN_FILES[@]}" >/dev/null 2>&1 || true
+      rm -f "${TOKEN_FILES[@]}" "$GITEA_TOKEN_FILE" >/dev/null 2>&1 || true
   fi
   if [[ "$CREATED_LOGIN_JOB" = 1 ]]; then
     kubectl delete -n "$NAMESPACE" job "$LOGIN_JOB" --wait=false >/dev/null 2>&1 || true
@@ -231,13 +238,13 @@ GATEWAY_VERSION=$(kubectl exec -n "$NAMESPACE" "$LOGIN_POD" -c login -- \
   || todo "OneCLI gateway is $GATEWAY_VERSION; this script requires the runbook pin 1.42.0"
 printf 'OneCLI gateway %s is ready\n' "$GATEWAY_VERSION"
 
-upsert_kubernetes_secret() {
-  local name=$1 token_file=$2
+upsert_generic_secret() {
+  local name=$1 token_file=$2 host=$3 value_format=$4
   kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- \
-    node - "$name" "$token_file" <<'NODE'
+    node - "$name" "$token_file" "$host" "$value_format" <<'NODE'
 import fs from 'node:fs';
 
-const [name, file] = process.argv.slice(2);
+const [name, file, hostPattern, valueFormat] = process.argv.slice(2);
 const base = process.env.ONECLI_URL?.replace(/\/+$/, '');
 const apiKey = process.env.ONECLI_API_KEY;
 if (!base || !apiKey) throw new Error('OneCLI management environment is unavailable');
@@ -258,16 +265,16 @@ if (!token) throw new Error('TokenRequest returned an empty token');
 const secrets = await request('');
 const matches = secrets.filter((secret) => secret.name === name);
 if (matches.length > 1) throw new Error(`Multiple OneCLI secrets are named ${name}`);
-const injectionConfig = { headerName: 'Authorization', valueFormat: 'Bearer {value}' };
+const injectionConfig = { headerName: 'Authorization', valueFormat };
 const existing = matches[0];
 if (existing && (
   existing.type !== 'generic' ||
-  existing.hostPattern !== '192.168.1.11' ||
+  existing.hostPattern !== hostPattern ||
   existing.pathPattern ||
   (existing.valueSource && existing.valueSource !== 'inline') ||
   (existing.opRef !== undefined && existing.opRef !== null)
 )) throw new Error(`Existing OneCLI secret ${name} has unexpected metadata`);
-const payload = { value: token, hostPattern: '192.168.1.11', injectionConfig };
+const payload = { value: token, hostPattern, injectionConfig };
 const result = existing
   ? await request(`/${encodeURIComponent(existing.id)}`, 'PATCH', payload)
   : await request('', 'POST', {
@@ -327,13 +334,37 @@ ensure_block_rule() {
 
 ensure_agent "$ORCHESTRATOR_GROUP" 'Kubernetes Remediator' false
 PRIMARY_AGENT_ID=$ENSURED_AGENT_ID
+ensure_agent "$INVESTIGATOR_GROUP" 'Kubernetes Remediation Investigator' false
+INVESTIGATOR_AGENT_ID=$ENSURED_AGENT_ID
+ensure_agent "$VERIFIER_GROUP" 'Kubernetes Remediation Verifier' false
+VERIFIER_AGENT_ID=$ENSURED_AGENT_ID
 for method in POST PUT PATCH DELETE; do ensure_block_rule "$method"; done
+
+ensure_gitea_block_rule() {
+  local method=$1 label=$2 host=$3 name="nanoclaw-remediator-gitea-$2-block-${1,,}" rule ids
+  rule=$(jq -nc --arg name "$name" --arg host "$host" --arg method "$method" \
+    --arg agents "$PRIMARY_AGENT_ID $INVESTIGATOR_AGENT_ID $VERIFIER_AGENT_ID" \
+    '{name: $name, action: "block", enabled: true,
+      identities: ($agents | split(" ") | map({type: "agent", id: .})),
+      targets: [{kind: "network", hostPattern: $host, method: $method}]}')
+  ids=$(onecli_policy GET /rules </dev/null | jq -r --arg name "$name" '[.[] | select(.name == $name) | .id] | join(" ")')
+  case $ids in
+    '') onecli_policy POST /rules <<<"$rule" >/dev/null; printf 'created Gitea %s block rule for %s\n' "$label" "$method" ;;
+    *' '*) todo "multiple OneCLI rules are named $name" ;;
+    *) onecli_policy PATCH "/rules/$ids" <<<"$rule" >/dev/null; printf 'confirmed Gitea %s block rule for %s\n' "$label" "$method" ;;
+  esac
+}
+for method in POST PUT PATCH DELETE; do
+  ensure_gitea_block_rule "$method" internal "${GITEA_HOSTS[0]}"
+  ensure_gitea_block_rule "$method" external "${GITEA_HOSTS[1]}"
+done
 onecli_policy GET /rules </dev/null \
-  | jq -c '{orderedIds: sort_by(.name | startswith("nanoclaw-remediator-kubernetes-block-") | not) | map(.id)}' \
+  | jq -c '{orderedIds: sort_by((.name | startswith("nanoclaw-remediator-") and contains("-block-")) | not) | map(.id)}' \
   | onecli_policy PUT /rules/order >/dev/null
 onecli_policy POST /publish </dev/null >/dev/null
 onecli_policy GET '/rules?status=published' </dev/null \
-  | jq -e '[.[] | select(.name | startswith("nanoclaw-remediator-kubernetes-block-"))] | length == 4' >/dev/null \
+  | jq -e '([.[] | select(.name | startswith("nanoclaw-remediator-kubernetes-block-"))] | length == 4)
+      and ([.[] | select(.name | startswith("nanoclaw-remediator-gitea-"))] | length == 8)' >/dev/null \
   || todo 'the orchestrator block rules are not published'
 
 PRIMARY_PROVIDER_IDS=$(onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" \
@@ -372,10 +403,43 @@ copy_token() {
 SECRET_IDS=()
 for i in 0 1 2 3 4; do
   copy_token "$(basename "${TOKEN_FILES[$i]}" .token)-token" "${TOKEN_FILES[$i]}"
-  SECRET_IDS[$i]=$(upsert_kubernetes_secret "${SECRET_NAMES[$i]}" "${TOKEN_FILES[$i]}") \
+  SECRET_IDS[$i]=$(upsert_generic_secret "${SECRET_NAMES[$i]}" "${TOKEN_FILES[$i]}" "$API_HOST" 'Bearer {value}') \
     || todo "could not create or rotate OneCLI secret ${SECRET_NAMES[$i]}"
 done
 kubectl exec -n "$NAMESPACE" "$LOGIN_POD" -c login -- rm -f "${TOKEN_FILES[@]}"
+
+GITEA_POD=$(kubectl get pod -n "$GITEA_NAMESPACE" -l app.kubernetes.io/name=gitea \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+GITEA_DB_POD=$(kubectl get pod -n "$GITEA_NAMESPACE" -l app.kubernetes.io/name=postgresql \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+[[ -n "$GITEA_POD" && -n "$GITEA_DB_POD" ]] || todo 'the Gitea application or database pod is absent'
+if ! kubectl exec -n "$GITEA_NAMESPACE" "$GITEA_POD" -c gitea -- gitea admin user list \
+  | awk -v user="$GITEA_USER" '$2 == user { found=1 } END { exit !found }'; then
+  kubectl exec -n "$GITEA_NAMESPACE" "$GITEA_POD" -c gitea -- gitea admin user create \
+    --username "$GITEA_USER" --email "$GITEA_USER@claw.jopdorp.nl" --random-password \
+    --must-change-password=false >/dev/null
+fi
+kubectl exec -i -n "$GITEA_NAMESPACE" "$GITEA_DB_POD" -- sh -c \
+  'PGPASSWORD=$(cat "$POSTGRES_PASSWORD_FILE") /opt/bitnami/postgresql/bin/psql -v ON_ERROR_STOP=1 \
+    -U "$POSTGRES_USER" -d "$POSTGRES_DATABASE"' >/dev/null <<SQL
+INSERT INTO access (user_id, repo_id, mode)
+SELECT u.id, r.id, 1 FROM public.user u JOIN repository r ON r.owner_name = 'cluster'
+WHERE u.name = '$GITEA_USER' AND r.name = '$GITEA_REPOSITORY'
+ON CONFLICT (user_id, repo_id) DO UPDATE SET mode = 1;
+DELETE FROM access_token WHERE uid = (SELECT id FROM public.user WHERE name = '$GITEA_USER')
+  AND name = '$GITEA_TOKEN_NAME';
+SQL
+kubectl exec -n "$GITEA_NAMESPACE" "$GITEA_POD" -c gitea -- gitea admin user generate-access-token \
+  --username "$GITEA_USER" --token-name "$GITEA_TOKEN_NAME" --scopes read:repository --raw \
+  | kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- sh -c \
+      "umask 077; cat > $GITEA_TOKEN_FILE"
+GITEA_SECRET_IDS=()
+for i in 0 1; do
+  GITEA_SECRET_IDS[$i]=$(upsert_generic_secret "${GITEA_SECRET_NAMES[$i]}" \
+    "$GITEA_TOKEN_FILE" "${GITEA_HOSTS[$i]}" 'token {value}') \
+    || todo "could not create or rotate the ${GITEA_HOSTS[$i]} Gitea credential"
+done
+kubectl exec -n "$NAMESPACE" "$LOGIN_POD" -c login -- rm -f "$GITEA_TOKEN_FILE"
 
 # The agents hold only the read-only reader, never another API token (older runs' included); each host identity holds exactly its own.
 READER_AGENT_IDS=$(jq -r --arg ids "$ORCHESTRATOR_GROUP $INVESTIGATOR_GROUP $VERIFIER_GROUP" \
@@ -391,12 +455,18 @@ for agent in $(jq -r '.data[].id' <<<"$AGENTS"); do
     || onecli_cli agents set-secrets --id "$agent" --secret-ids "$(jq -r 'join(",")' <<<"$wanted")" >/dev/null
 done
 onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" | jq -e --arg id "${SECRET_IDS[0]}" '.data | index($id)' >/dev/null
+for agent in "$PRIMARY_AGENT_ID" "$INVESTIGATOR_AGENT_ID" "$VERIFIER_AGENT_ID"; do
+  current=$(onecli_cli agents secrets --id "$agent" | jq -c '.data | unique')
+  wanted=$(jq -c --arg one "${GITEA_SECRET_IDS[0]}" --arg two "${GITEA_SECRET_IDS[1]}" \
+    '[.[], $one, $two] | unique' <<<"$current")
+  onecli_cli agents set-secrets --id "$agent" --secret-ids "$(jq -r 'join(",")' <<<"$wanted")" >/dev/null
+done
 for pair in "$EXECUTOR_AGENT_ID:1" "$ANNOTATOR_AGENT_ID:2" "$HELM_AGENT_ID:3" "$BREAKGLASS_AGENT_ID:4"; do
   agent=${pair%:*} id=${SECRET_IDS[${pair#*:}]}
   onecli_cli agents set-secrets --id "$agent" --secret-ids "$id" >/dev/null
   onecli_cli agents secrets --id "$agent" | jq -e --arg id "$id" '.data == [$id]' >/dev/null
 done
-printf '%s\n' 'stored and assigned the Kubernetes credentials; values were not printed'
+printf '%s\n' 'stored and assigned the Kubernetes and Gitea credentials; values were not printed'
 
 step '5/6 merge the runtime config atomically into the state PVC'
 # Chart sources the host has seen, as hints: any release works once a plan names its chart repo, and the host re-verifies it every time.
