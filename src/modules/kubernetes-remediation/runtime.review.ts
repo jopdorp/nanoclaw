@@ -68,7 +68,7 @@ async function onecli<T>(...args: string[]): Promise<T> {
   return (JSON.parse((await exec('onecli', args)).stdout) as { data: T }).data;
 }
 
-/** Exactly the reader and its model key: OneCLI injects one anthropic-type key, so any other (DeepSeek) shadows the subscription. */
+/** Exactly the readers and its model key: OneCLI injects one anthropic-type key, so any other (DeepSeek) shadows the subscription. */
 async function scopeHelperSecrets(agentGroupId: string): Promise<void> {
   const agent = (await onecli<Array<{ id: string; identifier: string }>>('agents', 'list')).find(
     (a) => a.identifier === agentGroupId,
@@ -80,7 +80,12 @@ async function scopeHelperSecrets(agentGroupId: string): Promise<void> {
   const provider = (await getContainerConfig(agentGroupId))?.provider ?? 'claude';
   const model = id(provider === 'claude' ? 'Claude subscription' : 'Codex');
   const current = await onecli<string[]>('agents', 'secrets', '--id', agent.id);
-  const wanted = [reader, model].filter((s): s is string => !!s);
+  const wanted = [
+    reader,
+    model,
+    id('Gitea repository reader (gitea-http.gitea.svc:3000)'),
+    id('Gitea repository reader (gitea.claw.jopdorp.nl)'),
+  ].filter((s): s is string => !!s);
   await exec('onecli', ['agents', 'set-secret-mode', '--id', agent.id, '--mode', 'selective']);
   if (wanted.sort().join() !== [...current].sort().join())
     await exec('onecli', ['agents', 'set-secrets', '--id', agent.id, '--secret-ids', wanted.join(',')]);
