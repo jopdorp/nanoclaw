@@ -49,7 +49,7 @@ const VALUES_FILE_RE = /^kubernetes\/helm-charts\/[\w-][\w.-]*\.ya?ml$/;
 const CHART_RE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
 const CHART_VERSION_RE = /^v?\d+\.\d+\.\d+[\w.+-]*$/;
 // Values under such keys may be credentials, but a key that names or points at a Secret holds none.
-export const SECRET_KEY_RE = /password|token|secret|key/i;
+export const SECRET_KEY_RE = /password|passwd|token|secret|apikey|api_key|credential|private_?key/i;
 const SECRET_REFERENCE_RE = /(?:name|ref|file|path)$|^existingsecret/i;
 const REPO_PATH_RE = /^[\w-][\w.-]*(?:\/[\w-][\w.-]*)*$/;
 const BUILD_IMAGE_RE =
@@ -316,7 +316,9 @@ export function secretKeys(value: unknown, prefix = ''): string[] {
   return Object.entries(value).flatMap(([key, child]) => {
     if (SECRET_REFERENCE_RE.test(key)) return [];
     const at = prefix ? `${prefix}.${key}` : key;
-    const own = SECRET_KEY_RE.test(key) && typeof child === 'string' && child !== '';
+    // A key named `key` (tolerations, matchExpressions, secretKeyRef) is a credential only under a secret-looking parent.
+    const secretKey = SECRET_KEY_RE.test(key) || (/^key$/i.test(key) && SECRET_KEY_RE.test(prefix));
+    const own = secretKey && typeof child === 'string' && child !== '';
     return [...(own ? [at] : []), ...secretKeys(child, at)];
   });
 }
