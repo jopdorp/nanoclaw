@@ -35,10 +35,12 @@ function fixture(before: string, workload: unknown = {}, live = 'image:\n  tag: 
   const checkout = path.join(dir, 'checkout');
   const executor = new HelmReleaseExecutor({
     client: {
-      request: async (url: string) =>
+      request: async (url: string, init?: { body?: unknown }) =>
         url.includes('/secrets?')
           ? { items: [{ metadata: { uid: 'uid-1', resourceVersion: '42', labels: { version: '10' } } }] }
-          : workload,
+          : typeof workload === 'function'
+            ? workload(url, init)
+            : workload,
       watch: async function* () {},
     },
     charts: {
@@ -126,4 +128,23 @@ it('helm-install needs its values file in the repo and never runs helm without i
   };
   await expect(executor.install(install)).rejects.toThrow('write it with repo-write first');
   expect(helm).not.toHaveBeenCalled();
+});
+
+it('an upgrade that only restamps the version label on a StatefulSet binds as record-only', async () => {
+  const sts = (version: string) => ({
+    apiVersion: 'apps/v1',
+    kind: 'StatefulSet',
+    metadata: { name: 'gitea', namespace: 'gitea', labels: { 'app.kubernetes.io/version': version } },
+    spec: { replicas: 1 },
+  });
+  const { executor, helm, plan } = fixture('1.27.0', (url: string, init?: { body?: unknown }) =>
+    url === '/apis/apps/v1'
+      ? { resources: [{ name: 'statefulsets', kind: 'StatefulSet', namespaced: true }] }
+      : (init?.body ?? sts('1.26.0')),
+  );
+  const helmDefault = helm.getMockImplementation()!;
+  helm.mockImplementation(async (args) =>
+    args[0] === 'upgrade' ? JSON.stringify({ manifest: JSON.stringify(sts('1.27.0')) }) : helmDefault(args),
+  );
+  expect((await executor.bind(plan)).unchanged).toBe(true);
 });

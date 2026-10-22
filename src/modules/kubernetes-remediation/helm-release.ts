@@ -143,6 +143,13 @@ function declared(object: Values): Values {
   return { ...rest, metadata };
 }
 
+/** Charts stamp the image tag as a version label; on its own it only moves the record, nothing runs differently. */
+function unstamped(object: Values): Values {
+  const metadata = object.metadata as Values;
+  const { 'app.kubernetes.io/version': _version, ...labels } = (metadata.labels as Values | undefined) ?? {};
+  return { ...object, metadata: { ...metadata, labels } };
+}
+
 function reason(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).trim().split('\n').slice(-3).join(' ');
 }
@@ -640,7 +647,7 @@ export class HelmReleaseExecutor {
           { ...object, metadata: { ...(object.metadata as Values), namespace } },
           true,
         );
-        if (valuesDiff(declared(live), declared(dry)).length) return false;
+        if (valuesDiff(unstamped(declared(live)), unstamped(declared(dry))).length) return false;
       }
       return rendered.length > 0;
       // eslint-disable-next-line no-catch-all/no-catch-all -- anything it cannot prove unchanged counts as a change
