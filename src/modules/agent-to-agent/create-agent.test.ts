@@ -60,6 +60,7 @@ vi.mock('../approvals/index.js', () => ({
 }));
 vi.mock('../../db/container-configs.js', () => ({
   getContainerConfig: (...a: unknown[]) => mockGetContainerConfig(...a),
+  updateContainerConfigScalars: vi.fn(),
   ensureContainerConfig: () => {},
 }));
 vi.mock('../../db/agent-groups.js', () => ({
@@ -171,33 +172,13 @@ describe('create_agent — guard-based authorization (wrapped delivery action)',
     expect(mockInitGroupFilesystem).toHaveBeenCalledTimes(1);
   });
 
-  it('child inherits the creator provider (codex parent → codex child)', async () => {
-    // A subagent must run on the same authenticated runtime as its creator —
-    // on a codex-only install a claude default would 401. The provider is
-    // passed to initGroupFilesystem, which stamps the child's config row.
-    // Red-on-delete: dropping the inheritance lets the child fall through to the
-    // instance default instead of codex.
-    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global', provider: 'codex' });
-
+  it('no provider named makes a codex helper; claude is the explicit opt-out', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
     await runCreateAgent({ name: 'Scout', instructions: 'help' });
+    await runCreateAgent({ name: 'Coder', instructions: 'help', provider: 'claude' });
 
-    expect(mockInitGroupFilesystem).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ provider: 'codex' }),
-    );
-  });
-
-  it('claude creator pins the child to claude, not the instance default', async () => {
-    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' }); // parent has no explicit provider
-
-    await runCreateAgent({ name: 'Scout', instructions: 'help' });
-
-    // The child inherits the parent's EFFECTIVE provider (claude), passed
-    // explicitly so it never falls through to a non-claude instance default.
-    expect(mockInitGroupFilesystem).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ provider: 'claude' }),
-    );
+    const providers = mockInitGroupFilesystem.mock.calls.map((c) => (c[1] as { provider: string }).provider);
+    expect(providers).toEqual(['codex', 'claude']);
   });
 
   it('group scope (default): requires approval, does NOT create directly', async () => {
@@ -371,7 +352,7 @@ describe('create_agent — from a template', () => {
       notify: vi.fn(),
     });
 
-    expect(mockCreateAgentFromTemplate).toHaveBeenCalledWith('sales/sdr', { name: 'SDR', provider: 'claude' });
+    expect(mockCreateAgentFromTemplate).toHaveBeenCalledWith('sales/sdr', { name: 'SDR', provider: 'codex' });
   });
 
   it('an approval for a plain create never covers a templated request', async () => {

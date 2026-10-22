@@ -85,4 +85,21 @@ export const createAgent: McpToolDefinition = {
   },
 };
 
-registerTools([createAgent]);
+export const deleteAgent: McpToolDefinition = {
+  tool: {
+    name: 'delete_agent',
+    description: 'Stop and delete an agent you created with create_agent, by its destination name. Fire-and-forget.',
+    inputSchema: { type: 'object' as const, properties: { name: { type: 'string' } }, required: ['name'] },
+  },
+  async handler(args) {
+    const requestId = generateId();
+    await writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({ action: 'delete_agent', requestId, name: args.name }),
+    });
+    return ok(`Deleting agent "${String(args.name)}". You will be notified when it is gone.`);
+  },
+};
+
+registerTools([createAgent, deleteAgent]);

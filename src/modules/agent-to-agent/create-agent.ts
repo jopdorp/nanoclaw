@@ -21,7 +21,7 @@ import path from 'path';
 
 import { GROUPS_DIR } from '../../config.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
-import { getContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
+import { updateContainerConfigScalars } from '../../db/container-configs.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
 import { groupFolderExistsOnDisk } from '../../group-folder.js';
@@ -33,7 +33,11 @@ import { isValidTemplateRef } from '../../templates/local-dir.js';
 import { ensureTemplateLocal, hasLocalTemplate } from '../../templates/library.js';
 import type { AgentGroup, Session } from '../../types.js';
 import { requestApproval } from '../approvals/index.js';
-import { createDestination, getDestinationByName, normalizeName } from './db/agent-destinations.js';
+import { lookup } from '../../cli/registry.js';
+import '../../cli/resources/groups.js';
+import { killContainer } from '../../container-runner.js';
+import { getSessionsByAgentGroup } from '../../db/sessions.js';
+import { createDestination, getDestinationByName, getDestinations, normalizeName } from './db/agent-destinations.js';
 import { writeDestinations } from './write-destinations.js';
 
 async function notifyAgent(session: Session, text: string): Promise<void> {
@@ -150,15 +154,10 @@ export async function createAgent(
     return;
   }
 
-  // Subagent path: a child inherits its creator's EFFECTIVE provider, NOT the
-  // instance-wide default — so a child is never spawned on a runtime the parent
-  // can't reach (e.g. a codex-only install where claude isn't authenticated).
-  // A NULL parent resolves to claude. The creator may name another provider
-  // and model; the operator can still flip a child with `ncl groups config update`.
-  const child = {
-    provider: str(content.provider) ?? (await getContainerConfig(sourceGroup.id))?.provider ?? 'claude',
-    model: str(content.model),
-  };
+  // No provider named means a Codex helper, so helpers draw the Codex plan; `provider` opts out.
+  const child = content.provider
+    ? { provider: String(content.provider), model: str(content.model) }
+    : { provider: 'codex', model: str(content.model) ?? 'gpt-5.6-sol', effort: 'medium' };
 
   // The creator's helper.md and the chosen .claude/agents role lead the child's persona.
   const role = str(content.role);
@@ -190,7 +189,7 @@ async function createFromTemplate(
   template: string,
   name: string,
   localName: string,
-  child: { provider: string; model?: string },
+  child: { provider: string; model?: string; effort?: string },
   session: Session,
   sourceGroup: AgentGroup,
   notify: (text: string) => Promise<void>,
@@ -217,7 +216,7 @@ async function createFromTemplate(
     return;
   }
 
-  if (child.model) await updateContainerConfigScalars(stamped.group.id, { model: child.model });
+  await updateContainerConfigScalars(stamped.group.id, { model: child.model, effort: child.effort });
   await wireNewAgent(sourceGroup.id, localName, stamped.group.id, session);
 
   if (!options?.suppressCreatedNotify) {
@@ -249,7 +248,7 @@ async function performCreateAgent(
   name: string,
   localName: string,
   instructions: string | null,
-  child: { provider: string; model?: string },
+  child: { provider: string; model?: string; effort?: string },
   session: Session,
   sourceGroup: AgentGroup,
   notify: (text: string) => Promise<void>,
@@ -289,7 +288,7 @@ async function performCreateAgent(
   await createAgentGroup(newGroup);
   // Passing the provider pins the child's scaffold and stamps its config row in one step.
   await initGroupFilesystem(newGroup, { instructions: instructions ?? undefined, provider: child.provider });
-  if (child.model) await updateContainerConfigScalars(agentGroupId, { model: child.model });
+  await updateContainerConfigScalars(agentGroupId, { model: child.model, effort: child.effort });
   await wireNewAgent(sourceGroup.id, localName, agentGroupId, session);
 
   if (!options?.suppressCreatedNotify) {
@@ -338,4 +337,21 @@ async function wireNewAgent(
   // — forgetting this causes "dropped: unknown destination" when the parent
   // tries to send to the newly-created child.
   await writeDestinations(session.agent_group_id, session.id);
+}
+
+/** Delete an agent the caller created (its `parent` destination points back at the caller), sessions first. */
+export async function deleteAgent(content: Record<string, unknown>, session: Session): Promise<void> {
+  const name = normalizeName(str(content.name) ?? '');
+  const target = (await getDestinationByName(session.agent_group_id, name))?.target_id;
+  const created =
+    target &&
+    (await getDestinations(target)).some(
+      (d) =>
+        d.target_type === 'agent' && d.target_id === session.agent_group_id && /^parent(-\d+)?$/.test(d.local_name),
+    );
+  if (!target || !created) return notifyAgent(session, `delete_agent: "${name}" is not an agent you created.`);
+  for (const s of await getSessionsByAgentGroup(target)) killContainer(s.id, 'deleted by its creator');
+  await lookup('groups-delete')!.handler({ id: target }, { caller: 'host' });
+  await writeDestinations(session.agent_group_id, session.id);
+  await notifyAgent(session, `Agent "${name}" deleted.`);
 }
