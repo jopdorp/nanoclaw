@@ -302,14 +302,12 @@ ncl groups config update --id "$PRIMARY_ID" --provider codex --model gpt-5.6-sol
 ncl groups config update --id "$INVESTIGATOR_ID" --provider claude-remediation --model deepseek-chat --effort xhigh --cli-scope disabled >/dev/null
 ncl groups config update --id "$VERIFIER_ID" --provider claude-remediation --model deepseek-chat --effort xhigh --cli-scope disabled >/dev/null
 
-write_group_file kubernetes-remediator AGENTS.md "$DOCS/agent-group/CLAUDE.md"
+write_group_file kubernetes-remediator instructions.prepend.md "$DOCS/agent-group/CLAUDE.md"
 write_group_file kubernetes-remediator kubeconfig.gateway.yaml "$DOCS/kubeconfig.gateway.yaml"
-sed -e 's/^model: opus$/model: deepseek-chat/' -e 's/^effort: high$/effort: xhigh/' \
-  "$DOCS/agent-group/.claude/agents/remediation-investigator.md" >"$TMP_DIR/investigator.md"
-sed -e 's/^model: opus$/model: deepseek-chat/' -e 's/^effort: high$/effort: xhigh/' \
-  "$DOCS/agent-group/.claude/agents/remediation-verifier.md" >"$TMP_DIR/verifier.md"
-write_group_file kubernetes-remediation-investigator CLAUDE.md "$TMP_DIR/investigator.md"
-write_group_file kubernetes-remediation-verifier CLAUDE.md "$TMP_DIR/verifier.md"
+sed '1,/^---$/d' "$DOCS/agent-group/.claude/agents/remediation-investigator.md" >"$TMP_DIR/investigator.md"
+sed '1,/^---$/d' "$DOCS/agent-group/.claude/agents/remediation-verifier.md" >"$TMP_DIR/verifier.md"
+write_group_file kubernetes-remediation-investigator instructions.prepend.md "$TMP_DIR/investigator.md"
+write_group_file kubernetes-remediation-verifier instructions.prepend.md "$TMP_DIR/verifier.md"
 
 DESTINATIONS=$(ncl destinations list --agent-group-id "$PRIMARY_ID" --json)
 jq -e --arg n remediation-investigator '.[] | select(.local_name == $n)' <<<"$DESTINATIONS" >/dev/null \
