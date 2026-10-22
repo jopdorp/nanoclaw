@@ -391,6 +391,12 @@ for folder in kubernetes-remediation-investigator kubernetes-remediation-verifie
   done
 done
 
+# Shared memory lives in the shared-mind Service (k8s.jegor.nl kubernetes/nanoclaw-remediator/embedder.yaml); this pipes the MCP stdio to it.
+SHARED_MIND='const s=require("net").connect(8765,"shared-mind.nanoclaw-remediator.svc");process.stdin.pipe(s).pipe(process.stdout);s.on("close",()=>process.exit(0)).on("error",e=>{console.error(e.message);process.exit(1)})'
+for id in "$PRIMARY_ID" "$INVESTIGATOR_ID" "$VERIFIER_ID"; do
+  ncl groups config add-mcp-server --id "$id" --name shared-mind --command node --args "$(jq -nc --arg s "$SHARED_MIND" '["-e",$s]')" >/dev/null
+done
+
 DESTINATIONS=$(ncl destinations list --agent-group-id "$PRIMARY_ID" --json)
 jq -e --arg n remediation-investigator '.[] | select(.local_name == $n)' <<<"$DESTINATIONS" >/dev/null \
   || ncl destinations add --agent-group-id "$PRIMARY_ID" --local-name remediation-investigator \

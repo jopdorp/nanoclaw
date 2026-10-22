@@ -110,3 +110,7 @@ Run one no-tools turn in each group. Confirm Claude reports Opus, Codex reports 
 ## 10. [operator=me] Production gate
 
 Do not leave the Deployment running until immutable images, non-root OneCLI, Codex provider wiring, both interactive logins, provider expiry behavior, TokenRequest refresh, Matrix E2E/account recovery, Falco header serialization, restart cleanup, approval replay/drift tests, and Longhorn backup/restore of NanoClaw plus OneCLI/Postgres all pass. Keep `home-k3s-rbac.yaml` and `admission-policy.yaml` owned by their original reviewers.
+
+## 11. [operator=me] Shared memory
+
+Orfie and its helpers reach `shared-mind` (k8s.jegor.nl `kubernetes/nanoclaw-remediator/{qdrant,embedder}.yaml`) through the stdio bridge `phase2-deploy.sh` adds to each group. The image is `shared-mind.Dockerfile` built over a qmem checkout at the commit Fable's local qmem runs, and the base EmbeddingGemma weights are copied once from `~/.local/share/qmem/embeddinggemma` to `/data/embeddinggemma` on the `qmem-encoder` PVC, so embeddings match Fable's copy exactly. Seed it with `kubectl -n nanoclaw-remediator port-forward svc/qdrant 16333:6333` and `python3 qmem-copy.py http://localhost:6333 http://localhost:16333 -gemma-lora nanoclaw-remediation home-cluster php2shell longhorn`; syncing the two later is the same script run in both directions, since point ids are stable on both sides.

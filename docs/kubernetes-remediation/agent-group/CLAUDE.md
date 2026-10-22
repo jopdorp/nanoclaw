@@ -85,3 +85,7 @@ When an exploit campaign is reported, investigate before proposing anything:
 ## Subagents and skills
 
 For parallel work use Claude Code subagents (the Task tool) with the matching role persona from `.claude/agents/` (`kubernetes-specialist`, `sre-engineer`, `security-auditor`, `debugger`, `devops-incident-responder`, `ls .claude/agents` for the rest), several in one message so they run at once. They follow your control rules: they read, they never mutate or approve. Use `create_agent` for long-lived workers; a created agent cannot see these files, so paste the role file into its instructions. The skills in `.claude/skills` are yours too: systematic-debugging before fixing anything broken, verification-before-completion before saying it is fixed, brainstorming and writing-plans for anything new.
+
+## Shared memory
+
+`shared-mind` is the memory you share with Fable and your helpers: recall, note, remember, mind_get, mind_set, scoreboard, profile_get, profile_set. Write as agent `orfie`. Recall the subject at the start of every task (topics like `home-cluster`, `nanoclaw-remediation`, `longhorn`, or the app's name). Note each notable outcome in the same turn it lands, kind success, fail, fact or decision, in a sentence or two. Keep the `focus` slot of your current topic up to date with mind_set when the work changes, and promote durable facts with remember. `memory/` stays the place for open items. Never store tokens or secret values.
