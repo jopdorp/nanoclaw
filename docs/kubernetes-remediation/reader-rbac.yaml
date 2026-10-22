@@ -1,0 +1,181 @@
+# Read-only identity for the bot itself; writes go only through the approval-gated executor.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nanoclaw-remediator-reader-token
+  namespace: nanoclaw-remediator
+  annotations: { kubernetes.io/service-account.name: nanoclaw-remediator-reader }
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: nanoclaw-remediator-reader-cluster-read }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-remediator-cluster-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: nanoclaw-remediator-reader-trivy-read }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-remediator-trivy-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: backups }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: cert-manager }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: duckdns }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: excalidraw }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: excalidraw-room }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: falco }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: gitea }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: hermes }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: kube-node-lease }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: kube-public }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: kube-system }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: logging }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: longhorn-system }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: mail }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: monitoring }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: mpcpi }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: nextcloud }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: openclaw }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: openclaw-private }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: prophet }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: schipperswoning }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: system-upgrade }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: trivy-operator }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: vaultwarden }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: wiki-js }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: nanoclaw-remediator-reader, namespace: wireguard-home }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-read }
+subjects: [{ kind: ServiceAccount, name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }]

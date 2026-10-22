@@ -1,0 +1,27 @@
+# Declarative review input; this is not consumed until both enable-*-review patches are applied.
+apiServer: https://192.168.1.11:6443
+model:
+  provider: codex
+  orchestrator:
+    model: gpt-5.6-sol
+    credential: codex-subscription-oauth
+  subagents:
+    provider: deepseek
+    model: deepseek-chat
+    credential: gateway-managed
+identities:
+  agent:
+    onecliAgent: '<AGENT_GROUP_ID>'
+    kubernetesSecretName: nanoclaw-remediator-kubernetes
+    blockedMethods: [POST, PUT, PATCH, DELETE]
+  executor:
+    onecliAgent: nanoclaw-remediation-executor
+    kubernetesSecretName: nanoclaw-remediator-kubernetes
+  annotator:
+    onecliAgent: nanoclaw-remediation-annotator
+    kubernetesSecretName: nanoclaw-remediation-approver-kubernetes
+runtime:
+  matrixApproverUserId: 'matrix:<FULL_MATRIX_USER_ID>'
+  falcoBearerFile: /run/nanoclaw/falco/bearer
+  approvalRequired: true
+  launchBlockedUntil: [interactive-codex-login, deepseek-routing-proven, codex-provider-installed]

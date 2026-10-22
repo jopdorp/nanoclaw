@@ -1,0 +1,253 @@
+# REVIEW ONLY. Do not apply to HOME until the CEL expressions have passed the
+# adversarial ephemeral-k3s test matrix in approach-2-build-plan.md.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-remediator-workload-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [deployments, statefulsets, daemonsets]
+        scope: Namespaced
+  matchConditions:
+    - name: remediator-service-account
+      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
+  variables:
+    - name: laneANamespaces
+      expression: "['nextcloud', 'mail', 'gitea', 'monitoring', 'wiki-js', 'logging', 'excalidraw', 'excalidraw-room', 'openclaw', 'openclaw-private', 'duckdns', 'hermes', 'mpcpi', 'prophet', 'schipperswoning', 'trivy-operator']"
+    - name: approvalRequiredNamespaces
+      expression: "['vaultwarden', 'wireguard-home']"
+    - name: restartAnnotation
+      expression: "'kubectl.kubernetes.io/restartedAt'"
+    - name: trustedRegistries
+      expression: "['docker.io', 'docker.gitea.com', 'cr.fluentbit.io', 'ghcr.io', 'quay.io', 'registry.k8s.io']"
+    - name: digestImagePattern
+      expression: "'^(docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io)/[a-z0-9]+([._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$'"
+    - name: vaultwardenImagePattern
+      expression: "'^docker[.]io/vaultwarden/server@sha256:[0-9a-f]{64}$'"
+    - name: wireguardImagePattern
+      expression: "'^lscr[.]io/linuxserver/wireguard@sha256:[0-9a-f]{64}$'"
+    - name: newAnnotations
+      expression: "has(object.spec.template.metadata.annotations) ? object.spec.template.metadata.annotations : {}"
+    - name: oldAnnotations
+      expression: "has(oldObject.spec.template.metadata.annotations) ? oldObject.spec.template.metadata.annotations : {}"
+    - name: newObjectAnnotations
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    - name: oldObjectAnnotations
+      expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+    - name: newContainers
+      expression: object.spec.template.spec.containers
+    - name: oldContainers
+      expression: oldObject.spec.template.spec.containers
+    - name: newInitContainers
+      expression: "has(object.spec.template.spec.initContainers) ? object.spec.template.spec.initContainers : []"
+    - name: oldInitContainers
+      expression: "has(oldObject.spec.template.spec.initContainers) ? oldObject.spec.template.spec.initContainers : []"
+    - name: isVaultwarden
+      expression: request.namespace == 'vaultwarden' && request.resource.resource == 'deployments' && object.metadata.name == 'vaultwarden'
+    - name: isWireguard
+      expression: request.namespace == 'wireguard-home' && request.resource.resource == 'deployments' && object.metadata.name == 'wireguard'
+  validations:
+    - expression: request.namespace in variables.laneANamespaces || variables.isVaultwarden || variables.isWireguard
+      message: namespace is outside the approved remediation lanes
+    - expression: request.namespace != 'vaultwarden' || variables.isVaultwarden
+      message: only the vaultwarden Deployment is writable in namespace vaultwarden
+    - expression: request.namespace != 'wireguard-home' || variables.isWireguard
+      message: only the wireguard Deployment is writable in namespace wireguard-home
+    - expression: >-
+        !(request.namespace in variables.approvalRequiredNamespaces) ||
+        (has(oldObject.metadata.annotations) &&
+         'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations &&
+         oldObject.metadata.annotations['remediation.nanoclaw.io/approval-id'].matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'))
+      message: always-ask remediation requires a proxy-verified per-action Matrix approval annotation
+    - expression: >-
+        dyn(object).all(k, k in ['metadata', 'spec'] || (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
+        dyn(oldObject).all(k, k in ['metadata', 'spec'] || (k in dyn(object) && dyn(oldObject)[k] == dyn(object)[k]))
+      message: only spec may change
+    - expression: >-
+        dyn(object.metadata).all(k, k in ['annotations', 'generation', 'managedFields', 'resourceVersion'] || (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
+        dyn(oldObject.metadata).all(k, k in ['annotations', 'generation', 'managedFields', 'resourceVersion'] || (k in dyn(object.metadata) && dyn(oldObject.metadata)[k] == dyn(object.metadata)[k]))
+      message: workload metadata is immutable
+    - expression: >-
+        variables.newObjectAnnotations.all(k, (request.resource.resource == 'daemonsets' && k == 'deprecated.daemonset.template.generation') || (k in variables.oldObjectAnnotations && variables.newObjectAnnotations[k] == variables.oldObjectAnnotations[k])) &&
+        variables.oldObjectAnnotations.all(k, (request.resource.resource == 'daemonsets' && k == 'deprecated.daemonset.template.generation') || (k in variables.newObjectAnnotations && variables.oldObjectAnnotations[k] == variables.newObjectAnnotations[k]))
+      message: workload annotations are immutable
+    - expression: >-
+        dyn(object.spec).all(k, k in ['replicas', 'template'] || (k in dyn(oldObject.spec) && dyn(object.spec)[k] == dyn(oldObject.spec)[k])) &&
+        dyn(oldObject.spec).all(k, k in ['replicas', 'template'] || (k in dyn(object.spec) && dyn(oldObject.spec)[k] == dyn(object.spec)[k]))
+      message: only replicas and the pod template may change; selectors are immutable
+    - expression: >-
+        dyn(object.spec.template).all(k, k in ['metadata', 'spec'] || (k in dyn(oldObject.spec.template) && dyn(object.spec.template)[k] == dyn(oldObject.spec.template)[k])) &&
+        dyn(oldObject.spec.template).all(k, k in ['metadata', 'spec'] || (k in dyn(object.spec.template) && dyn(oldObject.spec.template)[k] == dyn(object.spec.template)[k]))
+      message: only pod-template metadata and spec may change
+    - expression: >-
+        dyn(object.spec.template.metadata).all(k, k == 'annotations' || (k in dyn(oldObject.spec.template.metadata) && dyn(object.spec.template.metadata)[k] == dyn(oldObject.spec.template.metadata)[k])) &&
+        dyn(oldObject.spec.template.metadata).all(k, k == 'annotations' || (k in dyn(object.spec.template.metadata) && dyn(oldObject.spec.template.metadata)[k] == dyn(object.spec.template.metadata)[k]))
+      message: pod labels and other pod metadata are immutable
+    - expression: >-
+        variables.newAnnotations.all(k, k == variables.restartAnnotation || (k in variables.oldAnnotations && variables.newAnnotations[k] == variables.oldAnnotations[k])) &&
+        variables.oldAnnotations.all(k, k == variables.restartAnnotation || (k in variables.newAnnotations && variables.oldAnnotations[k] == variables.newAnnotations[k]))
+      message: only the kubectl restart annotation may change
+    - expression: >-
+        dyn(object.spec.template.spec).all(k, k in ['containers', 'initContainers'] || (k in dyn(oldObject.spec.template.spec) && dyn(object.spec.template.spec)[k] == dyn(oldObject.spec.template.spec)[k])) &&
+        dyn(oldObject.spec.template.spec).all(k, k in ['containers', 'initContainers'] || (k in dyn(object.spec.template.spec) && dyn(oldObject.spec.template.spec)[k] == dyn(object.spec.template.spec)[k]))
+      message: volumes, serviceAccountName, securityContext, hostNetwork, hostPID, hostIPC and all other pod spec fields are immutable
+    - expression: >-
+        variables.newContainers.size() == variables.oldContainers.size() &&
+        variables.newContainers.map(c, c.name) == variables.oldContainers.map(c, c.name) &&
+        variables.newContainers.all(c, variables.oldContainers.exists(oc, oc.name == c.name &&
+          dyn(c).all(k, k == 'image' || (k in dyn(oc) && dyn(c)[k] == dyn(oc)[k])) &&
+          dyn(oc).all(k, k == 'image' || (k in dyn(c) && dyn(oc)[k] == dyn(c)[k]))))
+      message: container count/order/names, env, envFrom, volumeMounts, securityContext, hostPort and all fields other than image are immutable
+    - expression: >-
+        variables.newInitContainers.size() == variables.oldInitContainers.size() &&
+        variables.newInitContainers.map(c, c.name) == variables.oldInitContainers.map(c, c.name) &&
+        variables.newInitContainers.all(c, variables.oldInitContainers.exists(oc, oc.name == c.name &&
+          dyn(c).all(k, k == 'image' || (k in dyn(oc) && dyn(c)[k] == dyn(oc)[k])) &&
+          dyn(oc).all(k, k == 'image' || (k in dyn(c) && dyn(oc)[k] == dyn(c)[k]))))
+      message: init-container count/order/names, env, envFrom, volumeMounts, securityContext, hostPort and all fields other than image are immutable
+    - expression: "!has(dyn(object.spec).replicas) || (dyn(object.spec).replicas >= 0 && dyn(object.spec).replicas <= 10)"
+      message: replicas must be between 0 and 10
+    - expression: >-
+        variables.isVaultwarden || variables.isWireguard || variables.newContainers.all(c,
+          variables.oldContainers.exists(oc, oc.name == c.name &&
+            (c.image == oc.image ||
+              (c.image.matches(variables.digestImagePattern) &&
+               c.image.split('@')[0] ==
+                 (variables.trustedRegistries.exists(r, oc.image.startsWith(r + '/'))
+                   ? oc.image.split('@')[0].split(':')[0]
+                   : 'docker.io/' + oc.image.split('@')[0].split(':')[0])))))
+      message: a new container image must retain its repository and use a trusted registry sha256 digest
+    - expression: >-
+        variables.isVaultwarden || variables.isWireguard || variables.newInitContainers.all(c,
+          variables.oldInitContainers.exists(oc, oc.name == c.name &&
+            (c.image == oc.image ||
+              (c.image.matches(variables.digestImagePattern) &&
+               c.image.split('@')[0] ==
+                 (variables.trustedRegistries.exists(r, oc.image.startsWith(r + '/'))
+                   ? oc.image.split('@')[0].split(':')[0]
+                   : 'docker.io/' + oc.image.split('@')[0].split(':')[0])))))
+      message: a new init-container image must retain its repository and use a trusted registry sha256 digest
+    - expression: >-
+        !variables.isVaultwarden ||
+        (((!has(dyn(object.spec).replicas) && !has(dyn(oldObject.spec).replicas)) ||
+          (has(dyn(object.spec).replicas) && has(dyn(oldObject.spec).replicas) && dyn(object.spec).replicas == dyn(oldObject.spec).replicas)) &&
+         variables.newAnnotations == variables.oldAnnotations &&
+         variables.newInitContainers.map(c, c.image) == variables.oldInitContainers.map(c, c.image) &&
+         variables.newContainers.exists(c, c.name == 'vaultwarden' && c.image.matches(variables.vaultwardenImagePattern)) &&
+         variables.newContainers.all(c, c.name == 'vaultwarden' ||
+           variables.oldContainers.exists(oc, oc.name == c.name && c.image == oc.image)))
+      message: vaultwarden permits only its vaultwarden container image to change to docker.io/vaultwarden/server by sha256 digest
+    - expression: >-
+        !variables.isWireguard ||
+        (((!has(dyn(object.spec).replicas) && !has(dyn(oldObject.spec).replicas)) ||
+          (has(dyn(object.spec).replicas) && has(dyn(oldObject.spec).replicas) && dyn(object.spec).replicas == dyn(oldObject.spec).replicas)) &&
+         variables.newAnnotations == variables.oldAnnotations &&
+         variables.newInitContainers.map(c, c.image) == variables.oldInitContainers.map(c, c.image) &&
+         variables.newContainers.exists(c, c.name == 'wireguard' && c.image.matches(variables.wireguardImagePattern)) &&
+         variables.newContainers.all(c, c.name == 'wireguard' ||
+           variables.oldContainers.exists(oc, oc.name == c.name && c.image == oc.image)))
+      message: wireguard-home permits only its wireguard container image to change to lscr.io/linuxserver/wireguard by sha256 digest
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-remediator-workload-guard
+spec:
+  policyName: nanoclaw-remediator-workload-guard
+  validationActions: [Deny, Audit]
+---
+# Scale is a distinct subresource and must not bypass the workload policy.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-remediator-scale-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [deployments/scale, statefulsets/scale]
+        scope: Namespaced
+  matchConditions:
+    - name: remediator-service-account
+      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
+  variables:
+    - name: laneANamespaces
+      expression: "['nextcloud', 'mail', 'gitea', 'monitoring', 'wiki-js', 'logging', 'excalidraw', 'excalidraw-room', 'openclaw', 'openclaw-private', 'duckdns', 'hermes', 'mpcpi', 'prophet', 'schipperswoning', 'trivy-operator']"
+  validations:
+    - expression: request.namespace in variables.laneANamespaces
+      message: scale is allowed only in Lane A namespaces
+    - expression: >-
+        dyn(object).all(k, k == 'spec' || (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
+        dyn(oldObject).all(k, k == 'spec' || (k in dyn(object) && dyn(oldObject)[k] == dyn(object)[k]))
+      message: only scale spec may change
+    - expression: >-
+        dyn(object.spec).all(k, k == 'replicas' || (k in dyn(oldObject.spec) && dyn(object.spec)[k] == dyn(oldObject.spec)[k])) &&
+        dyn(oldObject.spec).all(k, k == 'replicas' || (k in dyn(object.spec) && dyn(oldObject.spec)[k] == dyn(object.spec)[k]))
+      message: only spec.replicas may change
+    - expression: "!has(dyn(object.spec).replicas) || (dyn(object.spec).replicas >= 0 && dyn(object.spec).replicas <= 10)"
+      message: replicas must be between 0 and 10
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-remediator-scale-guard
+spec:
+  policyName: nanoclaw-remediator-scale-guard
+  validationActions: [Deny, Audit]
+---
+# This static gate is necessary but not sufficient: the trusted proxy must
+# verify the approval ID against a once-only Matrix approval bound to the exact
+# UID, resourceVersion and expiry, add the annotation with its own identity,
+# install the short-lived delete binding, issue the delete, and remove binding.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-remediator-storage-delete-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [DELETE]
+        resources: [persistentvolumeclaims, persistentvolumes]
+  matchConditions:
+    - name: remediator-service-account
+      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
+  validations:
+    - expression: request.resource.resource != 'persistentvolumeclaims' || request.namespace != 'backups'
+      message: PVC deletion is forbidden in namespace backups
+    - expression: >-
+        has(oldObject.metadata.annotations) &&
+        'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations &&
+        oldObject.metadata.annotations['remediation.nanoclaw.io/approval-id'].matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      message: PV/PVC deletion requires a proxy-verified per-action Matrix approval annotation
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-remediator-storage-delete-guard
+spec:
+  policyName: nanoclaw-remediator-storage-delete-guard
+  validationActions: [Deny, Audit]
+
+# PSA inventory, read-only inspection on 2026-10-21:
+# - restricted enforce is set only on nanoclaw-remediator in home-k3s-rbac.yaml.
+# - all current Lane A/always-ask workload namespaces are exceptions until hardened:
+#   nextcloud, mail, gitea, monitoring, wiki-js, logging, excalidraw,
+#   excalidraw-room, openclaw, openclaw-private, duckdns, hermes, mpcpi, prophet,
+#   schipperswoning, trivy-operator, vaultwarden, and wireguard-home.
+# - every namespace above has at least allowPrivilegeEscalation/seccomp gaps;
+#   falco, gitea, logging, kube-system, longhorn-system, openclaw-private, and
+#   wireguard-home also use privileged, hostPath, host namespaces, or host caps.

@@ -1,0 +1,57 @@
+# REVIEW ONLY. Apply only for the two user-owned interactive logins, then delete.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nanoclaw-provider-login
+  namespace: nanoclaw-remediator
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels: { app: nanoclaw-provider-login }
+    spec:
+      serviceAccountName: nanoclaw-session
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: login
+          image: registry.prophet.jopdorp.nl/nanoclaw/remediation-provider-login@sha256:42b30c18e41d7cbd4e1438dad5ef3be50b800405aef6e68ad729bff22147126a
+          imagePullPolicy: IfNotPresent
+          command: [sleep]
+          args: ['3600']
+          workingDir: /opt/nanoclaw
+          env:
+            - { name: HOME, value: /home/node }
+            - { name: NANOCLAW_GATEWAY_PROVIDER, value: onecli }
+            - { name: ONECLI_URL, value: http://onecli.nanoclaw-remediator.svc:10254 }
+            - name: ONECLI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nanoclaw-runtime
+                  key: onecli-api-key
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: home, mountPath: /home/node }
+            - { name: setup-data, mountPath: /opt/nanoclaw/data }
+            - { name: setup-logs, mountPath: /opt/nanoclaw/logs }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: home
+          emptyDir: { sizeLimit: 256Mi }
+        - name: setup-data
+          emptyDir: { sizeLimit: 16Mi }
+        - name: setup-logs
+          emptyDir: { sizeLimit: 16Mi }
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }

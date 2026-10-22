@@ -1,0 +1,148 @@
+# REVIEW ONLY. Supplements, but does not modify, admission-policy.yaml.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-remediation-approver-annotation
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [daemonsets, deployments, statefulsets]
+        scope: Namespaced
+      - apiGroups: ['']
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [persistentvolumes, persistentvolumeclaims]
+  matchConditions:
+    - name: approval-controller
+      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediation-approver'
+  variables:
+    - name: laneANamespaces
+      expression: "['nextcloud', 'mail', 'gitea', 'monitoring', 'wiki-js', 'logging', 'excalidraw', 'excalidraw-room', 'openclaw', 'openclaw-private', 'duckdns', 'hermes', 'mpcpi', 'prophet', 'schipperswoning', 'trivy-operator']"
+    - name: key
+      expression: "'remediation.nanoclaw.io/approval-id'"
+    - name: newAnnotations
+      expression: 'has(object.metadata.annotations) ? object.metadata.annotations : {}'
+    - name: oldAnnotations
+      expression: 'has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}'
+  validations:
+    - expression: >-
+        !(request.resource.resource in ['deployments', 'statefulsets', 'daemonsets']) ||
+        request.namespace in variables.laneANamespaces ||
+        (request.namespace == 'vaultwarden' && object.metadata.name == 'vaultwarden') ||
+        (request.namespace == 'wireguard-home' && object.metadata.name == 'wireguard')
+      message: approval annotations on workloads are limited to the reviewed lanes
+    - expression: request.resource.resource != 'persistentvolumeclaims' || request.namespace != 'backups'
+      message: backup PVCs are immutable
+    - expression: >-
+        dyn(object).all(k, k == 'metadata' || (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
+        dyn(oldObject).all(k, k == 'metadata' || (k in dyn(object) && dyn(oldObject)[k] == dyn(object)[k]))
+      message: the approval controller may change only metadata
+    - expression: >-
+        dyn(object.metadata).all(k, k in ['annotations', 'generation', 'managedFields', 'resourceVersion'] ||
+          (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
+        dyn(oldObject.metadata).all(k, k in ['annotations', 'generation', 'managedFields', 'resourceVersion'] ||
+          (k in dyn(object.metadata) && dyn(oldObject.metadata)[k] == dyn(object.metadata)[k]))
+      message: the approval controller may change only the approval annotation
+    - expression: >-
+        variables.newAnnotations.all(k, k == variables.key ||
+          (k in variables.oldAnnotations && variables.newAnnotations[k] == variables.oldAnnotations[k])) &&
+        variables.oldAnnotations.all(k, k == variables.key ||
+          (k in variables.newAnnotations && variables.oldAnnotations[k] == variables.newAnnotations[k]))
+      message: non-approval annotations are immutable
+    - expression: >-
+        !(variables.key in variables.newAnnotations) ||
+        variables.newAnnotations[variables.key].matches('^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+      message: approval annotation must be absent or a lowercase UUID
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-remediation-approver-annotation
+spec:
+  policyName: nanoclaw-remediation-approver-annotation
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-remediation-approver-binding
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [rbac.authorization.k8s.io]
+        apiVersions: [v1]
+        operations: [CREATE, DELETE]
+        resources: [rolebindings, clusterrolebindings]
+  matchConditions:
+    - name: approval-controller
+      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediation-approver'
+  variables:
+    - name: binding
+      expression: "request.operation == 'DELETE' ? oldObject : object"
+    - name: pv
+      expression: request.resource.resource == 'clusterrolebindings'
+  validations:
+    - expression: variables.binding.metadata.name.matches('^nanoclaw-remediation-[0-9a-f-]{36}$')
+      message: temporary binding name must carry the approved plan UUID
+    - expression: >-
+        variables.binding.roleRef.apiGroup == 'rbac.authorization.k8s.io' &&
+        variables.binding.roleRef.kind == 'ClusterRole' &&
+        variables.binding.roleRef.name == (variables.pv
+          ? 'nanoclaw-remediator-human-approved-pv-delete'
+          : 'nanoclaw-remediator-human-approved-pvc-delete')
+      message: temporary binding may grant only the reviewed storage-delete role
+    - expression: >-
+        variables.binding.subjects.size() == 1 &&
+        variables.binding.subjects[0].kind == 'ServiceAccount' &&
+        variables.binding.subjects[0].name == 'nanoclaw-remediator' &&
+        variables.binding.subjects[0].namespace == 'nanoclaw-remediator'
+      message: temporary binding may grant only the remediator ServiceAccount
+    - expression: variables.pv || request.namespace != 'backups'
+      message: backup namespace bindings are forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-remediation-approver-binding
+spec:
+  policyName: nanoclaw-remediation-approver-binding
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-remediation-approved-write
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [daemonsets, deployments, statefulsets]
+        scope: Namespaced
+  matchConditions:
+    - name: remediator-service-account
+      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
+  validations:
+    - expression: >-
+        has(oldObject.metadata.annotations) &&
+        'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations &&
+        oldObject.metadata.annotations['remediation.nanoclaw.io/approval-id'].matches('^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+      message: every remediator write requires a host-installed Matrix approval annotation
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-remediation-approved-write
+spec:
+  policyName: nanoclaw-remediation-approved-write
+  validationActions: [Deny, Audit]

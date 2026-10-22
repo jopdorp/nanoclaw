@@ -125,6 +125,11 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
     chmod +x /usr/local/bin/ncl
 
+# Kubernetes sessions cannot use host bind mounts; bake the two declared
+# runtime surfaces into the image for the Kubernetes driver.
+COPY agent-runner/src /app/src
+COPY skills /app/skills
+
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
@@ -163,3 +168,9 @@ ARG AGENT_RUNNER_LOCK_SHA256=
 LABEL dev.nanoclaw.agent-runner-lock-sha256="${AGENT_RUNNER_LOCK_SHA256}"
 ARG IMAGE_SOURCE=local
 LABEL dev.nanoclaw.image-source="${IMAGE_SOURCE}"
+ARG GIT_COMMIT
+ARG GIT_TREE
+ENV NANOCLAW_GIT_COMMIT="${GIT_COMMIT}"
+ENV NANOCLAW_GIT_TREE="${GIT_TREE}"
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+LABEL dev.nanoclaw.source-tree="${GIT_TREE}"

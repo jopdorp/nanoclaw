@@ -1,0 +1,7 @@
+# REVIEW ONLY. Store the bearer in a Kubernetes Secret; never commit it here.
+config:
+  webhook:
+    address: http://nanoclaw-remediator.nanoclaw-remediator.svc:3000/webhook/kubernetes-falco
+    minimumpriority: warning
+    customHeaders: 'Authorization:Bearer <FALCO_WEBHOOK_BEARER>'
+    checkcert: false

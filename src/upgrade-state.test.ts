@@ -55,6 +55,19 @@ describe('upgrade-state', () => {
     expect(writeUpgradeState({ via: 'test' })).toMatchObject(getCodeIdentity());
   });
 
+  it('uses validated image provenance when the runtime has no Git checkout', () => {
+    const projectRoot = fs.mkdtempSync('/tmp/nanoclaw-image-provenance-');
+    fs.writeFileSync(path.join(projectRoot, 'package.json'), JSON.stringify({ version: '1.2.3' }));
+    vi.stubEnv('NANOCLAW_GIT_COMMIT', 'a'.repeat(40));
+    vi.stubEnv('NANOCLAW_GIT_TREE', 'b'.repeat(40));
+    try {
+      expect(getCodeIdentity(projectRoot)).toEqual({ version: '1.2.3', commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
+    } finally {
+      vi.unstubAllEnvs();
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it('can stamp and validate a recovery marker when Git is unavailable', () => {
     const projectRoot = fs.mkdtempSync('/tmp/nanoclaw-no-git-');
     fs.writeFileSync(path.join(projectRoot, 'package.json'), JSON.stringify({ version: '1.2.3' }));

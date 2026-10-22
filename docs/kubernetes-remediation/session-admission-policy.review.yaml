@@ -1,0 +1,77 @@
+# REVIEW ONLY. Supplemental to admission-policy.yaml; does not change target-workload policy.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-session-job-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [batch]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [jobs]
+        scope: Namespaced
+  matchConditions:
+    - name: orchestrator-only
+      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-orchestrator'
+  validations:
+    - expression: request.namespace == 'nanoclaw-remediator'
+      message: session Jobs are confined to nanoclaw-remediator
+    - expression: >-
+        has(object.metadata.labels) &&
+        object.metadata.labels['nanoclaw-role'] == 'agent' &&
+        ['nanoclaw-install', 'nanoclaw-group', 'nanoclaw-session'].all(k, k in object.metadata.labels)
+      message: session Jobs require canonical NanoClaw identity labels
+    - expression: >-
+        object.spec.template.spec.serviceAccountName == 'nanoclaw-session' &&
+        has(object.spec.template.spec.automountServiceAccountToken) &&
+        object.spec.template.spec.automountServiceAccountToken == false
+      message: session Jobs must use the tokenless nanoclaw-session ServiceAccount
+    - expression: >-
+        object.spec.template.spec.restartPolicy == 'Never' &&
+        (!has(object.spec.template.spec.hostNetwork) || object.spec.template.spec.hostNetwork == false) &&
+        (!has(object.spec.template.spec.hostPID) || object.spec.template.spec.hostPID == false) &&
+        (!has(object.spec.template.spec.hostIPC) || object.spec.template.spec.hostIPC == false)
+      message: session Jobs cannot use host namespaces
+    - expression: >-
+        has(object.spec.template.spec.securityContext) &&
+        object.spec.template.spec.securityContext.runAsNonRoot == true &&
+        has(object.spec.template.spec.securityContext.seccompProfile) &&
+        object.spec.template.spec.securityContext.seccompProfile.type == 'RuntimeDefault'
+      message: session Jobs require non-root RuntimeDefault pod security
+    - expression: >-
+        object.spec.template.spec.containers.all(c,
+          has(c.securityContext) &&
+          c.securityContext.allowPrivilegeEscalation == false &&
+          (!has(c.securityContext.privileged) || c.securityContext.privileged == false) &&
+          has(c.securityContext.capabilities) &&
+          c.securityContext.capabilities.drop.exists(cap, cap == 'ALL') &&
+          (!has(c.ports) || c.ports.all(p, !has(p.hostPort))))
+      message: every session container must drop capabilities and forbid escalation, privilege, and host ports
+    - expression: >-
+        !has(object.spec.template.spec.initContainers) &&
+        !has(object.spec.template.spec.ephemeralContainers)
+      message: session Jobs cannot add init or ephemeral containers
+    - expression: >-
+        !has(object.spec.template.spec.volumes) ||
+        object.spec.template.spec.volumes.all(v,
+          (has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == 'nanoclaw-state') ||
+          has(v.emptyDir))
+      message: session Jobs may mount only nanoclaw-state PVC subpaths and emptyDir scratch
+    - expression: >-
+        object.spec.template.spec.containers.all(c,
+          c.image.matches('^[^[:space:]]+@sha256:[0-9a-f]{64}$'))
+      message: session container images must be digest pinned
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-session-job-guard
+spec:
+  policyName: nanoclaw-session-job-guard
+  validationActions: [Deny, Audit]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: nanoclaw-remediator

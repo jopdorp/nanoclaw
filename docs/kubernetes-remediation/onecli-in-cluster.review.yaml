@@ -1,0 +1,157 @@
+# REVIEW ONLY. Create Secret onecli-runtime first; do not commit its values.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: onecli
+  namespace: nanoclaw-remediator
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: onecli-data
+  namespace: nanoclaw-remediator
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: onecli-postgres
+  namespace: nanoclaw-remediator
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: onecli-postgres
+  namespace: nanoclaw-remediator
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: onecli-postgres }
+  template:
+    metadata:
+      labels: { app: onecli-postgres }
+    spec:
+      serviceAccountName: onecli
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: docker.io/library/postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: onecli-runtime, key: POSTGRES_USER } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: onecli-runtime, key: POSTGRES_PASSWORD } }
+            - name: POSTGRES_DB
+              valueFrom: { secretKeyRef: { name: onecli-runtime, key: POSTGRES_DB } }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          readinessProbe:
+            exec: { command: [sh, -c, 'pg_isready -U "$POSTGRES_USER"'] }
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: database, mountPath: /var/lib/postgresql }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: '1', memory: 1Gi }
+      volumes:
+        - name: database
+          persistentVolumeClaim: { claimName: onecli-postgres }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: onecli-postgres
+  namespace: nanoclaw-remediator
+spec:
+  selector: { app: onecli-postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: onecli
+  namespace: nanoclaw-remediator
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: onecli }
+  template:
+    metadata:
+      labels: { app: onecli }
+    spec:
+      serviceAccountName: onecli
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: onecli
+          image: ghcr.io/onecli/onecli@sha256:8d4a3300e915259a2fcff13614ecd7394bfd35c75d6a64d69f28a28dd23f30fe
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: APP_URL, value: http://127.0.0.1:10254 }
+            - { name: INTERNAL_API_URL, value: http://127.0.0.1:10254 }
+            - { name: GATEWAY_API_URL, value: http://onecli.nanoclaw-remediator.svc:10255 }
+            # Upstream TLS uses bundled web roots, not SSL_CERT_FILE; k3s's CA is self-signed. Scoped to the API host.
+            - { name: GATEWAY_SKIP_VERIFY_HOSTS, value: '192.168.1.11' }
+          envFrom:
+            - secretRef: { name: onecli-runtime }
+          ports:
+            - { name: api, containerPort: 10254 }
+            - { name: gateway, containerPort: 10255 }
+          readinessProbe:
+            httpGet: { path: /v1/health, port: api }
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /app/data }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: '2', memory: 2Gi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: onecli-data }
+        - name: tmp
+          emptyDir: { sizeLimit: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: onecli
+  namespace: nanoclaw-remediator
+spec:
+  selector: { app: onecli }
+  ports:
+    - { name: api, port: 10254, targetPort: api }
+    - { name: gateway, port: 10255, targetPort: gateway }

@@ -1,0 +1,487 @@
+# REVIEW ONLY. Do not apply without admission-policy.yaml and the policy proxy
+# described in approach-2-build-plan.md.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nanoclaw-remediator
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.35
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.35
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.35
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nanoclaw-remediator
+  namespace: nanoclaw-remediator
+automountServiceAccountToken: false
+---
+# Only resources that are genuinely cluster-scoped belong here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nanoclaw-remediator-cluster-read
+rules:
+  - apiGroups: [""]
+    resources: [nodes, persistentvolumes]
+    verbs: [get, list, watch]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [get, list, watch]
+  - apiGroups: [aquasecurity.github.io]
+    resources: [clustervulnerabilityreports]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nanoclaw-remediator-cluster-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nanoclaw-remediator-cluster-read
+subjects:
+  - kind: ServiceAccount
+    name: nanoclaw-remediator
+    namespace: nanoclaw-remediator
+---
+# REQUIRES PER-ACTION HUMAN APPROVAL. This capability has no binding by
+# default. A trusted host process may create a short-lived RoleBinding only
+# after Matrix approval and the proxy has installed the approval annotation.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nanoclaw-remediator-human-approved-pvc-delete
+  labels:
+    remediation.nanoclaw.io/human-approval: required
+rules:
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [delete]
+---
+# REQUIRES PER-ACTION HUMAN APPROVAL. This capability has no binding by
+# default. PV names are the reviewed 2026-10-21 HOME inventory; a new PV needs
+# a newly reviewed, name-scoped capability.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nanoclaw-remediator-human-approved-pv-delete
+  labels:
+    remediation.nanoclaw.io/human-approval: required
+rules:
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    resourceNames:
+      - pvc-12c7a0fa-73cb-469c-bac1-0bfdf2a6cdec
+      - pvc-139387bd-c906-434e-bcf7-ad4a9ccb68e5
+      - pvc-213b7efc-74fd-44d8-bdc7-2670001cd19f
+      - pvc-2726d23a-dd02-4f93-8595-1f16c9b65444
+      - pvc-3ac80f11-40a3-4bc6-bd38-354600533318
+      - pvc-48f26a2c-0069-4c4a-8b06-4d4454b16cff
+      - pvc-4b5f5efe-d6b8-4e8c-b828-e1ab8f49baed
+      - pvc-50171553-a2c5-4ab0-993a-3941a4873217
+      - pvc-641f8fab-523c-4c9e-a0d1-a726a6d46352
+      - pvc-710e32be-ee3b-4698-b2d3-3fb10c22cb47
+      - pvc-98ac57cc-385a-46f4-81cb-d12f88d2e879
+      - pvc-bf09a202-1a8b-4635-8dd2-c29ca0e14071
+      - pvc-c5ad30cd-8718-4610-b3d1-de8635228ce4
+      - pvc-c936cc0d-f377-4074-bbb1-9772c9e5b0e4
+      - pvc-c9f69649-d742-492a-bd9d-ff33877f83b6
+      - pvc-ed4111ff-8bec-4676-9ec0-a187c9842e66
+      - pvc-f41b4b55-e0b6-4111-a6f4-01e6e7534e72
+      - pvc-fdf93cb7-ba2a-47c6-9a17-a3b92da3bcd3
+    verbs: [delete]
+---
+# Namespaced reads are duplicated deliberately: there is no ClusterRole with
+# namespaced read permissions that could later be bound cluster-wide by error.
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata:
+      name: nanoclaw-remediator-read
+      namespace: nextcloud
+    rules: &namespaced-read-rules
+      - apiGroups: [""]
+        resources:
+          [
+            configmaps,
+            endpoints,
+            events,
+            limitranges,
+            persistentvolumeclaims,
+            pods,
+            pods/log,
+            resourcequotas,
+            serviceaccounts,
+            services,
+          ]
+        verbs: [get, list, watch]
+      - apiGroups: [apps]
+        resources: [controllerrevisions, daemonsets, deployments, replicasets, statefulsets]
+        verbs: [get, list, watch]
+      - apiGroups: [batch]
+        resources: [cronjobs, jobs]
+        verbs: [get, list, watch]
+      - apiGroups: [autoscaling]
+        resources: [horizontalpodautoscalers]
+        verbs: [get, list, watch]
+      - apiGroups: [policy]
+        resources: [poddisruptionbudgets]
+        verbs: [get, list, watch]
+      - apiGroups: [networking.k8s.io]
+        resources: [ingresses, networkpolicies]
+        verbs: [get, list, watch]
+      - apiGroups: [discovery.k8s.io]
+        resources: [endpointslices]
+        verbs: [get, list, watch]
+      - apiGroups: [rbac.authorization.k8s.io]
+        resources: [rolebindings, roles]
+        verbs: [get, list, watch]
+      - apiGroups: [cert-manager.io]
+        resources: [certificaterequests, certificates, issuers]
+        verbs: [get, list, watch]
+      - apiGroups: [acme.cert-manager.io]
+        resources: [challenges, orders]
+        verbs: [get, list, watch]
+      - apiGroups: [traefik.io]
+        resources:
+          [
+            ingressroutes,
+            ingressroutetcps,
+            ingressrouteudps,
+            middlewares,
+            middlewaretcps,
+            serverstransports,
+            serverstransporttcps,
+            tlsoptions,
+            tlsstores,
+            traefikservices,
+          ]
+        verbs: [get, list, watch]
+      - apiGroups: [aquasecurity.github.io]
+        resources: [vulnerabilityreports]
+        verbs: [get, list, watch]
+      - apiGroups: [longhorn.io]
+        resources:
+          [
+            backingimagedatasources,
+            backingimagemanagers,
+            backingimages,
+            backupbackingimages,
+            backups,
+            backuptargets,
+            backupvolumes,
+            enginefrontends,
+            engineimages,
+            engines,
+            instancemanagers,
+            instancemanagerupgradecontrols,
+            instancemanagerupgrades,
+            nodes,
+            orphans,
+            recurringjobs,
+            replicas,
+            settings,
+            shardgroups,
+            shards,
+            sharemanagers,
+            snapshotgroups,
+            snapshots,
+            supportbundles,
+            systembackups,
+            systemrestores,
+            volumeattachments,
+            volumes,
+          ]
+        verbs: [get, list, watch]
+  - &read-binding
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: { name: nanoclaw-remediator-read, namespace: nextcloud }
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: Role
+      name: nanoclaw-remediator-read
+    subjects: &remediator-subject
+      - kind: ServiceAccount
+        name: nanoclaw-remediator
+        namespace: nanoclaw-remediator
+  - &read-role
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata: { name: nanoclaw-remediator-read, namespace: mail }
+    rules: *namespaced-read-rules
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: mail }
+  - <<: *read-role
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata: { name: nanoclaw-remediator-read, namespace: gitea }
+    rules: *namespaced-read-rules
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: gitea }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: monitoring }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: monitoring }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: wiki-js }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: wiki-js }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: logging }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: logging }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: excalidraw }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: excalidraw }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: excalidraw-room }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: excalidraw-room }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: openclaw }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: openclaw }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: openclaw-private }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: openclaw-private }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: duckdns }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: duckdns }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: hermes }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: hermes }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: mpcpi }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: mpcpi }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: prophet }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: prophet }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: schipperswoning }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: schipperswoning }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: trivy-operator }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: trivy-operator }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: vaultwarden }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: vaultwarden }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: kube-system }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: kube-system }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: kube-node-lease }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: kube-node-lease }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: kube-public }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: kube-public }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: longhorn-system }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: longhorn-system }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: cert-manager }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: cert-manager }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: falco }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: falco }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: system-upgrade }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: system-upgrade }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: wireguard-home }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: wireguard-home }
+  - <<: *read-role
+    metadata: { name: nanoclaw-remediator-read, namespace: backups }
+  - <<: *read-binding
+    metadata: { name: nanoclaw-remediator-read, namespace: backups }
+---
+# Lane A workload writes. PVC deletion is intentionally absent.
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata:
+      name: nanoclaw-remediator-lane-a
+      namespace: nextcloud
+    rules: &lane-a-rules
+      - apiGroups: [apps]
+        resources: [daemonsets, deployments, statefulsets]
+        verbs: [patch]
+      - apiGroups: [apps]
+        resources: [deployments/scale, statefulsets/scale]
+        verbs: [get, patch]
+  - &lane-a-binding
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: nextcloud }
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: Role
+      name: nanoclaw-remediator-lane-a
+    subjects:
+      - kind: ServiceAccount
+        name: nanoclaw-remediator
+        namespace: nanoclaw-remediator
+  - &lane-a-role
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: mail }
+    rules: *lane-a-rules
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: mail }
+  - <<: *lane-a-role
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: gitea }
+    rules: *lane-a-rules
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: gitea }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: monitoring }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: monitoring }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: wiki-js }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: wiki-js }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: logging }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: logging }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: excalidraw }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: excalidraw }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: excalidraw-room }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: excalidraw-room }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: openclaw }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: openclaw }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: openclaw-private }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: openclaw-private }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: duckdns }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: duckdns }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: hermes }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: hermes }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: mpcpi }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: mpcpi }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: prophet }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: prophet }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: schipperswoning }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: schipperswoning }
+  - <<: *lane-a-role
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: trivy-operator }
+  - <<: *lane-a-binding
+    metadata: { name: nanoclaw-remediator-lane-a, namespace: trivy-operator }
+---
+# Always-ask access is name-scoped; admission-policy.yaml requires approval and
+# permits only the official Vaultwarden image by digest.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nanoclaw-remediator-always-ask
+  namespace: vaultwarden
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [vaultwarden]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nanoclaw-remediator-always-ask
+  namespace: vaultwarden
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nanoclaw-remediator-always-ask
+subjects:
+  - kind: ServiceAccount
+    name: nanoclaw-remediator
+    namespace: nanoclaw-remediator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nanoclaw-remediator-always-ask
+  namespace: wireguard-home
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [wireguard]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nanoclaw-remediator-always-ask
+  namespace: wireguard-home
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nanoclaw-remediator-always-ask
+subjects:
+  - kind: ServiceAccount
+    name: nanoclaw-remediator
+    namespace: nanoclaw-remediator
+---
+# The Trivy watcher lists reports across all namespaces; scan metadata only, read-only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nanoclaw-remediator-trivy-read
+rules:
+  - apiGroups: [aquasecurity.github.io]
+    resources: [vulnerabilityreports, clustervulnerabilityreports]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nanoclaw-remediator-trivy-read
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-remediator-trivy-read }
+subjects:
+  - { kind: ServiceAccount, name: nanoclaw-remediator, namespace: nanoclaw-remediator }

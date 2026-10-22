@@ -48,6 +48,12 @@ export function getCodeVersion(projectRoot: string = process.cwd()): string {
 
 /** Git identity of the exact checkout the host is about to run. */
 export function getCodeIdentity(projectRoot: string = process.cwd()): CodeIdentity {
+  const commit = process.env.NANOCLAW_GIT_COMMIT;
+  const tree = process.env.NANOCLAW_GIT_TREE;
+  if (/^[0-9a-f]{40}$/.test(commit ?? '') && /^[0-9a-f]{40}$/.test(tree ?? '')) {
+    return { version: getCodeVersion(projectRoot), commit: commit!, tree: tree! };
+  }
+
   const git = (rev: string): string =>
     execFileSync('git', ['rev-parse', '--verify', rev], {
       cwd: projectRoot,

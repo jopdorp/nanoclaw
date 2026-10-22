@@ -1,0 +1,21 @@
+diff --git a/src/modules/index.ts b/src/modules/index.ts
+index 1d35a34..d80d81c 100644
+--- a/src/modules/index.ts
++++ b/src/modules/index.ts
+@@ -25,3 +25,4 @@ import './permissions/index.js';
+ import './agent-to-agent/index.js';
+ import './self-mod/index.js';
+ import './community-portal/index.js';
++import './kubernetes-remediation/index.review.js';
+diff --git a/container/agent-runner/src/mcp-tools/index.ts b/container/agent-runner/src/mcp-tools/index.ts
+index 68a723d..674c947 100644
+--- a/container/agent-runner/src/mcp-tools/index.ts
++++ b/container/agent-runner/src/mcp-tools/index.ts
+@@ -9,6 +9,7 @@ import './core.js';
+ import './interactive.js';
+ import './agents.js';
+ import './self-mod.js';
++import './kubernetes-remediation.review.js';
+ // Module barrel — loads registration modules, including the singular mailbox slot.
+ import '../modules/index.js';
+ import { getAgentMailbox, readMailboxContext } from '../mailbox/index.js';

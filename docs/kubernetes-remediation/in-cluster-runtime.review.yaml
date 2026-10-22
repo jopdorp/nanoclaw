@@ -1,0 +1,209 @@
+# REVIEW ONLY. Requires home-k3s-rbac.yaml to create the restricted namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nanoclaw-orchestrator
+  namespace: nanoclaw-remediator
+automountServiceAccountToken: true
+imagePullSecrets:
+  - name: registry-prophet
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nanoclaw-session
+  namespace: nanoclaw-remediator
+automountServiceAccountToken: false
+imagePullSecrets:
+  - name: registry-prophet
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nanoclaw-session-manager
+  namespace: nanoclaw-remediator
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, delete, get, list, patch, watch]
+  - apiGroups: ['']
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: ['']
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nanoclaw-session-manager
+  namespace: nanoclaw-remediator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nanoclaw-session-manager
+subjects:
+  - kind: ServiceAccount
+    name: nanoclaw-orchestrator
+    namespace: nanoclaw-remediator
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nanoclaw-state
+  namespace: nanoclaw-remediator
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nanoclaw-remediator-orchestrator
+  namespace: nanoclaw-remediator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nanoclaw-remediator-orchestrator
+  template:
+    metadata:
+      labels:
+        app: nanoclaw-remediator-orchestrator
+    spec:
+      serviceAccountName: nanoclaw-orchestrator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: state-layout
+          image: registry.prophet.jopdorp.nl/nanoclaw/remediation-host@sha256:6863cdb59a79c08450f501dd854e2547203874979efc0f6b87bf6d4cf928fb5a
+          # fsGroup makes the volume 2770; OneCLI refuses anything but 0700 for its staged files.
+          command: [sh, -c]
+          args: [mkdir -p /state/data/onecli /state/groups /state/store && chmod 0700 /state/data/onecli]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: state, mountPath: /state }
+      containers:
+        - name: orchestrator
+          image: registry.prophet.jopdorp.nl/nanoclaw/remediation-host@sha256:6863cdb59a79c08450f501dd854e2547203874979efc0f6b87bf6d4cf928fb5a
+          imagePullPolicy: IfNotPresent
+          command: [node]
+          args: [/opt/nanoclaw/dist/index.js]
+          workingDir: /opt/nanoclaw
+          env:
+            - { name: HOME, value: /home/node }
+            - { name: NANOCLAW_RUNTIME_DRIVER, value: kubernetes }
+            - { name: CONTAINER_IMAGE, value: 'registry.prophet.jopdorp.nl/nanoclaw/remediation-agent@sha256:a7eb1d54160ca42c43c35c2ee850007f0738a7b2b6e447c5d2a3490955c64df8' }
+            - { name: NANOCLAW_KUBERNETES_NAMESPACE, value: nanoclaw-remediator }
+            - { name: NANOCLAW_KUBERNETES_SERVICE_ACCOUNT, value: nanoclaw-session }
+            # RWO state volume: sessions co-locate with the host. Drop with an RWX state class.
+            # `onecli run` (remediation k8s calls) defaults to the cloud API without this.
+            - { name: ONECLI_API_HOST, value: http://onecli.nanoclaw-remediator.svc:10254 }
+            - { name: NANOCLAW_KUBERNETES_GATEWAY_HOST, value: onecli.nanoclaw-remediator.svc.cluster.local }
+            - name: NANOCLAW_KUBERNETES_NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            - name: NANOCLAW_KUBERNETES_MOUNTS
+              value: '{"persistentVolumeMounts":[{"hostRoot":"/opt/nanoclaw/data","claimName":"nanoclaw-state","claimSubPath":"data"},{"hostRoot":"/opt/nanoclaw/groups","claimName":"nanoclaw-state","claimSubPath":"groups"}],"bakedSurfaces":[{"hostRoot":"/opt/nanoclaw/container/agent-runner/src","containerRoot":"/app/src"},{"hostRoot":"/opt/nanoclaw/container/skills","containerRoot":"/app/skills"}]}'
+            - { name: NANOCLAW_GATEWAY_PROVIDER, value: onecli }
+            - { name: ONECLI_URL, value: http://onecli.nanoclaw-remediator.svc:10254 }
+            - { name: ONECLI_GATEWAY_URL, value: http://onecli.nanoclaw-remediator.svc:10255 }
+            - { name: ONECLI_GATEWAY_CONTAINER, value: onecli }
+            - { name: NODE_EXTRA_CA_CERTS, value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt }
+            - { name: WEBHOOK_PORT, value: '3000' }
+            - name: ONECLI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nanoclaw-runtime
+                  key: onecli-api-key
+            - name: MATRIX_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nanoclaw-runtime
+                  key: matrix-access-token
+          ports:
+            - { name: webhook, containerPort: 3000 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: state, mountPath: /opt/nanoclaw/data, subPath: data }
+            - { name: state, mountPath: /opt/nanoclaw/groups, subPath: groups }
+            - { name: state, mountPath: /opt/nanoclaw/store, subPath: store }
+            - { name: tmp, mountPath: /tmp }
+            - { name: onecli-home, mountPath: /home/node/.onecli }
+            - { name: falco-bearer, mountPath: /run/nanoclaw/falco, readOnly: true }
+            # Channel adapters read creds from /opt/nanoclaw/.env, not process env.
+            - { name: dotenv, mountPath: /opt/nanoclaw/.env, subPath: .env, readOnly: true }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: '2', memory: 2Gi }
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: state
+          persistentVolumeClaim: { claimName: nanoclaw-state }
+        - name: tmp
+          emptyDir: { sizeLimit: 1Gi }
+        - name: onecli-home
+          emptyDir: {}
+        - name: dotenv
+          secret: { secretName: nanoclaw-dotenv, defaultMode: 256 }
+        - name: falco-bearer
+          secret:
+            secretName: nanoclaw-runtime
+            items:
+              - { key: falco-webhook-bearer, path: bearer }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nanoclaw-remediator
+  namespace: nanoclaw-remediator
+spec:
+  selector:
+    app: nanoclaw-remediator-orchestrator
+  ports:
+    - { name: falco-webhook, port: 3000, targetPort: webhook }
+---
+# Session pods can resolve DNS and reach OneCLI; they have no direct internet or API-server path.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nanoclaw-session-egress
+  namespace: nanoclaw-remediator
+spec:
+  podSelector:
+    matchLabels:
+      nanoclaw-role: agent
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app: onecli
+      ports:
+        - { protocol: TCP, port: 10255 }

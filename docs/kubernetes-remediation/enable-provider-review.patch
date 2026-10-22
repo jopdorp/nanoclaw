@@ -1,0 +1,39 @@
+diff --git a/src/providers/index.ts b/src/providers/index.ts
+index 5b446d0..32cc861 100644
+--- a/src/providers/index.ts
++++ b/src/providers/index.ts
+@@ -1,4 +1,5 @@
+ import './claude.js';
++import './claude-remediation.review.js';
+ // Host-side provider container-config barrel.
+ // Providers that need host-side container setup (extra mounts, env passthrough,
+ // per-session directories) self-register on import.
+diff --git a/src/provider-contracts/index.ts b/src/provider-contracts/index.ts
+index f9afe73..943d8b8 100644
+--- a/src/provider-contracts/index.ts
++++ b/src/provider-contracts/index.ts
+@@ -1,5 +1,6 @@
+ // Host provider-contract barrel. Optional provider skills append imports here;
+ // provider identity detection continues to inspect src/providers/index.ts only.
+ import './claude.js';
++import './claude-remediation.review.js';
+ 
+ export * from './registry.js';
+diff --git a/container/agent-runner/src/providers/index.ts b/container/agent-runner/src/providers/index.ts
+index 6ee29df..ae35243 100644
+--- a/container/agent-runner/src/providers/index.ts
++++ b/container/agent-runner/src/providers/index.ts
+@@ -3,3 +3,4 @@
+ // level. Skills add a new provider by appending one import line below.
+ 
+ import './claude.js';
++import './claude-remediation.review.js';
+diff --git a/container/agent-runner/src/provider-contracts/index.ts b/container/agent-runner/src/provider-contracts/index.ts
+index cda277e..9d89f69 100644
+--- a/container/agent-runner/src/provider-contracts/index.ts
++++ b/container/agent-runner/src/provider-contracts/index.ts
+@@ -7,3 +7,4 @@
+ // contract (./mock.ts) is imported by the tests that register the mock.
+ 
+ import './claude.js';
++import './claude-remediation.review.js';

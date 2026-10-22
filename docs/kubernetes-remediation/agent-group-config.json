@@ -1,0 +1,13 @@
+{
+  "name": "Kubernetes Remediator",
+  "folder": "kubernetes-remediator",
+  "provider": "codex",
+  "model": "gpt-5.6-sol",
+  "effort": "high",
+  "cli_scope": "disabled",
+  "skills": [],
+  "mcp_servers": {},
+  "packages_apt": [],
+  "packages_npm": [],
+  "additional_mounts": []
+}

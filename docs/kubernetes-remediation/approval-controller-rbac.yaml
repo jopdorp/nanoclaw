@@ -1,0 +1,41 @@
+# REVIEW ONLY. Supplements, but does not modify, home-k3s-rbac.yaml.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nanoclaw-remediation-approver
+  namespace: nanoclaw-remediator
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nanoclaw-remediation-approver
+rules:
+  - apiGroups: [apps]
+    resources: [daemonsets, deployments, statefulsets]
+    verbs: [get, list, patch]
+  - apiGroups: ['']
+    resources: [persistentvolumes, persistentvolumeclaims]
+    verbs: [get, list, patch]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings, clusterrolebindings]
+    verbs: [get, list, create, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    resourceNames:
+      - nanoclaw-remediator-human-approved-pv-delete
+      - nanoclaw-remediator-human-approved-pvc-delete
+    verbs: [bind]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nanoclaw-remediation-approver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nanoclaw-remediation-approver
+subjects:
+  - kind: ServiceAccount
+    name: nanoclaw-remediation-approver
+    namespace: nanoclaw-remediator

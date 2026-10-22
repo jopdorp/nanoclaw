@@ -1,0 +1,13 @@
+{
+  "name": "Kubernetes Remediation Reviewer",
+  "folder": "kubernetes-remediation-reviewer",
+  "provider": "codex",
+  "model": "",
+  "effort": "high",
+  "cli_scope": "disabled",
+  "skills": [],
+  "mcp_servers": {},
+  "packages_apt": [],
+  "packages_npm": [],
+  "additional_mounts": []
+}

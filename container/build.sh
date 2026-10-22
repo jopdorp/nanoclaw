@@ -146,6 +146,12 @@ if [ -n "$LOCK_SHA" ]; then
     BUILD_ARGS+=(--build-arg "AGENT_RUNNER_LOCK_SHA256=$LOCK_SHA")
 fi
 
+GIT_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || true)"
+GIT_TREE="$(git -C "$PROJECT_ROOT" rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+if [ -n "$GIT_COMMIT" ] && [ -n "$GIT_TREE" ]; then
+    BUILD_ARGS+=(--build-arg "GIT_COMMIT=$GIT_COMMIT" --build-arg "GIT_TREE=$GIT_TREE")
+fi
+
 # Docker Hub returns the occasional 5xx on a manifest request (two registry-
 # skills legs went red on one on 2026-09-07 with the code untouched) and BuildKit
 # gives up on the first. Three attempts, ten seconds apart, and only when the
