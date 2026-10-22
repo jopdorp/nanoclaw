@@ -61,22 +61,19 @@ async function onecli<T>(...args: string[]): Promise<T> {
   return (JSON.parse((await exec('onecli', args)).stdout) as { data: T }).data;
 }
 
-/** The agent holds the reader and its model key, never a host identity's Kubernetes token. */
-async function scopeHelperSecrets(agentGroupId: string, apiHost: string): Promise<void> {
+/** Exactly the reader and its model key: OneCLI injects one anthropic-type key, so any other (DeepSeek) shadows the subscription. */
+async function scopeHelperSecrets(agentGroupId: string): Promise<void> {
   const agent = (await onecli<Array<{ id: string; identifier: string }>>('agents', 'list')).find(
     (a) => a.identifier === agentGroupId,
   );
   if (!agent) return;
-  const secrets = await onecli<Array<{ id: string; name: string; hostPattern: string }>>('secrets', 'list');
+  const secrets = await onecli<Array<{ id: string; name: string }>>('secrets', 'list');
   const id = (name: string) => secrets.find((s) => s.name === name)?.id;
   const reader = id('Kubernetes reader');
   const provider = (await getContainerConfig(agentGroupId))?.provider ?? 'claude';
   const model = id(provider === 'claude' ? 'Claude subscription' : 'Codex');
-  const hostTokens = secrets.filter((s) => s.hostPattern === apiHost && s.id !== reader).map((s) => s.id);
   const current = await onecli<string[]>('agents', 'secrets', '--id', agent.id);
-  const wanted = [...new Set([...current.filter((s) => !hostTokens.includes(s)), reader, model])].filter(
-    (s): s is string => !!s,
-  );
+  const wanted = [reader, model].filter((s): s is string => !!s);
   await exec('onecli', ['agents', 'set-secret-mode', '--id', agent.id, '--mode', 'selective']);
   if (wanted.sort().join() !== [...current].sort().join())
     await exec('onecli', ['agents', 'set-secrets', '--id', agent.id, '--secret-ids', wanted.join(',')]);
@@ -131,9 +128,8 @@ export async function startKubernetesRemediation(
   const team = async (groupId: string) =>
     groupId === config.agentGroupId ||
     (await getDestinations(config.agentGroupId)).some((d) => d.target_type === 'agent' && d.target_id === groupId);
-  const apiHost = new URL(config.apiServer).hostname;
   onOneCliAgentEnsured(async (groupId) => {
-    if (groupId !== config.agentGroupId && (await team(groupId))) await scopeHelperSecrets(groupId, apiHost);
+    if (groupId !== config.agentGroupId && (await team(groupId))) await scopeHelperSecrets(groupId);
   });
   registerStandingApprovals({
     approverUserId: config.matrixApproverUserId,
