@@ -256,7 +256,8 @@ export function editValues(text: string, set: HelmValuesPlan['operation']['set']
           : node.type === 'PLAIN' && parseDocument(after).contents?.toJSON() === after
             ? after
             : JSON.stringify(after);
-    result = result.slice(0, node.range[0]) + literal + result.slice(node.range[1]);
+    const end = node.range[1] - Number(result[node.range[1] - 1] === '\n');
+    result = result.slice(0, node.range[0]) + literal + result.slice(end);
   }
   const expected = parseDocument(text);
   for (const { path: dotted, after } of set)
