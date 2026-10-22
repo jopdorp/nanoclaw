@@ -169,8 +169,8 @@ subjects:
   - { kind: ServiceAccount, name: nanoclaw-remediator, namespace: nanoclaw-remediator }
 ---
 # Helm and manifest path. Only the host holds this identity (OneCLI agent
-# nanoclaw-helm); the agent never does. Cluster-scoped writes are limited to the
-# fluent-bit and trivy-operator RBAC, whose rules and subjects admission freezes.
+# nanoclaw-helm); the agent never does. It installs and upgrades whole charts,
+# so it manages the cluster-scoped objects charts bring.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -199,36 +199,29 @@ rules:
     resources: ['*']
     verbs: ['*']
 ---
-# Updating a ClusterRole needs escalate and a binding needs bind on its role, so
-# both are granted on exactly the chart objects. create cannot be name-scoped, so
-# a chart version that adds cluster objects fails and rolls back.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: nanoclaw-helm-cluster-rbac
 rules:
   - apiGroups: [rbac.authorization.k8s.io]
-    resources: [clusterroles]
-    resourceNames:
-      [
-        fluent-bit,
-        trivy-operator,
-        aggregate-config-audit-reports-view,
-        aggregate-exposed-secret-reports-view,
-        aggregate-vulnerability-reports-view,
-      ]
-    verbs: [get, update, patch, escalate]
-  - apiGroups: [rbac.authorization.k8s.io]
-    resources: [clusterroles]
-    resourceNames: [fluent-bit, trivy-operator]
-    verbs: [bind]
-  - apiGroups: [rbac.authorization.k8s.io]
-    resources: [clusterrolebindings]
-    resourceNames: [fluent-bit, trivy-operator]
-    verbs: [get, update, patch]
+    resources: [clusterroles, clusterrolebindings]
+    verbs: ['*']
   - apiGroups: [apiextensions.k8s.io]
     resources: [customresourcedefinitions]
-    verbs: [get, list, watch]
+    verbs: ['*']
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [mutatingwebhookconfigurations, validatingwebhookconfigurations]
+    verbs: ['*']
+  - apiGroups: [apiregistration.k8s.io]
+    resources: [apiservices]
+    verbs: ['*']
+  - apiGroups: [scheduling.k8s.io]
+    resources: [priorityclasses]
+    verbs: ['*']
+  - apiGroups: ['']
+    resources: [namespaces]
+    verbs: [get, list, watch, create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

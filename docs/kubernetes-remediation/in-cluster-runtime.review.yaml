@@ -180,6 +180,7 @@ spec:
             secretName: nanoclaw-runtime
             items:
               - { key: falco-webhook-bearer, path: bearer }
+              - { key: alert-webhook-bearer, path: alerts }
         # 0400 plus fsGroup reads as 0440 root:1000; ssh accepts that because node does not own the key.
         - name: git-deploy-key
           secret: { secretName: orfie-git-deploy-key, defaultMode: 256 }

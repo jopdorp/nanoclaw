@@ -374,8 +374,9 @@ spec:
 ---
 # helm upgrade renders whole charts, so the workload-guard freezes above cannot
 # apply to the nanoclaw-helm identity. Its workload writes keep the namespace
-# allowlist and the digest-only rule for every new or changed image, and it may
-# not mint a token for another ServiceAccount through a token Secret.
+# allowlist and the digest-only rule for every new or changed image, except on a
+# host rollback to an earlier revision, and it may not mint a token for another
+# ServiceAccount through a token Secret.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -395,11 +396,6 @@ spec:
         operations: [CREATE]
         resources: [secrets]
         scope: Namespaced
-      - apiGroups: [rbac.authorization.k8s.io]
-        apiVersions: [v1]
-        operations: [UPDATE]
-        resources: [clusterroles, clusterrolebindings]
-        scope: Cluster
   matchConditions:
     - name: helm-service-account
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-helm'
@@ -417,24 +413,16 @@ spec:
   validations:
     - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
       message: kube-system and longhorn-system go through the break-glass identity
-    # A helm rollback may unpin back to the exact tag the live digest was pinned from, never to another mutable tag.
+    # A helm rollback may unpin back to the exact tag the live digest was pinned from; the host's own rollback
+    # restores an earlier revision's images and marks the workload with nanoclaw.dev/rollback-to while it runs.
     - expression: >-
         !(request.resource.resource in ['deployments', 'statefulsets', 'daemonsets']) ||
+        (has(object.metadata.annotations) && 'nanoclaw.dev/rollback-to' in object.metadata.annotations) ||
         variables.newImages.all(i, i in variables.oldImages || i.matches(variables.pinnedImagePattern) ||
           variables.oldImages.exists(o, o.size() == i.size() + 72 && o.startsWith(i + '@sha256:') && o.matches('@sha256:[0-9a-f]{64}$')))
       message: a new or changed image from the Helm path must come from a trusted registry pinned by sha256 digest
     - expression: request.resource.resource != 'secrets' || !has(dyn(object).type) || dyn(object).type != 'kubernetes.io/service-account-token'
       message: the Helm path may not create ServiceAccount token Secrets
-    # escalate and bind let these identities update the named chart RBAC; freezing rules and subjects keeps that from granting anything new.
-    - expression: >-
-        !(request.resource.resource in ['clusterroles', 'roles']) ||
-        ((has(dyn(object).rules) ? dyn(object).rules : []) == (has(dyn(oldObject).rules) ? dyn(oldObject).rules : []) &&
-         (has(dyn(object).aggregationRule) ? dyn(object).aggregationRule : {}) == (has(dyn(oldObject).aggregationRule) ? dyn(oldObject).aggregationRule : {}))
-      message: Helm upgrades may not change RBAC rules
-    - expression: >-
-        !(request.resource.resource in ['clusterrolebindings', 'rolebindings']) ||
-        (has(dyn(object).subjects) ? dyn(object).subjects : []) == (has(dyn(oldObject).subjects) ? dyn(oldObject).subjects : [])
-      message: Helm upgrades may not change RBAC subjects
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -568,6 +556,8 @@ spec:
         !has(oldObject.status) || !has(oldObject.status.kubernetesStatus) ||
         !has(oldObject.status.kubernetesStatus.namespace) || oldObject.status.kubernetesStatus.namespace != 'backups'
       message: Longhorn volumes claimed from backups are never deleted
+    - expression: request.resource.resource != 'customresourcedefinitions' || !oldObject.metadata.name.endsWith('.longhorn.io')
+      message: deleting a Longhorn CRD deletes its backups
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

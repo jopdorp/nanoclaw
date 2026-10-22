@@ -179,6 +179,17 @@ kubectl get secret -n "$NAMESPACE" registry-prophet -o json \
   | jq '{apiVersion, kind, type, data, metadata: {name: .metadata.name, namespace: "security"}}' \
   | kubectl apply -f - >/dev/null
 printf '%s\n' 'the build-image Job in security can push to registry.prophet.jopdorp.nl'
+kubectl get secret -n "$NAMESPACE" nanoclaw-runtime -o json | jq -e '.data["alert-webhook-bearer"]' >/dev/null \
+  || jq -n --arg b "$(openssl rand -hex 32 | base64 -w0)" '{data: {"alert-webhook-bearer": $b}}' \
+    | kubectl patch secret -n "$NAMESPACE" nanoclaw-runtime --type=merge --patch-file /dev/stdin >/dev/null
+# Orfie hands this bearer to the Alertmanager, Uptime Kuma and CrowdSec it configures.
+for ns in monitoring crowdsec; do
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl get secret -n "$NAMESPACE" nanoclaw-runtime -o json \
+    | jq --arg ns "$ns" '{apiVersion, kind, type, data: {bearer: .data["alert-webhook-bearer"]}, metadata: {name: "orfie-alert-webhook", namespace: $ns}}' \
+    | kubectl apply -f - >/dev/null
+done
+printf '%s\n' 'the alert webhooks have their bearer, readable as orfie-alert-webhook in monitoring and crowdsec'
 for account in nanoclaw-remediator nanoclaw-remediation-approver nanoclaw-helm nanoclaw-breakglass; do
   kubectl apply -f - >/dev/null <<YAML
 apiVersion: v1
