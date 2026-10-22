@@ -10,9 +10,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
+import { createMessagingGroup } from '../../db/messaging-groups.js';
 import { createSession, createPendingApproval, getPendingApproval } from '../../db/sessions.js';
 import { upsertUser } from '../permissions/db/users.js';
 import { grantRole } from '../permissions/db/user-roles.js';
+import type { Session } from '../../types.js';
 
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
@@ -332,15 +334,53 @@ describe('approval response authorization', () => {
       expect((await getPendingApproval('appr-6-aaaaaa'))?.status).toBe('pending');
     });
 
-    it('a yes with two cards pending and no reply-to is not resolved', async () => {
+    it('a yes with two cards pending and no reply-to goes to the agent instead of resolving', async () => {
       const { handleApprovalTextReply } = await import('./response-handler.js');
       await card('appr-7-bbbbbb');
       await card('appr-7-cccccc');
       const event = inbound('$m2', 'matrix:@dana:hs', 'yes');
 
       expect(await handleApprovalTextReply(event)).toBe(false);
+      expect(JSON.parse(event.message.content).pendingApprovals).toContain('bbbbbb');
       expect((await getPendingApproval('appr-7-bbbbbb'))?.status).toBe('pending');
       expect((await getPendingApproval('appr-7-cccccc'))?.status).toBe('pending');
+    });
+
+    it("resolve_approval only accepts the approver's own recorded message", async () => {
+      const { registerApprovalHandler } = await import('./primitive.js');
+      const { handleApprovalTextReply, resolveApprovalAction } = await import('./response-handler.js');
+      const handler = vi.fn().mockResolvedValue(undefined);
+      registerApprovalHandler('plain_reply_action', handler);
+      await createMessagingGroup({
+        id: 'mg-dana',
+        channel_type: 'matrix',
+        platform_id: 'matrix:@dana:hs',
+        name: 'Dana',
+        is_group: 0,
+        unknown_sender_policy: 'strict',
+        created_at: now(),
+      });
+      await card('appr-8-dddddd');
+      await handleApprovalTextReply(inbound('$mallory', 'matrix:@mallory:hs', 'looks right to me'));
+      await handleApprovalTextReply(inbound('$dana', 'matrix:@dana:hs', 'looks right to me'));
+      const dmSession: Session = {
+        id: 'sess-1',
+        agent_group_id: 'ag-1',
+        messaging_group_id: 'mg-dana',
+        thread_id: null,
+        agent_provider: null,
+        status: 'active',
+        container_status: 'stopped',
+        last_active: now(),
+        created_at: now(),
+      };
+      const resolve = (approverMessageId: string) =>
+        resolveApprovalAction({ approvalId: 'dddddd', decision: 'approve', approverMessageId }, dmSession);
+
+      await resolve('$mallory');
+      expect(handler).not.toHaveBeenCalled();
+      await resolve('$dana');
+      expect(handler).toHaveBeenCalledTimes(1);
     });
   });
 });

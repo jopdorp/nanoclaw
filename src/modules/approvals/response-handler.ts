@@ -14,7 +14,9 @@
  * core iterates handlers and the first one to return `true` claims the response.
  */
 import type { InboundEvent } from '../../channels/adapter.js';
-import { getDeliveryAdapter } from '../../delivery.js';
+import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { getDeliveryAdapter, registerDeliveryAction } from '../../delivery.js';
+import { unguarded } from '../../guard/index.js';
 import { requestWake } from '../../request-wake.js';
 import {
   deletePendingApproval,
@@ -27,10 +29,10 @@ import type { ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { registerMessageInterceptor } from '../../router.js';
 import { writeSessionMessage } from '../../session-manager.js';
-import type { PendingApproval } from '../../types.js';
+import type { PendingApproval, Session } from '../../types.js';
 import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
 import { finalizeReject } from './finalize.js';
-import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
+import { getApprovalHandler, notifyAgent, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
 import { armReasonCapture, clampReason } from './reason-capture.js';
 
 export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
@@ -130,6 +132,7 @@ const APPROVE_REPLY = onlyPhrases(
   "yes|yep|ok|okay|approved?|go ahead|go|do it|fix it|that's fine|fine|sure|ship it|proceed|lgtm",
 );
 const REJECT_REPLY = onlyPhrases("no|nope|rejected?|don't|do not|stop|wait|hold|cancel|not now");
+const APPROVER_MESSAGE_TTL_MS = 60 * 60 * 1000;
 
 interface ChatAddress {
   channelType: string;
@@ -138,12 +141,16 @@ interface ChatAddress {
   instance: string;
 }
 
+/** Approver messages handed to the agent with pending approvals attached; resolve_approval consumes one each. */
+const approverMessages = new Map<string, ChatAddress & { userId: string; approvalIds: string[]; at: number }>();
+
 /**
  * Typed answer to an approval card on a channel that rendered it as text
  * (see sendApprovalCard's fallbackText). Only the card's own chat can name it,
  * and the sender is checked exactly like a button click. `approve <id>` names
  * the card; a bare yes or no decides the card it replies to, or the only one
- * pending; anything else reaches the agent as normal chat.
+ * pending; anything else reaches the agent with the pending approvals
+ * attached, and the agent answers through resolve_approval.
  */
 export async function handleApprovalTextReply(event: InboundEvent): Promise<boolean> {
   let content: Record<string, unknown>;
@@ -205,7 +212,61 @@ export async function handleApprovalTextReply(event: InboundEvent): Promise<bool
     await decide(target, option, userId, chat);
     return true;
   }
+
+  const now = Date.now();
+  for (const [id, m] of approverMessages) if (now - m.at > APPROVER_MESSAGE_TTL_MS) approverMessages.delete(id);
+  approverMessages.set(event.message.id, { ...chat, userId, approvalIds: mine.map((a) => a.approval_id), at: now });
+  // routeInbound delivers this same event object, so the context rides on its content.
+  event.message.content = JSON.stringify({
+    ...content,
+    pendingApprovals: [
+      `approverMessageId: ${event.message.id}`,
+      ...mine.map(
+        (a) =>
+          `${a.approval_id.slice(-6)} · ${a.title} · ${a.question.split('\n')[0].slice(0, 160)} · created ${a.created_at} · card ${a.platform_message_id}`,
+      ),
+    ].join('\n'),
+  });
   return false;
+}
+
+/** resolve_approval: the agent's reading of an approver message the host recorded above. */
+export async function resolveApprovalAction(content: Record<string, unknown>, session: Session): Promise<void> {
+  const refuse = (why: string) => notifyAgent(session, `resolve_approval refused, nothing was resolved: ${why}`);
+  const { approvalId, decision, reason, approverMessageId } = content;
+  if (typeof approvalId !== 'string' || typeof approverMessageId !== 'string') {
+    return refuse('approvalId and approverMessageId are required.');
+  }
+  if (decision !== 'approve' && decision !== 'reject') return refuse('decision must be approve or reject.');
+  const message = approverMessages.get(approverMessageId);
+  if (!message || Date.now() - message.at > APPROVER_MESSAGE_TTL_MS) {
+    return refuse(`${approverMessageId} is not a recent, unused approver reply sent while approvals were pending.`);
+  }
+  const fullId = message.approvalIds.find((id) => id === approvalId || id.endsWith(`-${approvalId}`));
+  if (!fullId) return refuse(`${approvalId} was not pending when the approver wrote ${approverMessageId}.`);
+  approverMessages.delete(approverMessageId);
+
+  const chat = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
+  if (
+    chat?.channel_type !== message.channelType ||
+    chat.platform_id !== message.platformId ||
+    (chat.instance ?? chat.channel_type) !== message.instance
+  ) {
+    return refuse(`${approverMessageId} was not sent in this conversation.`);
+  }
+  const approval = await getPendingApproval(fullId);
+  if (approval?.status !== 'pending') return refuse(`${approvalId} is no longer pending.`);
+  const payload: ResponsePayload = { questionId: fullId, value: decision, ...message };
+  if (!(await isAuthorizedApprovalClick(approval, payload))) {
+    return refuse(`${approverMessageId} is not from this approval's approver.`);
+  }
+  await decide(
+    approval,
+    decision,
+    message.userId,
+    message,
+    typeof reason === 'string' ? clampReason(reason) : undefined,
+  );
 }
 
 async function decide(
@@ -232,6 +293,11 @@ async function say(chat: ChatAddress, text: string): Promise<void> {
 }
 
 registerMessageInterceptor(handleApprovalTextReply);
+registerDeliveryAction(
+  'resolve_approval',
+  resolveApprovalAction,
+  unguarded('it is itself an approval answer, checked against the recorded approver message'),
+);
 
 export function namespacedUserId(payload: ResponsePayload): string | null {
   if (!payload.userId) return null;

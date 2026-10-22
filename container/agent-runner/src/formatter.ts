@@ -270,10 +270,13 @@ function formatSingleChat(msg: MessageInRow): string {
   const linksSuffix = formatLinks(content.links, text);
   const attachmentsSuffix = formatAttachments(content.attachments);
   const appContextSuffix = formatAppContext(content.app_context);
+  const approvalsSuffix = content.pendingApprovals
+    ? `\n<pending_approvals>${escapeXml(String(content.pendingApprovals))}</pending_approvals>`
+    : '';
 
   const fromAttr = originAttr(msg);
 
-  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}</message>`;
+  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}${approvalsSuffix}</message>`;
 }
 
 /**
