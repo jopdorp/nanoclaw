@@ -38,8 +38,8 @@ const DIGEST_IMAGE_RE =
   /^(docker\.io|docker\.gitea\.com|cr\.fluentbit\.io|ghcr\.io|quay\.io|registry\.k8s\.io|mirror\.gcr\.io|lscr\.io|registry\.prophet\.jopdorp\.nl|gitea\.claw\.jopdorp\.nl)\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/;
 const TAG_RE = /^\w[\w.-]{0,127}$/;
 const CHART_REPO_RE = /^(?:https|oci):\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[\w.~%-]+)*\/?$/;
-const VALUES_PATH_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
-const IMAGE_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest|sha)$/;
+const VALUES_PATH_RE = /^(?:[\w-]|\\\.)+(?:\.(?:[\w-]|\\\.)+)*$/;
+const IMAGE_KEY_RE = /(?:^|(?<!\\)\.)(image|repository|registry|tag|digest|sha)$/;
 // Only the chart's own top-level key; nested ones usually size a subchart's database StatefulSet.
 const REPLICA_KEY_RE = /^(replicas|replicaCount)$/;
 const PINNED_RE = /^(?:\w[\w.-]{0,127}@)?sha256:[0-9a-f]{64}$/;
@@ -314,13 +314,16 @@ function editsFrom(value: unknown): ValuesEdit[] {
     return {
       path,
       before: edit.before === null ? null : scalar(edit.before, `plan.operation.set[${index}].before`),
-      after: scalar(edit.after, `plan.operation.set[${index}].after`),
+      after: edit.after === null ? null : scalar(edit.after, `plan.operation.set[${index}].after`),
     };
   });
   if (new Set(set.map((edit) => edit.path)).size !== set.length)
     throw new Error('plan.operation.set paths must be unique');
   return set;
 }
+
+/** Helm --set paths, where `\.` is a literal dot inside a key. */
+export const valuesKeys = (path: string) => path.split(/(?<!\\)\./).map((key) => key.replaceAll('\\.', '.'));
 
 export function secretKeys(value: unknown, prefix = ''): string[] {
   if (!value || typeof value !== 'object') return [];
@@ -521,7 +524,7 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     if (plan.target.kind === 'Secret') throw new Error('Secrets never go into the public k8s.jegor.nl repo');
     if (plan.operation.type === 'manifest-edit') {
       for (const { path, before, after } of plan.operation.set) {
-        if (/(?:^|\.)image$/.test(path)) {
+        if (/(?:^|(?<!\\)\.)image$/.test(path)) {
           if (typeof before !== 'string' || typeof after !== 'string')
             throw new Error(`${path} must be an image reference`);
           checkImageUpdate(before, after, plan.operation.runningDigest);
@@ -629,7 +632,7 @@ export function isAutoApproved(
     return true;
   if (operation.type === 'manifest-edit') {
     return operation.set.every(({ path, before, after }) =>
-      /(?:^|\.)image$/.test(path)
+      /(?:^|(?<!\\)\.)image$/.test(path)
         ? sameDigest(String(before), String(after), operation.runningDigest) ||
           sameVersionLine(parseImage(String(before)).tag, parseImage(String(after)).tag, critical)
         : path !== 'spec.replicas' || target.kind !== 'StatefulSet',

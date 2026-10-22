@@ -23,7 +23,15 @@ import { isDeepStrictEqual, promisify } from 'node:util';
 import { isMap, isScalar, parseAllDocuments, parseDocument, stringify } from 'yaml';
 
 import type { KubernetesJsonClient } from './gateway-client.js';
-import { canonicalImage, imageRepository, inlineSecrets, repoObjects, SECRET_KEY_RE, secretKeys } from './policy.js';
+import {
+  canonicalImage,
+  imageRepository,
+  inlineSecrets,
+  repoObjects,
+  SECRET_KEY_RE,
+  secretKeys,
+  valuesKeys,
+} from './policy.js';
 import type {
   ExecutionResult,
   HelmBinding,
@@ -42,7 +50,7 @@ import type {
 const exec = promisify(execFile);
 const DAY = 24 * 60 * 60_000;
 // Only these leaves are echoed back on a before mismatch; anything else may be a credential.
-const ECHOED_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest|replicas|replicaCount|enabled)$/;
+const ECHOED_KEY_RE = /(?:^|(?<!\\)\.)(image|repository|registry|tag|digest|replicas|replicaCount|enabled)$/;
 const RELEASE_RE = /^[a-z0-9][a-z0-9.-]{0,52}$/;
 const ROLLBACK_ANNOTATION = 'nanoclaw.dev/rollback-to';
 const ENTRY_RE =
@@ -160,14 +168,15 @@ function reason(error: unknown): string {
 /**
  * Splices each edit into the source text instead of re-rendering the document,
  * which reformats most of the values files. A `before` of null adds the key,
- * and any missing parents, as the first entry of the nearest block map.
+ * and any missing parents, as the first entry of the nearest block map; an
+ * `after` of null removes the key.
  */
 export function editValues(text: string, set: HelmValuesPlan['operation']['set']): string {
   let result = text;
   for (const { path: dotted, before, after } of set) {
     const doc = parseDocument(result);
     if (doc.errors.length) throw new Error(`values file does not parse: ${doc.errors[0].code}`);
-    const keys = dotted.split('.');
+    const keys = valuesKeys(dotted);
     const node = doc.getIn(keys, true);
     if (before === null) {
       let depth = keys.length - 1;
@@ -194,6 +203,13 @@ export function editValues(text: string, set: HelmValuesPlan['operation']['set']
         `repo drift: ${dotted} is ${ECHOED_KEY_RE.test(dotted) ? actual : 'different'}, not ${JSON.stringify(before)}`,
       );
     }
+    if (after === null) {
+      const parent = doc.getIn(keys.slice(0, -1), true);
+      const key = isMap(parent) ? parent.items.find((pair) => pair.value === node)?.key : undefined;
+      if (!isScalar(key) || !key.range) throw new Error(`repo drift: ${dotted} is not a block map entry`);
+      result = result.slice(0, result.lastIndexOf('\n', key.range[0]) + 1) + result.slice(node.range[2]);
+      continue;
+    }
     const literal =
       typeof after !== 'string'
         ? String(after)
@@ -205,7 +221,9 @@ export function editValues(text: string, set: HelmValuesPlan['operation']['set']
     result = result.slice(0, node.range[0]) + literal + result.slice(node.range[1]);
   }
   const expected = parseDocument(text);
-  for (const { path: dotted, after } of set) expected.setIn(dotted.split('.'), expected.createNode(after));
+  for (const { path: dotted, after } of set)
+    if (after === null) expected.deleteIn(valuesKeys(dotted));
+    else expected.setIn(valuesKeys(dotted), expected.createNode(after));
   if (!isDeepStrictEqual(parseDocument(result).toJS(), expected.toJS()))
     throw new Error('the edit changes more than the given scalar paths');
   return result;

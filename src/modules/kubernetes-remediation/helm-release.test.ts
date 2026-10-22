@@ -5,7 +5,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 
-import { gitWithDeployKey, HelmReleaseExecutor } from './helm-release.js';
+import { editValues, gitWithDeployKey, HelmReleaseExecutor } from './helm-release.js';
 import { validateRemediationPlan } from './policy.js';
 import type { HelmValuesPlan } from './types.js';
 
@@ -155,4 +155,14 @@ it('an upgrade that only restamps the version label on a StatefulSet binds as re
     args[0] === 'upgrade' ? JSON.stringify({ manifest: JSON.stringify(sts('1.27.0')) }) : helmDefault(args),
   );
   expect((await executor.bind(plan)).unchanged).toBe(true);
+});
+
+it('reads \\. as a literal dot in a values key and removes a key with after null', () => {
+  const text = 'customRules:\n  old: |-\n    - rule: x\n  keep.yaml: y\n';
+  expect(
+    editValues(text, [
+      { path: 'customRules.new\\.yaml', before: null, after: 'z' },
+      { path: 'customRules.old', before: '- rule: x', after: null },
+    ]),
+  ).toBe('customRules:\n  new.yaml: "z"\n  keep.yaml: y\n');
 });

@@ -82,7 +82,7 @@ export interface SecretWritePlan extends PlanBase {
 }
 
 export type ValuesScalar = string | number | boolean;
-export type ValuesEdit = { path: string; before: ValuesScalar | null; after: ValuesScalar };
+export type ValuesEdit = { path: string; before: ValuesScalar | null; after: ValuesScalar | null };
 
 /** Targets the Helm release: `target.name` is the release, uid/resourceVersion its latest release Secret. */
 export interface HelmValuesPlan extends PlanBase {
