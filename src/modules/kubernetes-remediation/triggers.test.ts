@@ -2,7 +2,8 @@ import { Readable } from 'node:stream';
 import type http from 'node:http';
 import { describe, expect, it } from 'vitest';
 
-import { createFalcoWebhookHandler, trivyIncident } from './triggers.js';
+import type { KubernetesJsonClient } from './gateway-client.js';
+import { createFalcoWebhookHandler, runTrivyWatchers, trivyIncident } from './triggers.js';
 
 describe('Trivy trigger normalization', () => {
   it('binds dedupe identity to report UID and finding counts and keeps only bounded evidence', () => {
@@ -37,6 +38,34 @@ describe('Trivy trigger normalization', () => {
 
   it('drops reports without stable Kubernetes identity', () => {
     expect(trivyIncident({ metadata: { name: 'partial' }, report: {} })).toBeNull();
+  });
+});
+
+describe('Trivy watcher', () => {
+  it('restarts a failed watch from a fresh list instead of stopping', async () => {
+    const report = { metadata: { uid: 'u', resourceVersion: '2' }, report: { summary: { highCount: 1 } } };
+    const failed = new Set<string>();
+    const client = {
+      request: async () => ({ metadata: { resourceVersion: '1' }, items: [] }),
+      async *watch(path: string) {
+        if (!failed.has(path)) {
+          failed.add(path);
+          throw new Error('curl: (18) transfer closed');
+        }
+        yield { type: 'ADDED', object: report };
+      },
+    } as unknown as KubernetesJsonClient;
+    const controller = new AbortController();
+    const ids: string[] = [];
+    await runTrivyWatchers(
+      client,
+      async ({ id }) => {
+        ids.push(id);
+        controller.abort();
+      },
+      controller.signal,
+    );
+    expect(ids).toEqual(['trivy:u:c0h1']);
   });
 });
 

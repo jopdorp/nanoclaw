@@ -1,7 +1,9 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import type http from 'node:http';
+import { setTimeout as sleep } from 'node:timers/promises';
 
+import { log } from '../../log.js';
 import type { KubernetesJsonClient } from './gateway-client.js';
 import type { RemediationIncident } from './types.js';
 
@@ -100,16 +102,18 @@ async function watchResource(
   signal: AbortSignal,
   seen: PersistentDedupe,
 ) {
+  let backoff = 1_000;
   while (!signal.aborted) {
-    const list = record(await client.request(path, { signal }));
-    let resourceVersion = text(record(list?.metadata)?.resourceVersion) ?? '0';
-    const fresh = (Array.isArray(list?.items) ? list.items : [])
-      .map(trivyIncident)
-      .filter((incident): incident is RemediationIncident => incident !== null && seen.add(incident.id));
-    if (fresh.length === 1) await sink(fresh[0]);
-    else if (fresh.length > 1) await sink(backlogDigest(fresh));
     try {
+      const list = record(await client.request(path, { signal }));
+      let resourceVersion = text(record(list?.metadata)?.resourceVersion) ?? '0';
+      const fresh = (Array.isArray(list?.items) ? list.items : [])
+        .map(trivyIncident)
+        .filter((incident): incident is RemediationIncident => incident !== null && seen.add(incident.id));
+      if (fresh.length === 1) await sink(fresh[0]);
+      else if (fresh.length > 1) await sink(backlogDigest(fresh));
       for await (const raw of client.watch(path, resourceVersion, signal)) {
+        backoff = 1_000;
         const event = record(raw);
         const type = text(event?.type);
         const object = record(event?.object);
@@ -120,9 +124,12 @@ async function watchResource(
         const incident = trivyIncident(object);
         if (incident && seen.add(incident.id)) await sink(incident);
       }
+      // eslint-disable-next-line no-catch-all/no-catch-all -- any failure restarts the watch; dying silently loses the feed
     } catch (error) {
       if (signal.aborted) return;
-      if (!(error instanceof Error && /410|resourceVersion/i.test(error.message))) throw error;
+      log.warn('Trivy watch failed, restarting', { path, retryMs: backoff, err: error });
+      await sleep(backoff, undefined, { signal }).catch(() => undefined);
+      backoff = Math.min(backoff * 2, 60_000);
     }
   }
 }
