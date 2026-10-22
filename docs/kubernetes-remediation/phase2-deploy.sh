@@ -102,13 +102,7 @@ if [[ "${ONLY_REDEPLOY:-}" != 1 ]] && kubectl exec -n "$NAMESPACE" "deploy/$ORCH
   fail 'remediation runtime config already exists; remove/disable it before this no-finding phase'
 fi
 
-git fetch upstream '+refs/heads/channels:refs/remotes/upstream/channels'
-for file in src/channels/matrix.ts src/channels/matrix-registration.test.ts; do
-  git show "refs/remotes/upstream/channels:$file" >"$TMP_DIR/$(basename "$file")"
-  if ! cmp -s "$TMP_DIR/$(basename "$file")" "$file"; then
-    install -m 0644 "$TMP_DIR/$(basename "$file")" "$file"
-  fi
-done
+# src/channels/matrix.ts is ours (reply-to support); never overwrite it from upstream.
 grep -qxF "import './matrix.js';" src/channels/index.ts \
   || printf "import './matrix.js';\n" >>src/channels/index.ts
 install -Dm0644 .claude/skills/add-matrix/patches/@beeper__chat-adapter-matrix@0.2.0.patch \
