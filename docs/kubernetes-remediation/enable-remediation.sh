@@ -287,8 +287,8 @@ done
 printf '%s\n' 'stored and assigned the Kubernetes credentials; values were not printed'
 
 step '5/6 merge the runtime config atomically into the state PVC'
-# Releases whose live values equal their k8s.jegor.nl file. mail/docker-mailserver and logging/vlogs
-# have drifted from their files, and hermes is a local chart, so they stay off the Helm path.
+# Releases whose live values equal their k8s.jegor.nl file. hermes is a local chart, so it stays off
+# the Helm path.
 # longhorn's file is ahead of live (defaultSettings), so its first upgrade applies that too.
 # vaultwarden stays off because its chart renders the admin-token Secret, and cert-manager has no file.
 HELM_RELEASES='{
@@ -296,6 +296,8 @@ HELM_RELEASES='{
   "nextcloud/nextcloud": {"chart": "nextcloud", "repo": "https://nextcloud.github.io/helm/", "file": "kubernetes/helm-charts/nextcloud-values.yaml"},
   "excalidraw/excalidraw": {"chart": "excalidraw", "repo": "https://pmoscode-helm.github.io/excalidraw/", "file": "kubernetes/helm-charts/excalidraw-values.yaml"},
   "wiki-js/wiki-js": {"chart": "wiki", "repo": "https://charts.js.wiki", "file": "kubernetes/helm-charts/wiki-js-values.yaml"},
+  "logging/vlogs": {"chart": "victoria-logs-single", "repo": "https://victoriametrics.github.io/helm-charts/", "file": "kubernetes/helm-charts/victoria-logs-values.yaml"},
+  "mail/docker-mailserver": {"chart": "docker-mailserver", "repo": "https://docker-mailserver.github.io/docker-mailserver-helm", "file": "kubernetes/helm-charts/docker-mailserver-values.yaml"},
   "logging/fluent-bit": {"chart": "fluent-bit", "repo": "https://fluent.github.io/helm-charts", "file": "kubernetes/helm-charts/fluent-bit-values.yaml"},
   "trivy-operator/trivy-operator": {"chart": "trivy-operator", "repo": "https://aquasecurity.github.io/helm-charts/", "file": "kubernetes/helm-charts/trivy-operator-values.yaml"},
   "longhorn-system/longhorn": {"chart": "longhorn", "repo": "https://charts.longhorn.io", "file": "kubernetes/helm-charts/longhorn-values.yaml"}
