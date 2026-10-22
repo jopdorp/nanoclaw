@@ -442,7 +442,7 @@ export class HelmReleaseExecutor {
       if (existed && this.read(file) === content)
         return { applied: true, message: `${file} already holds that content.`, automaticWrites: 0 };
       const objects: Array<{ path: string; object: Values }> = [];
-      for (const object of repoObjects(content)) {
+      for (const object of plan.commitOnly ? [] : repoObjects(content)) {
         const { name = '', namespace = null } = object.metadata ?? {};
         const objectPath = await this.objectPath({ ...plan.target, ...object, name, namespace });
         // Existing workloads change through manifest-edit, which holds the owner's version and scale rules.

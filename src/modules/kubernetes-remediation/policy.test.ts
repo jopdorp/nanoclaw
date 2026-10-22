@@ -223,17 +223,17 @@ describe('Kubernetes remediation policy', () => {
   });
 
   it('repo-write refuses inline credentials but passes Secret references', () => {
-    const write = (content: string) => ({
+    const write = (content: string, file = 'kubernetes/a.yaml') => ({
       ...base(),
       target: {
         apiVersion: 'v1',
         kind: 'File',
         namespace: null,
-        name: 'kubernetes/a.yaml',
+        name: file,
         uid: '-',
         resourceVersion: '-',
       },
-      operation: { type: 'repo-write', path: 'kubernetes/a.yaml', content },
+      operation: { type: 'repo-write', path: file, content },
     });
     const references =
       'server:\n  ingress:\n    tls:\n      - secretName: victoria-logs-tls\n  existingSecret: grafana-admin\n';
@@ -241,5 +241,9 @@ describe('Kubernetes remediation policy', () => {
     expect(() => validateRemediationPlan(write('grafana:\n  adminPassword: hunter2\n'), now)).toThrow(
       'secret-looking values at grafana.adminPassword',
     );
+    expect(validateRemediationPlan(write('name: apply', '.gitea/workflows/apply.yaml'), now).plan.commitOnly).toBe(
+      true,
+    );
+    expect(() => validateRemediationPlan(write('name: x', '.github/workflows/x.yaml'), now)).toThrow('allowed');
   });
 });
