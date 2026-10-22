@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { parseAllDocuments } from 'yaml';
 
 import type {
   HelmBinding,
@@ -42,9 +43,17 @@ const IMAGE_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest)$/;
 const REPLICA_KEY_RE = /^(replicas|replicaCount)$/;
 const PINNED_RE = /^(?:\w[\w.-]{0,127}@)?sha256:[0-9a-f]{64}$/;
 const MANIFEST_FILE_RE = /^kubernetes\/(?:[\w-][\w.-]*\/)*[\w-][\w.-]*\.ya?ml$/;
+const REPO_FILE_RE = /^kubernetes\/(?:[\w-][\w.-]*\/)*[\w-][\w.-]*\.(?:ya?ml|json)$/;
+const VALUES_FILE_RE = /^kubernetes\/helm-charts\/[\w-][\w.-]*\.ya?ml$/;
+const CHART_RE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
+const CHART_VERSION_RE = /^v?\d+\.\d+\.\d+[\w.+-]*$/;
+// Values under such keys may be credentials, but a key that names or points at a Secret holds none.
+export const SECRET_KEY_RE = /password|token|secret|key/i;
+const SECRET_REFERENCE_RE = /(?:name|ref|file|path)$|^existingsecret/i;
 const REPO_PATH_RE = /^[\w-][\w.-]*(?:\/[\w-][\w.-]*)*$/;
 const BUILD_IMAGE_RE = /^registry\.prophet\.jopdorp\.nl\/[a-z0-9]+(?:[._/-][a-z0-9]+)*:\w[\w.-]{0,127}$/;
 const DNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?$/;
+const RELEASE_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,51}[a-z0-9])?$/;
 const API_VERSION_RE = /^(?:[a-z0-9.-]+\/)?v\d+(?:(?:alpha|beta)\d+)?$/;
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -114,7 +123,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     schemaVersion: 1 as const,
     id,
     incidentIds,
-    target: targetFrom(input.target, type === 'manifest-edit' || type === 'manifest-sync'),
+    target: targetFrom(input.target, ['manifest-edit', 'manifest-sync', 'repo-write'].includes(type)),
     reason: string(input.reason, 'plan.reason', 2000),
     expiresAt: string(input.expiresAt, 'plan.expiresAt', 64),
   };
@@ -170,15 +179,48 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     if (operation.reclaimConfirmed !== true) throw new Error('storage deletion requires reclaimConfirmed=true');
     return { ...base, operation: { type, reclaimConfirmed: true } };
   }
+  const valuesFile = () => {
+    const file =
+      operation.file === undefined
+        ? `kubernetes/helm-charts/${base.target.name}-values.yaml`
+        : string(operation.file, 'plan.operation.file', 256);
+    if (!VALUES_FILE_RE.test(file)) throw new Error('plan.operation.file must be a kubernetes/helm-charts/*.yaml file');
+    return file;
+  };
   if (type === 'helm-sync-values') {
+    exactKeys(operation, ['type', 'file'], 'plan.operation');
+    return { ...base, operation: { type, file: valuesFile() } };
+  }
+  if (type === 'helm-uninstall') {
     exactKeys(operation, ['type'], 'plan.operation');
     return { ...base, operation: { type } };
   }
+  if (type === 'helm-install') {
+    exactKeys(operation, ['type', 'chart', 'repo', 'version', 'file'], 'plan.operation');
+    const [chart, repo, version] = [
+      string(operation.chart, 'plan.operation.chart', 63),
+      string(operation.repo, 'plan.operation.repo', 512),
+      string(operation.version, 'plan.operation.version', 64),
+    ];
+    if (!CHART_RE.test(chart) || !CHART_REPO_RE.test(repo) || !CHART_VERSION_RE.test(version))
+      throw new Error('plan.operation needs a chart name, an https:// or oci:// repo and an exact chart version');
+    return { ...base, operation: { type, chart, repo, version, file: valuesFile() } };
+  }
+  if (type === 'repo-write') {
+    exactKeys(operation, ['type', 'path', 'content'], 'plan.operation');
+    const file = string(operation.path, 'plan.operation.path', 256);
+    if (!REPO_FILE_RE.test(file) || file.split('/').includes('..') || base.target.name !== file)
+      throw new Error(
+        'plan.operation.path must be a kubernetes/**.yaml or .json path in k8s.jegor.nl, and target.name too',
+      );
+    return {
+      ...base,
+      operation: { type, path: file, content: string(operation.content, 'plan.operation.content', 256 * 1024) },
+    };
+  }
   if (type === 'helm-values') {
     exactKeys(operation, ['type', 'file', 'chart', 'set'], 'plan.operation');
-    const file = string(operation.file, 'plan.operation.file', 256);
-    if (file !== `kubernetes/helm-charts/${base.target.name}-values.yaml`)
-      throw new Error('plan.operation.file must be kubernetes/helm-charts/<release>-values.yaml');
+    const file = valuesFile();
     let chart: { repo: string } | undefined;
     if (operation.chart !== undefined) {
       const input = record(operation.chart, 'plan.operation.chart');
@@ -219,7 +261,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     return { ...base, operation: { type, dockerfile, context, image } };
   }
   throw new Error(
-    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values, helm-sync-values, pod-exec, manifest-edit, manifest-sync or build-image',
+    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, pod-exec, manifest-edit, manifest-sync, repo-write or build-image',
   );
 }
 
@@ -241,6 +283,46 @@ function editsFrom(value: unknown): ValuesEdit[] {
   if (new Set(set.map((edit) => edit.path)).size !== set.length)
     throw new Error('plan.operation.set paths must be unique');
   return set;
+}
+
+export function secretKeys(value: unknown, prefix = ''): string[] {
+  if (!value || typeof value !== 'object') return [];
+  return Object.entries(value).flatMap(([key, child]) => {
+    if (SECRET_REFERENCE_RE.test(key)) return [];
+    const at = prefix ? `${prefix}.${key}` : key;
+    const own = SECRET_KEY_RE.test(key) && typeof child === 'string' && child !== '';
+    return [...(own ? [at] : []), ...secretKeys(child, at)];
+  });
+}
+
+/** env entries that carry a secret-looking value inline. */
+export function inlineSecrets(value: unknown, at = ''): string[] {
+  if (!value || typeof value !== 'object') return [];
+  const node = value as Record<string, unknown>;
+  const own =
+    typeof node.name === 'string' && typeof node.value === 'string' && SECRET_KEY_RE.test(node.name) ? [at] : [];
+  return [...own, ...Object.entries(node).flatMap(([k, v]) => inlineSecrets(v, at ? `${at}.${k}` : k))];
+}
+
+/** The Kubernetes objects of a repo-write file, after the public-repo secret checks. */
+export function repoObjects(
+  content: string,
+): Array<{ apiVersion: string; kind: string; metadata?: { name?: string; namespace?: string } }> {
+  const docs = parseAllDocuments(content);
+  const values = (Array.isArray(docs) ? docs : [docs]).map((doc) => {
+    if (doc.errors.length) throw new Error(`content does not parse: ${doc.errors[0].message}`);
+    return doc.toJS() as unknown;
+  });
+  const secrets = values.flatMap((value) => [...secretKeys(value), ...inlineSecrets(value)]);
+  if (secrets.length)
+    throw new Error(`secret-looking values at ${secrets.join(', ')}; reference a Secret by name instead`);
+  const objects = values.filter(
+    (value): value is { apiVersion: string; kind: string } =>
+      !!value && typeof value === 'object' && 'apiVersion' in value && 'kind' in value,
+  );
+  if (objects.some((object) => object.kind === 'Secret'))
+    throw new Error('Secrets never go into the public k8s.jegor.nl repo');
+  return objects;
 }
 
 export function classifyTarget(target: TargetRef): RemediationLane {
@@ -311,10 +393,13 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
   if (!Number.isFinite(expiry) || expiry <= now || expiry > now + 15 * 60_000) {
     throw new Error('plan.expiresAt must be within the next 15 minutes');
   }
-  const lane = classifyTarget(plan.target);
+  let lane = classifyTarget(plan.target);
   let automaticWriteCap: 0 | 1 | 2 = 0;
   const { namespace, name } = plan.target;
-  if (namespace === 'backups' && plan.operation.type.startsWith('delete-'))
+  if (
+    namespace === 'backups' &&
+    (plan.operation.type.startsWith('delete-') || plan.operation.type === 'helm-uninstall')
+  )
     throw new Error('nothing in backups is ever deleted');
 
   if (plan.operation.type === 'patch-image') {
@@ -350,8 +435,14 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
       }
       if (key === 'image') checkImageUpdate(before as string, after);
     }
-  } else if (plan.operation.type === 'helm-sync-values') {
-    if (plan.target.kind !== 'Secret') throw new Error('helm-sync-values requires a Helm release');
+  } else if (['helm-sync-values', 'helm-install', 'helm-uninstall'].includes(plan.operation.type)) {
+    if (plan.target.kind !== 'Secret' || !namespace || !RELEASE_NAME_RE.test(name))
+      throw new Error(`${plan.operation.type} requires a Helm release target`);
+  } else if (plan.operation.type === 'repo-write') {
+    const lanes = repoObjects(plan.operation.content).map((object) =>
+      classifyTarget({ ...plan.target, kind: object.kind, namespace: object.metadata?.namespace ?? null }),
+    );
+    lane = lanes.includes('C') ? 'C' : lanes.includes('always-ask') ? 'always-ask' : 'A';
   } else if (plan.operation.type === 'delete-storage') {
     if (!['PersistentVolume', 'PersistentVolumeClaim', 'Volume'].includes(plan.target.kind))
       throw new Error('delete-storage requires a PV, PVC or Longhorn volume');
@@ -411,7 +502,8 @@ export function isAutoApproved(
   if (lane !== 'A') return false;
   const critical =
     target.kind === 'StatefulSet' || t1.has(target.namespace ?? '') || t1.has(`${target.namespace}/${target.name}`);
-  if (['restart', 'delete-job', 'pod-exec', 'build-image'].includes(operation.type)) return true;
+  if (['restart', 'delete-job', 'pod-exec', 'build-image', 'helm-install', 'repo-write'].includes(operation.type))
+    return true;
   if (operation.type === 'manifest-edit') {
     return operation.set.every(({ path, before, after }) =>
       /(?:^|\.)image$/.test(path)

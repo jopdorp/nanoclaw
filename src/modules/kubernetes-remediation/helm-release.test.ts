@@ -107,6 +107,23 @@ it('a helm result that differs from the recorded patch rolls back and pushes not
   );
   const result = await executor.apply(plan);
   expect(result).toMatchObject({ applied: false, message: expect.stringContaining('live 1, patch 2') });
-  expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['get', 'show', 'get', 'upgrade', 'rollback']);
+  expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['get', 'show', 'get', 'upgrade', 'get', 'rollback']);
   expect(commits()).toBe('1');
+});
+
+it('helm-install needs its values file in the repo and never runs helm without it', async () => {
+  const { executor, helm, plan } = fixture('1.27.0');
+  const install = {
+    ...plan,
+    target: { ...plan.target, namespace: 'monitoring', name: 'vmks', uid: '-', resourceVersion: '-' },
+    operation: {
+      type: 'helm-install' as const,
+      chart: 'victoria-metrics-k8s-stack',
+      repo: 'https://victoriametrics.github.io/helm-charts/',
+      version: '0.60.1',
+      file: 'kubernetes/helm-charts/vmks-values.yaml',
+    },
+  };
+  await expect(executor.install(install)).rejects.toThrow('write it with repo-write first');
+  expect(helm).not.toHaveBeenCalled();
 });

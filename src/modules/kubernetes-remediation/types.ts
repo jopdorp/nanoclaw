@@ -94,7 +94,21 @@ export interface ManifestSyncPlan extends PlanBase {
 
 /** Writes the release's live user-supplied values to its values file; no cluster change. */
 export interface HelmSyncPlan extends PlanBase {
-  operation: { type: 'helm-sync-values' };
+  operation: { type: 'helm-sync-values'; file: string };
+}
+
+/** Installs a new release from a values file already in k8s.jegor.nl; same release target as helm-values. */
+export interface HelmInstallPlan extends PlanBase {
+  operation: { type: 'helm-install'; chart: string; repo: string; version: string; file: string };
+}
+
+export interface HelmUninstallPlan extends PlanBase {
+  operation: { type: 'helm-uninstall' };
+}
+
+/** Writes a whole kubernetes/** file and applies every object in it server-side; the target is the file. */
+export interface RepoWritePlan extends PlanBase {
+  operation: { type: 'repo-write'; path: string; content: string };
 }
 
 /** What the host learned while binding a helm-values plan to its release and values file. */
@@ -116,6 +130,9 @@ export type RemediationPlan =
   | StorageDeletePlan
   | HelmValuesPlan
   | HelmSyncPlan
+  | HelmInstallPlan
+  | HelmUninstallPlan
+  | RepoWritePlan
   | PodExecPlan
   | BuildImagePlan
   | ManifestEditPlan

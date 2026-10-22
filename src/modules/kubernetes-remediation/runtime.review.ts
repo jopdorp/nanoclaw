@@ -7,11 +7,14 @@ import path from 'node:path';
 
 import { DATA_DIR } from '../../config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
+import { registerDeliveryAction } from '../../delivery.js';
+import { unguarded } from '../../guard/index.js';
 import { resolveGroupFolderPath } from '../../group-folder.js';
 import { requestWake } from '../../request-wake.js';
 import { resolveSession, writeSessionMessage } from '../../session-manager.js';
 import { registerWebhookHandler } from '../../webhook-server.js';
 import { log } from '../../log.js';
+import { notifyAgent } from '../approvals/index.js';
 import { notifyApprover, registerKubernetesRemediationApproval } from './approval.js';
 import {
   cleanupRemediationOrphans,
@@ -118,6 +121,19 @@ export async function startKubernetesRemediation(
   registerWebhookHandler(
     'kubernetes-falco',
     createFalcoWebhookHandler({ secret: () => fs.readFileSync(config.falcoBearerFile), sink }),
+  );
+  registerDeliveryAction(
+    'kubernetes_repo_read',
+    async (content, session) => {
+      if (session.agent_group_id !== config.agentGroupId || !helm) return;
+      const relative = typeof content.path === 'string' ? content.path : '';
+      const reply = await helm.readRepo(relative).then(
+        (body) => `k8s.jegor.nl/${relative}:\n${body}`,
+        (error: unknown) => `repo read failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      await notifyAgent(session, reply);
+    },
+    unguarded('read-only, served from the host checkout of k8s.jegor.nl'),
   );
   void runTrivyWatchers(reader, sink, signal, path.join(DATA_DIR, 'kubernetes-remediation-seen.json')).catch(
     (error) => {

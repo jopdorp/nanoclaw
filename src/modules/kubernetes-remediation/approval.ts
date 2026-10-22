@@ -80,7 +80,15 @@ function describe({ plan }: ValidatedPlan, full: boolean): string {
         ? `helm release ${target.name}, ${op.file}: ${edits(op.set, '->')}`
         : `helm ${where}: ${edits(op.set)}`;
     case 'helm-sync-values':
-      return `sync helm values of ${where} from live into its values file`;
+      return `sync helm values of ${where} from live into ${op.file}`;
+    case 'helm-install':
+      return `install ${op.chart} ${op.version} as ${where} with ${op.file}`;
+    case 'helm-uninstall':
+      return `uninstall helm release ${where}`;
+    case 'repo-write':
+      return full
+        ? `write ${op.path} and apply its objects:\n${op.content.length > 2000 ? `${op.content.slice(0, 2000)}…` : op.content}`
+        : `write and apply ${op.path}`;
     case 'manifest-edit':
       return full
         ? `${op.file}, ${target.kind} ${where}: ${edits(op.set, '->')}`

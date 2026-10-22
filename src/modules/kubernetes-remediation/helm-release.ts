@@ -12,6 +12,8 @@
  * The manifest path shares the checkout: manifest-edit edits one object of a
  * kubernetes/**.yaml file and applies it server-side, after a dry run proves the
  * unedited object equals live; manifest-sync writes the live object there first.
+ * repo-write replaces a whole kubernetes/** file and applies the objects in it;
+ * helm-install installs a new release from a values file written that way.
  */
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -20,15 +22,18 @@ import { isDeepStrictEqual, promisify } from 'node:util';
 import { isMap, isScalar, parseAllDocuments, parseDocument, stringify } from 'yaml';
 
 import type { KubernetesJsonClient } from './gateway-client.js';
-import { canonicalImage, imageRepository } from './policy.js';
+import { canonicalImage, imageRepository, inlineSecrets, repoObjects, SECRET_KEY_RE, secretKeys } from './policy.js';
 import type {
   ExecutionResult,
   HelmBinding,
+  HelmInstallPlan,
   HelmSyncPlan,
+  HelmUninstallPlan,
   HelmValuesPlan,
   ManifestEditPlan,
   ManifestSyncPlan,
   RemediationPlan,
+  RepoWritePlan,
   TargetRef,
 } from './types.js';
 
@@ -37,8 +42,7 @@ const DAY = 24 * 60 * 60_000;
 // Only these leaves are echoed back on a before mismatch; anything else may be a credential.
 const ECHOED_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest|replicas|replicaCount|enabled)$/;
 const RELEASE_RE = /^[a-z0-9][a-z0-9.-]{0,52}$/;
-// Values under such keys are never shown, and never written to the public values repo.
-const SECRET_KEY_RE = /password|token|secret|key/i;
+const ROLLBACK_ANNOTATION = 'nanoclaw.dev/rollback-to';
 const ENTRY_RE =
   /^- (\S+) plan (\S+) (Deployment|StatefulSet|DaemonSet)\/(\S+) (container:\S+|init:\S+|replicas) (\S+)$/;
 
@@ -104,14 +108,6 @@ function valuesDiff(live: Values, file: Values): string[] {
     .map((path) => `${path}: ${show(path, a.get(path))} -> ${show(path, b.get(path))}`);
 }
 
-function secretKeys(value: unknown, prefix = ''): string[] {
-  if (!value || typeof value !== 'object') return [];
-  return Object.entries(value).flatMap(([key, child]) => {
-    const at = prefix ? `${prefix}.${key}` : key;
-    return [...(SECRET_KEY_RE.test(key) ? [at] : []), ...secretKeys(child, at)];
-  });
-}
-
 function valueAt(values: Values, dotted: string): unknown {
   return dotted.split('.').reduce<unknown>((node, key) => (node as Values | undefined)?.[key], values);
 }
@@ -145,23 +141,6 @@ function imageEdits(values: Values, set: HelmValuesPlan['operation']['set']): He
     images[dotted] = { before: ref('before'), after: ref('after') };
   }
   return images;
-}
-
-/** env entries and ConfigMap data that carry a secret-looking value inline. */
-function inlineSecrets(value: unknown, at = ''): string[] {
-  if (!value || typeof value !== 'object') return [];
-  const node = value as Values;
-  const own =
-    typeof node.name === 'string' && typeof node.value === 'string' && SECRET_KEY_RE.test(node.name) ? [at] : [];
-  const data =
-    node.kind === 'ConfigMap'
-      ? Object.keys((node.data as Values | undefined) ?? {}).filter((k) => SECRET_KEY_RE.test(k))
-      : [];
-  return [
-    ...own,
-    ...data.map((k) => `data.${k}`),
-    ...Object.entries(node).flatMap(([k, v]) => inlineSecrets(v, at ? `${at}.${k}` : k)),
-  ];
 }
 
 /** What the API server owns or derives; never part of a manifest or a drift comparison. */
@@ -318,7 +297,7 @@ export class HelmReleaseExecutor {
     return this.serial(async () => {
       const objectPath = await this.objectPath(plan.target);
       const live = declared((await this.options.client.request(objectPath)) as Values);
-      const secrets = inlineSecrets(live);
+      const secrets = [...secretKeys(live), ...inlineSecrets(live)];
       if (secrets.length) {
         return {
           applied: false,
@@ -343,6 +322,158 @@ export class HelmReleaseExecutor {
         'wrote the live object',
       );
     });
+  }
+
+  install(plan: HelmInstallPlan): Promise<ExecutionResult> {
+    return this.serial(async () => {
+      const { name: release, namespace } = plan.target;
+      const ns = namespace ?? '';
+      const { chart, repo, version, file } = plan.operation;
+      await this.sync();
+      if (!fs.existsSync(path.join(this.options.checkout, file)))
+        throw new Error(`${file} is not in k8s.jegor.nl; write it with repo-write first`);
+      const exists = await this.options.helm(['status', release, '-n', ns]).then(
+        () => true,
+        () => false,
+      );
+      if (exists) throw new Error(`${ns}/${release} is already installed; change it with helm-values`);
+      const source = { chart, repo, file };
+      const shown = parseValues(
+        await this.options.helm(['show', 'chart', ...this.chartRef(source), '--version', version]),
+      );
+      if (shown.name !== chart || shown.version !== version)
+        throw new Error(`${repo} does not serve ${chart} ${version}`);
+      await this.namespaceReady(ns);
+      try {
+        await this.options.helm([
+          'install',
+          release,
+          ...this.chartRef(source),
+          '--version',
+          version,
+          '-n',
+          ns,
+          '-f',
+          path.join(this.options.checkout, file),
+          '--wait',
+          '--timeout',
+          '10m',
+        ]);
+        // eslint-disable-next-line no-catch-all/no-catch-all -- every install failure uninstalls
+      } catch (error) {
+        const removed = await this.options.helm(['uninstall', release, '-n', ns, '--wait', '--timeout', '10m']).then(
+          () => 'uninstalled again',
+          (e: unknown) => `uninstall failed: ${reason(e)}`,
+        );
+        return { applied: false, message: `helm install failed (${reason(error)}); ${removed}.`, automaticWrites: 0 };
+      }
+      this.options.remember(`${ns}/${release}`, source);
+      return {
+        applied: true,
+        message: `installed ${chart} ${version} as ${ns}/${release} from ${file}.`,
+        automaticWrites: 0,
+      };
+    });
+  }
+
+  uninstall(plan: HelmUninstallPlan): Promise<ExecutionResult> {
+    return this.serial(async () => {
+      const { name: release, namespace } = plan.target;
+      await this.options.helm(['uninstall', release, '-n', namespace ?? '', '--wait', '--timeout', '10m']);
+      return {
+        applied: true,
+        message: `uninstalled ${namespace}/${release}; its values file stays in k8s.jegor.nl.`,
+        automaticWrites: 0,
+      };
+    });
+  }
+
+  /** Writes the file, then applies its objects after a dry run of all of them; a failed apply reverts the file. */
+  writeFile(plan: RepoWritePlan): Promise<ExecutionResult> {
+    return this.serial(async () => {
+      const { path: file, content } = plan.operation;
+      await this.sync();
+      const absolute = path.join(this.options.checkout, file);
+      const existed = fs.existsSync(absolute);
+      if (existed && this.read(file) === content)
+        return { applied: true, message: `${file} already holds that content.`, automaticWrites: 0 };
+      const objects: Array<{ path: string; object: Values }> = [];
+      for (const object of repoObjects(content)) {
+        const { name = '', namespace = null } = object.metadata ?? {};
+        const objectPath = await this.objectPath({ ...plan.target, ...object, name, namespace });
+        // Existing workloads change through manifest-edit, which holds the owner's version and scale rules.
+        if (['Deployment', 'StatefulSet', 'DaemonSet', 'CronJob'].includes(object.kind)) {
+          const live = await this.options.client.request(objectPath).then(
+            () => true,
+            () => false,
+          );
+          if (live) throw new Error(`${object.kind} ${namespace}/${name} exists; change it with manifest-edit`);
+        }
+        await this.serverSideApply(objectPath, object as Values, true);
+        objects.push({ path: objectPath, object: object as Values });
+      }
+      fs.mkdirSync(path.dirname(absolute), { recursive: true });
+      fs.writeFileSync(absolute, content);
+      let applied = 0;
+      try {
+        for (const { path: objectPath, object } of objects) {
+          await this.serverSideApply(objectPath, object, false);
+          applied++;
+        }
+        // eslint-disable-next-line no-catch-all/no-catch-all -- a refused apply leaves the repo as it was
+      } catch (error) {
+        if (existed) await this.options.git(['checkout', '--', file]);
+        else fs.rmSync(absolute);
+        return {
+          applied: false,
+          message: `apply failed after ${applied} of ${objects.length} objects (${reason(error)}); ${file} reverted, nothing pushed.`,
+          automaticWrites: 0,
+        };
+      }
+      return this.commit(file, `Orfie: ${plan.reason.split('\n', 1)[0]}`, `applied ${objects.length} objects`);
+    });
+  }
+
+  /** A text file of the checkout, at most 64 KB, or a directory listing with a trailing / on subdirectories. */
+  readRepo(relative: string): Promise<string> {
+    return this.serial(async () => {
+      if (!/^[\w.-]+(?:\/[\w.-]+)*$|^$/.test(relative) || relative.split('/').includes('..'))
+        throw new Error('path must be relative to the k8s.jegor.nl root');
+      await this.sync();
+      const root = fs.realpathSync(this.options.checkout);
+      const absolute = path.join(root, relative);
+      if (fs.realpathSync(absolute) !== absolute) throw new Error(`${relative} is a symlink`);
+      if (fs.statSync(absolute).isDirectory())
+        return fs
+          .readdirSync(absolute, { withFileTypes: true })
+          .filter((entry) => entry.name !== '.git')
+          .map((entry) => `${entry.name}${entry.isDirectory() ? '/' : ''}`)
+          .join('\n');
+      if (fs.statSync(absolute).size > 64 * 1024) throw new Error(`${relative} is larger than 64 KB`);
+      return fs.readFileSync(absolute, 'utf8');
+    });
+  }
+
+  /** Creates the namespace and waits for namespace-binder to give this identity its rights there. */
+  private async namespaceReady(ns: string): Promise<void> {
+    const exists = await this.options.client.request(`/api/v1/namespaces/${encodeURIComponent(ns)}`).then(
+      () => true,
+      () => false,
+    );
+    if (!exists)
+      await this.options.client.request('/api/v1/namespaces', {
+        method: 'POST',
+        body: { apiVersion: 'v1', kind: 'Namespace', metadata: { name: ns } },
+      });
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.options.client.request(`/api/v1/namespaces/${encodeURIComponent(ns)}/configmaps?limit=1`);
+        return;
+      } catch (error) {
+        if (attempt >= 30) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
   }
 
   private findDocument(file: string, target: TargetRef) {
@@ -628,7 +759,7 @@ export class HelmReleaseExecutor {
       };
     }
     await this.sync();
-    const relative = `kubernetes/helm-charts/${release}-values.yaml`;
+    const relative = plan.operation.file;
     const file = path.join(this.options.checkout, relative);
     if (fs.existsSync(file) && !valuesDiff(live, parseValues(this.read(relative))).length) {
       return { applied: true, message: `${relative} already matches live.`, automaticWrites: 0 };
@@ -673,13 +804,39 @@ export class HelmReleaseExecutor {
     return fs.readFileSync(file, 'utf8');
   }
 
+  /**
+   * The workload guard admits an earlier revision's unpinned images only on
+   * workloads carrying ROLLBACK_ANNOTATION, so the annotation brackets the rollback.
+   */
   private async rollback(release: string, ns: string, revision: number): Promise<string> {
+    const workloads = parseAllDocuments(
+      await this.options.helm(['get', 'manifest', release, '-n', ns, '--revision', String(revision)]).catch(() => ''),
+    )
+      .map((doc) => doc.toJS() as { kind?: string; metadata?: { name?: string } } | null)
+      .filter((object) => ['Deployment', 'StatefulSet', 'DaemonSet'].includes(object?.kind ?? ''))
+      .map(
+        (object) =>
+          `/apis/apps/v1/namespaces/${encodeURIComponent(ns)}/${object!.kind!.toLowerCase()}s/${encodeURIComponent(object!.metadata?.name ?? '')}`,
+      );
+    const annotate = (value: string | null) =>
+      Promise.allSettled(
+        workloads.map((url) =>
+          this.options.client.request(url, {
+            method: 'PATCH',
+            body: { metadata: { annotations: { [ROLLBACK_ANNOTATION]: value } } },
+            contentType: 'application/merge-patch+json',
+          }),
+        ),
+      );
+    await annotate(String(revision));
     try {
       await this.options.helm(['rollback', release, String(revision), '-n', ns, '--wait', '--timeout', '10m']);
       return `rolled back to revision ${revision}`;
       // eslint-disable-next-line no-catch-all/no-catch-all -- a failed rollback is reported, not thrown over the upgrade error
     } catch (error) {
       return `rollback to revision ${revision} failed: ${reason(error)}`;
+    } finally {
+      await annotate(null);
     }
   }
 

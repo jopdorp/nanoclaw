@@ -192,7 +192,28 @@ describe('Kubernetes remediation policy', () => {
       operation: { type: 'helm-values', file, set: [{ path: 'replicaCount', before: 1, after: 2 }] },
     });
     expect(() => validateRemediationPlan(helmValues('gitea', 'ansible/inventory-values.yaml'), now)).toThrow(
-      'kubernetes/helm-charts/<release>-values.yaml',
+      'kubernetes/helm-charts/*.yaml',
+    );
+  });
+
+  it('repo-write refuses inline credentials but passes Secret references', () => {
+    const write = (content: string) => ({
+      ...base(),
+      target: {
+        apiVersion: 'v1',
+        kind: 'File',
+        namespace: null,
+        name: 'kubernetes/a.yaml',
+        uid: '-',
+        resourceVersion: '-',
+      },
+      operation: { type: 'repo-write', path: 'kubernetes/a.yaml', content },
+    });
+    const references =
+      'server:\n  ingress:\n    tls:\n      - secretName: victoria-logs-tls\n  existingSecret: grafana-admin\n';
+    expect(validateRemediationPlan(write(references), now).lane).toBe('A');
+    expect(() => validateRemediationPlan(write('grafana:\n  adminPassword: hunter2\n'), now)).toThrow(
+      'secret-looking values at grafana.adminPassword',
     );
   });
 });
