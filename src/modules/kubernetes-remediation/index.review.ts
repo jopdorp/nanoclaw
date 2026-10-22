@@ -3,8 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { DATA_DIR } from '../../config.js';
-import { onHostStart } from '../../host-lifecycle.js';
+import { onHostShutdown, onHostStart } from '../../host-lifecycle.js';
 import { log } from '../../log.js';
+import { drainRemediation } from './approval.js';
 import { startKubernetesRemediation, type KubernetesRemediationConfig } from './runtime.review.js';
 
 onHostStart(async ({ signal }) => {
@@ -16,3 +17,6 @@ onHostStart(async ({ signal }) => {
   const config = JSON.parse(fs.readFileSync(file, 'utf8')) as KubernetesRemediationConfig;
   await startKubernetesRemediation(config, signal);
 });
+
+// A rollout waits for the plan being applied, up to terminationGracePeriodSeconds.
+onHostShutdown(drainRemediation);

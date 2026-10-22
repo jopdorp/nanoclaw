@@ -150,6 +150,9 @@ function unstamped(object: Values): Values {
   return { ...object, metadata: { ...metadata, labels } };
 }
 
+const noted = (recovered: string, result: ExecutionResult): ExecutionResult =>
+  recovered ? { ...result, message: `${recovered}; ${result.message}` } : result;
+
 function reason(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).trim().split('\n').slice(-3).join(' ');
 }
@@ -243,7 +246,10 @@ export class HelmReleaseExecutor {
   }
 
   apply(plan: HelmValuesPlan): Promise<ExecutionResult> {
-    return this.serial(() => this.applyNow(plan));
+    return this.serial(async () => {
+      const recovered = await this.unstick(plan.target.name, plan.target.namespace ?? '');
+      return noted(recovered, await this.applyNow(plan, !!recovered));
+    });
   }
 
   syncValues(plan: HelmSyncPlan): Promise<ExecutionResult> {
@@ -329,11 +335,10 @@ export class HelmReleaseExecutor {
       await this.sync();
       if (!fs.existsSync(path.join(this.options.checkout, file)))
         throw new Error(`${file} is not in k8s.jegor.nl; write it with repo-write first`);
-      const exists = await this.options.helm(['status', release, '-n', ns]).then(
-        () => true,
-        () => false,
-      );
-      if (exists) throw new Error(`${ns}/${release} is already installed; change it with helm-values`);
+      const recovered = await this.unstick(release, ns);
+      const status = await this.status(release, ns);
+      if (status && status !== 'uninstalled' && status !== 'failed')
+        throw new Error(`${ns}/${release} is already installed; change it with helm-values`);
       const source = { chart, repo, file };
       const shown = parseValues(
         await this.options.helm(['show', 'chart', ...this.chartRef(source), '--version', version]),
@@ -352,6 +357,7 @@ export class HelmReleaseExecutor {
           ns,
           '-f',
           path.join(this.options.checkout, file),
+          '--replace',
           '--wait',
           '--timeout',
           '10m',
@@ -362,14 +368,18 @@ export class HelmReleaseExecutor {
           () => 'uninstalled again',
           (e: unknown) => `uninstall failed: ${reason(e)}`,
         );
-        return { applied: false, message: `helm install failed (${reason(error)}); ${removed}.`, automaticWrites: 0 };
+        return noted(recovered, {
+          applied: false,
+          message: `helm install failed (${reason(error)}); ${removed}.`,
+          automaticWrites: 0,
+        });
       }
       this.options.remember(`${ns}/${release}`, source);
-      return {
+      return noted(recovered, {
         applied: true,
         message: `installed ${chart} ${version} as ${ns}/${release} from ${file}.`,
         automaticWrites: 0,
-      };
+      });
     });
   }
 
@@ -656,11 +666,35 @@ export class HelmReleaseExecutor {
     }
   }
 
-  private async applyNow(plan: HelmValuesPlan): Promise<ExecutionResult> {
+  private async status(release: string, ns: string): Promise<string | undefined> {
+    return this.options.helm(['status', release, '-n', ns, '-o', 'json']).then(
+      (out) => (JSON.parse(out) as { info?: { status?: string } }).info?.status,
+      () => undefined,
+    );
+  }
+
+  /** A release a killed helm left pending, as a host restart mid-operation does, back to its last good state. */
+  private async unstick(release: string, ns: string): Promise<string> {
+    const status = await this.status(release, ns);
+    if (!status?.startsWith('pending-') && status !== 'uninstalling') return '';
+    const history = JSON.parse(await this.options.helm(['history', release, '-n', ns, '-o', 'json'])) as Array<{
+      revision: number;
+      status: string;
+    }>;
+    const good = history.filter((h) => h.status === 'deployed' || h.status === 'superseded').at(-1);
+    if (status === 'pending-install' || status === 'uninstalling' || !good) {
+      await this.options.helm(['uninstall', release, '-n', ns, '--keep-history', '--wait', '--timeout', '10m']);
+      return `found ${ns}/${release} stuck in ${status} and uninstalled it`;
+    }
+    return `found ${ns}/${release} stuck in ${status}; ${await this.rollback(release, ns, good.revision)}`;
+  }
+
+  private async applyNow(plan: HelmValuesPlan, recovered: boolean): Promise<ExecutionResult> {
     const { name: release, namespace } = plan.target;
     const ns = namespace ?? '';
     const anchor = await this.latestRelease(plan);
-    if (anchor.uid !== plan.target.uid || anchor.resourceVersion !== plan.target.resourceVersion) {
+    // A recovery rollback is a new revision of the host's own making, not a change behind the plan's back.
+    if (!recovered && (anchor.uid !== plan.target.uid || anchor.resourceVersion !== plan.target.resourceVersion)) {
       throw new Error('Helm release changed after proposal');
     }
     const { chart, metadata } = await this.resolveChart(plan);

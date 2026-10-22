@@ -84,7 +84,7 @@ function fixture(before: string, workload: unknown = {}, live = 'image:\n  tag: 
 it('a values file that drifted from before gets no helm upgrade and no commit', async () => {
   const { executor, helm, plan, commits } = fixture('1.26.0');
   await expect(executor.apply(plan)).rejects.toThrow('repo drift: image.tag is "1.27.0"');
-  expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['get', 'show', 'get']);
+  expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['status', 'get', 'show', 'get']);
   expect(commits()).toBe('1');
 });
 
@@ -109,7 +109,7 @@ it('a helm result that differs from the recorded patch rolls back and pushes not
   );
   const result = await executor.apply(plan);
   expect(result).toMatchObject({ applied: false, message: expect.stringContaining('live 1, patch 2') });
-  expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['get', 'show', 'get', 'upgrade', 'get', 'rollback']);
+  expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['status', 'get', 'show', 'get', 'upgrade', 'get', 'rollback']);
   expect(commits()).toBe('1');
 });
 

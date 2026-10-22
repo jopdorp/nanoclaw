@@ -165,7 +165,8 @@ spec:
           resources:
             requests: { cpu: 250m, memory: 512Mi }
             limits: { cpu: '2', memory: 2Gi }
-      terminationGracePeriodSeconds: 60
+      # A helm --wait runs up to ten minutes; shutdown waits for the plan in flight.
+      terminationGracePeriodSeconds: 660
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: nanoclaw-state }

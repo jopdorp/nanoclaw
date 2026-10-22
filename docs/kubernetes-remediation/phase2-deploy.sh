@@ -219,6 +219,13 @@ sed -E -i \
   "$DOCS/in-cluster-runtime.review.yaml"
 grep -qF "$AGENT_IMAGE" "$DOCS/in-cluster-runtime.review.yaml" || fail 'agent digest update failed'
 grep -qF "$HOST_IMAGE" "$DOCS/in-cluster-runtime.review.yaml" || fail 'host digest update failed'
+# Let a helm run the host started finish before the rollout replaces the host.
+for _ in $(seq 1 132); do
+  kubectl exec -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -c orchestrator -- sh -c \
+    'ps -eo args | grep -Eq "^helm (install|upgrade|rollback|uninstall) "' 2>/dev/null || break
+  printf '%s\n' 'waiting for an in-flight helm run to finish'
+  sleep 5
+done
 # Session Jobs pin the RWO state volume to the old host node; recycle them so the new host can attach.
 kubectl -n "$NAMESPACE" delete job -l nanoclaw-group-folder --ignore-not-found >/dev/null
 kubectl apply -f "$DOCS/in-cluster-runtime.review.yaml"

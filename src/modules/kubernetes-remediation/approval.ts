@@ -41,6 +41,14 @@ interface Prepared {
 }
 
 const DAY = 24 * 60 * 60_000;
+// Plans being applied right now; a host shutdown waits for them instead of killing helm or a rollout midway.
+const running = new Set<Promise<unknown>>();
+let draining = false;
+
+export async function drainRemediation(): Promise<void> {
+  draining = true;
+  await Promise.allSettled([...running]);
+}
 
 /** The change itself, without the per-submission identity, expiry and binding. */
 function changeKey({ plan }: ValidatedPlan): string {
@@ -251,6 +259,10 @@ export function registerKubernetesRemediationApproval(options: {
   };
   const precheck = async (content: Record<string, unknown>, session: Session) => {
     if (!(await options.team(session.agent_group_id))) return false;
+    if (draining) {
+      await notifyAgent(session, 'kubernetes remediation paused: the host is restarting; resubmit once it is back');
+      return false;
+    }
     try {
       preparedFor.set(content, await prepare(content));
       return true;
@@ -275,12 +287,14 @@ export function registerKubernetesRemediationApproval(options: {
       const validated = auto ? prepared.validated : validateRemediationPlan(planInput(content));
       let message: string;
       try {
-        const result = await options.executor.execute(validated, {
+        const execution = options.executor.execute(validated, {
           approvalRowId: auto ? '' : String(content.approvalRowId ?? ''),
           approverUserId: auto ? AUTO_APPROVER : String(content.approvedBy),
           planId: validated.plan.id,
           planDigest: validated.digest,
         });
+        running.add(execution);
+        const result = await execution.finally(() => running.delete(execution));
         message = [
           prepared.unchanged && result.applied ? 'record updated, nothing changed' : '',
           prepared.approvedBefore ?? '',
