@@ -54,10 +54,10 @@ spec:
       expression: >-
         variables.imageQualified.map(e, [e[0], e[1].matches('^docker[.]io/[^/]+$') ? 'docker.io/library/' + e[1].substring(10) : e[1]])
   validations:
-    - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
+    - expression: "!((has(request.namespace) ? request.namespace : '') in ['kube-system', 'longhorn-system'])"
       message: kube-system and longhorn-system are written only by the break-glass identity
     - expression: >-
-        !(request.namespace in variables.approvalRequiredNamespaces) ||
+        !((has(request.namespace) ? request.namespace : '') in variables.approvalRequiredNamespaces) ||
         (has(oldObject.metadata.annotations) &&
          'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations &&
          oldObject.metadata.annotations['remediation.nanoclaw.io/approval-id'].matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'))
@@ -158,7 +158,7 @@ spec:
     - name: excludedNamespaces
       expression: "['kube-system', 'longhorn-system', 'wireguard-home']"
   validations:
-    - expression: "!(request.namespace in variables.excludedNamespaces)"
+    - expression: "!((has(request.namespace) ? request.namespace : '') in variables.excludedNamespaces)"
       message: the scale subresource is allowed only in Lane A namespaces
     - expression: >-
         dyn(object).all(k, k == 'spec' || (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
@@ -230,10 +230,10 @@ spec:
     - name: remediator-service-account
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
   validations:
-    - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
+    - expression: "!((has(request.namespace) ? request.namespace : '') in ['kube-system', 'longhorn-system'])"
       message: kube-system and longhorn-system are written only by the break-glass identity
     - expression: >-
-        request.namespace != 'wireguard-home' ||
+        (has(request.namespace) ? request.namespace : '') != 'wireguard-home' ||
         (has(oldObject.metadata.annotations) && 'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations)
       message: always-ask remediation requires a proxy-verified per-action Matrix approval annotation
     - expression: >-
@@ -297,10 +297,10 @@ spec:
       expression: >-
         variables.imageQualified.map(e, [e[0], e[1].matches('^docker[.]io/[^/]+$') ? 'docker.io/library/' + e[1].substring(10) : e[1]])
   validations:
-    - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
+    - expression: "!((has(request.namespace) ? request.namespace : '') in ['kube-system', 'longhorn-system'])"
       message: kube-system and longhorn-system are written only by the break-glass identity
     - expression: >-
-        request.namespace != 'wireguard-home' ||
+        (has(request.namespace) ? request.namespace : '') != 'wireguard-home' ||
         (has(oldObject.metadata.annotations) && 'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations)
       message: always-ask remediation requires a proxy-verified per-action Matrix approval annotation
     - expression: >-
@@ -411,7 +411,7 @@ spec:
     - name: pinnedImagePattern
       expression: "'^((docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io|lscr[.]io|registry[.]prophet[.]jopdorp[.]nl|gitea[.]claw[.]jopdorp[.]nl)/)?[a-z0-9]+([_-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
   validations:
-    - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
+    - expression: "!((has(request.namespace) ? request.namespace : '') in ['kube-system', 'longhorn-system'])"
       message: kube-system and longhorn-system go through the break-glass identity
     # A helm rollback may unpin back to the exact tag the live digest was pinned from; the host's own rollback
     # restores an earlier revision's images and marks the workload with nanoclaw.dev/rollback-to while it runs.
@@ -453,7 +453,7 @@ spec:
     - name: breakglass-service-account
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-breakglass'
   validations:
-    - expression: request.namespace == '' || request.namespace in ['kube-system', 'longhorn-system']
+    - expression: (has(request.namespace) ? request.namespace : '') == '' || (has(request.namespace) ? request.namespace : '') in ['kube-system', 'longhorn-system']
       message: the break-glass identity writes only in kube-system and longhorn-system
     # escalate and bind let it update the named chart RBAC; freezing rules and subjects keeps that from granting anything new.
     - expression: >-
@@ -501,13 +501,13 @@ spec:
     - expression: "!has(variables.pod.initContainers) && variables.pod.containers.size() == 1"
       message: a remediation Job runs exactly one container
     - expression: >-
-        request.namespace != 'nanoclaw-remediator' ||
+        (has(request.namespace) ? request.namespace : '') != 'nanoclaw-remediator' ||
         (variables.pod.containers[0].image == 'registry.k8s.io/kubectl:v1.35.9@sha256:436cbaa8a019152063d638f412cf9d73ec29e56061529d28cbc231c6ab1b37a4' &&
          has(variables.pod.serviceAccountName) && variables.pod.serviceAccountName in ['nanoclaw-remediator', 'nanoclaw-breakglass'] &&
          variables.volumes.all(v, has(v.emptyDir)))
       message: the pod-exec runner is the pinned kubectl image under the writer or break-glass account
     - expression: >-
-        request.namespace != 'security' ||
+        (has(request.namespace) ? request.namespace : '') != 'security' ||
         (variables.pod.containers[0].image == 'gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd80edc663df6def362cd22e79bcdf00ac53f' &&
          variables.volumes.all(v, has(v.secret) && has(v.secret.items) && v.secret.items.all(i, i.key == '.dockerconfigjson')))
       message: the build Job is the pinned kaniko image with only the registry credentials
@@ -541,7 +541,7 @@ spec:
         request.userInfo.username in ['nanoclaw-remediator', 'nanoclaw-helm', 'nanoclaw-breakglass', 'nanoclaw-remediation-approver']
           .map(n, 'system:serviceaccount:nanoclaw-remediator:' + n)
   validations:
-    - expression: request.namespace != 'backups'
+    - expression: (has(request.namespace) ? request.namespace : '') != 'backups'
       message: nothing in backups is ever deleted
     - expression: >-
         request.resource.group != 'longhorn.io' ||
