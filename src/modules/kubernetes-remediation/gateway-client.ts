@@ -267,7 +267,7 @@ function kanikoJob(plan: BuildImagePlan, pushSecret: string): Record<string, unk
               name: 'kaniko',
               image: KANIKO_IMAGE,
               args: [
-                '--context=git://github.com/jopdorp/k8s.jegor.nl.git#refs/heads/master',
+                '--context=git://gitea.claw.jopdorp.nl/cluster/k8s.jegor.nl.git#refs/heads/master',
                 `--context-sub-path=${context}`,
                 `--dockerfile=${dockerfile.slice(context.length + 1)}`,
                 `--destination=${image}`,

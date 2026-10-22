@@ -114,7 +114,7 @@ export async function startKubernetesRemediation(
       memoryDir: path.join(resolveGroupFolderPath(group.folder), 'memory'),
       helm: helmThroughOneCli(agent, config.apiServer, path.join(DATA_DIR, 'helm')),
       git: gitWithDeployKey(checkout, '/run/nanoclaw/git'),
-      remote: 'git@github.com:jopdorp/k8s.jegor.nl.git',
+      remote: 'ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/cluster/k8s.jegor.nl.git',
     });
   };
   const helm = helmFor(config.helmOneCliAgent, false);

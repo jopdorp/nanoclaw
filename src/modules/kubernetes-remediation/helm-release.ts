@@ -946,8 +946,8 @@ export class HelmReleaseExecutor {
     if (!fs.existsSync(path.join(this.options.checkout, '.git'))) {
       fs.mkdirSync(this.options.checkout, { recursive: true });
       await this.options.git(['init', '-q']);
-      await this.options.git(['remote', 'add', 'origin', this.options.remote]);
     }
+    await this.options.git(['config', 'remote.origin.url', this.options.remote]);
     await this.options.git(['fetch', '-q', '--depth', '1', 'origin', 'master']);
     await this.options.git(['reset', '-q', '--hard', 'FETCH_HEAD']);
   }

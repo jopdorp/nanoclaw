@@ -41,7 +41,8 @@ Checkpoint: rerun the existing adversarial CEL/RBAC suite on disposable k3s firs
 
 ## 4. [operator=me] Create runtime Secrets and start only OneCLI
 
-Create a write deploy key on `jopdorp/k8s.jegor.nl` from a fresh `ssh-keygen -t ed25519 -N '' -f id_ed25519`, then pin GitHub's host key with `ssh-keyscan github.com > known_hosts` checked against GitHub's published fingerprints.
+Create a write deploy key on Gitea's `cluster/k8s.jegor.nl` from a fresh `ssh-keygen -t ed25519 -N '' -f id_ed25519`, then pin Gitea's host key with `ssh-keyscan -p 2222 gitea-ssh.gitea.svc.cluster.local > known_hosts` from a pod, checked against `/data/ssh/gitea.rsa.pub` in the gitea pod.
+TODO: push-mirror `cluster/k8s.jegor.nl` to `github.com/jopdorp/k8s.jegor.nl` once there is a GitHub PAT for it.
 Store both as `kubectl create secret generic -n nanoclaw-remediator orfie-git-deploy-key --from-file=id_ed25519 --from-file=known_hosts`, and shred the local files.
 The orchestrator mounts it read-only at `/run/nanoclaw/git` for the Helm path's `git push`; without it helm-values plans fail before any upgrade.
 
