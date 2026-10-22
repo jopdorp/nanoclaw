@@ -110,10 +110,6 @@ function valuesDiff(live: Values, file: Values): string[] {
     .map((path) => `${path}: ${show(path, a.get(path))} -> ${show(path, b.get(path))}`);
 }
 
-function valueAt(values: Values, dotted: string): unknown {
-  return dotted.split('.').reduce<unknown>((node, key) => (node as Values | undefined)?.[key], values);
-}
-
 /** Container images of a rendered or installed manifest, keyed `<kind>/<name>/<container>`. */
 function manifestImages(objects: Values[]): Map<string, string> {
   const images = new Map<string, string>();
@@ -619,7 +615,7 @@ export class HelmReleaseExecutor {
       ) as { manifest?: string };
       return objects(manifest);
     } catch (error) {
-      throw new Error(`helm cannot render the edited values: ${reason(error)}`);
+      throw new Error(`helm cannot render the edited values: ${reason(error)}`, { cause: error });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
