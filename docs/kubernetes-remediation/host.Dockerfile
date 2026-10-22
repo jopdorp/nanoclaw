@@ -36,7 +36,7 @@ COPY scripts ./scripts
 COPY bin ./bin
 COPY .claude/skills/add-codex ./.claude/skills/add-codex
 COPY .claude/skills/add-onecli ./.claude/skills/add-onecli
-COPY container/AGENTS.md container/cli-tools.json ./container/
+COPY container/AGENTS.md container/CLAUDE.md container/cli-tools.json ./container/
 COPY container/agent-runner/src ./container/agent-runner/src
 RUN chown -R node:node /opt/nanoclaw
 USER node
