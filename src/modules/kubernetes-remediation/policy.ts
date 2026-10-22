@@ -49,7 +49,7 @@ const TAG_RE = /^\w[\w.-]{0,127}$/;
 const VALUES_FILE_RE = /^kubernetes\/helm-charts\/[a-z0-9]+(?:-[a-z0-9]+)*-values\.yaml$/;
 const VALUES_PATH_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
 const IMAGE_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest)$/;
-const PINNED_RE = /(?:^|@)sha256:[0-9a-f]{64}$/;
+const PINNED_RE = /^(?:\w[\w.-]{0,127}@)?sha256:[0-9a-f]{64}$/;
 const VAULTWARDEN_RE = /^docker\.io\/vaultwarden\/server@sha256:[0-9a-f]{64}$/;
 const WIREGUARD_RE = /^lscr\.io\/linuxserver\/wireguard@sha256:[0-9a-f]{64}$/;
 

@@ -276,7 +276,8 @@ spec:
 ---
 # helm upgrade renders whole charts, so the workload-guard freezes above cannot
 # apply to the nanoclaw-helm identity. Its workload writes keep the namespace
-# allowlist and the digest-only rule for every new or changed image.
+# allowlist and the digest-only rule for every new or changed image, and it may
+# not mint a token for another ServiceAccount through a token Secret.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -290,6 +291,11 @@ spec:
         apiVersions: [v1]
         operations: [CREATE, UPDATE]
         resources: [deployments, statefulsets, daemonsets]
+        scope: Namespaced
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [secrets]
         scope: Namespaced
   matchConditions:
     - name: helm-service-account
@@ -308,8 +314,12 @@ spec:
   validations:
     - expression: request.namespace in ['gitea', 'nextcloud', 'logging', 'excalidraw', 'trivy-operator', 'wiki-js']
       message: the Helm path writes only the allowlisted release namespaces
-    - expression: variables.newImages.all(i, i in variables.oldImages || i.matches(variables.pinnedImagePattern))
+    - expression: >-
+        request.resource.resource == 'secrets' ||
+        variables.newImages.all(i, i in variables.oldImages || i.matches(variables.pinnedImagePattern))
       message: a new or changed image from the Helm path must come from a trusted registry pinned by sha256 digest
+    - expression: request.resource.resource != 'secrets' || object.type != 'kubernetes.io/service-account-token'
+      message: the Helm path may not create ServiceAccount token Secrets
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

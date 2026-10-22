@@ -9,7 +9,7 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 import { isMap, isScalar, parseDocument } from 'yaml';
 
 import type { KubernetesJsonClient } from './gateway-client.js';
@@ -20,6 +20,7 @@ const exec = promisify(execFile);
 const DAY = 24 * 60 * 60_000;
 // Only these leaves are echoed back on a before mismatch; anything else may be a credential.
 const ECHOED_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest|replicas|replicaCount|enabled)$/;
+const RELEASE_RE = /^[a-z0-9][a-z0-9.-]{0,52}$/;
 const ENTRY_RE =
   /^- (\S+) plan (\S+) (Deployment|StatefulSet|DaemonSet)\/(\S+) (container:\S+|init:\S+|replicas) (\S+)$/;
 
@@ -65,7 +66,7 @@ export function editValues(text: string, set: HelmValuesPlan['operation']['set']
   let result = text;
   for (const { path: dotted, before, after } of set) {
     const doc = parseDocument(result);
-    if (doc.errors.length) throw new Error(`values file does not parse: ${doc.errors[0].message}`);
+    if (doc.errors.length) throw new Error(`values file does not parse: ${doc.errors[0].code}`);
     const keys = dotted.split('.');
     const node = doc.getIn(keys, true);
     if (before === null) {
@@ -103,6 +104,10 @@ export function editValues(text: string, set: HelmValuesPlan['operation']['set']
             : JSON.stringify(after);
     result = result.slice(0, node.range[0]) + literal + result.slice(node.range[1]);
   }
+  const expected = parseDocument(text);
+  for (const { path: dotted, after } of set) expected.setIn(dotted.split('.'), expected.createNode(after));
+  if (!isDeepStrictEqual(parseDocument(result).toJS(), expected.toJS()))
+    throw new Error('the edit changes more than the given scalar paths');
   return result;
 }
 
@@ -131,10 +136,21 @@ export function helmThroughOneCli(agent: string, apiServer: string, home: string
 }
 
 export class HelmReleaseExecutor {
+  // bind and apply share one checkout and must not overlap a running upgrade.
+  private queue: Promise<unknown> = Promise.resolve();
+
   constructor(private readonly options: HelmReleaseOptions) {}
 
+  bind(plan: HelmValuesPlan): Promise<HelmValuesPlan> {
+    return this.serial(() => this.bindNow(plan));
+  }
+
+  apply(plan: HelmValuesPlan): Promise<ExecutionResult> {
+    return this.serial(() => this.applyNow(plan));
+  }
+
   /** Binds the plan to the release's latest revision Secret and checks every `before` against the repo. */
-  async bind(plan: HelmValuesPlan): Promise<HelmValuesPlan> {
+  private async bindNow(plan: HelmValuesPlan): Promise<HelmValuesPlan> {
     this.chart(plan);
     const anchor = await this.latestRelease(plan);
     await this.sync();
@@ -142,7 +158,7 @@ export class HelmReleaseExecutor {
     return { ...plan, target: { ...plan.target, ...anchor } };
   }
 
-  async apply(plan: HelmValuesPlan): Promise<ExecutionResult> {
+  private async applyNow(plan: HelmValuesPlan): Promise<ExecutionResult> {
     const chart = this.chart(plan);
     const { name: release, namespace } = plan.target;
     const ns = namespace ?? '';
@@ -175,7 +191,7 @@ export class HelmReleaseExecutor {
       };
     }
 
-    const diff = await this.driftDiff(release, ns);
+    const diff = await this.driftDiff(release, ns).catch((error: unknown) => [`drift check failed: ${reason(error)}`]);
     if (diff.length) {
       const imageRegressed = diff.some((line) => !line.includes(' replicas '));
       const outcome = imageRegressed ? await this.rollback(release, ns, metadata.revision) : 'kept the upgrade';
@@ -216,7 +232,8 @@ export class HelmReleaseExecutor {
   async recordPatch(plan: RemediationPlan, object: unknown): Promise<string> {
     const live = object as Workload;
     const release = live.metadata?.annotations?.['meta.helm.sh/release-name'];
-    if (live.metadata?.labels?.['app.kubernetes.io/managed-by'] !== 'Helm' || !release) return '';
+    if (live.metadata?.labels?.['app.kubernetes.io/managed-by'] !== 'Helm' || !release || !RELEASE_RE.test(release))
+      return '';
     const stamp = `- ${new Date().toISOString()} plan ${plan.id} ${plan.target.kind}/${plan.target.name}`;
     const pod = live.spec?.template?.spec;
     const op = plan.operation;
@@ -308,8 +325,16 @@ export class HelmReleaseExecutor {
     await this.options.git(['reset', '-q', '--hard', 'FETCH_HEAD']);
   }
 
+  private serial<T>(run: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(run, run);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
   private read(plan: HelmValuesPlan): string {
-    return fs.readFileSync(path.join(this.options.checkout, plan.operation.file), 'utf8');
+    const file = path.join(fs.realpathSync(this.options.checkout), plan.operation.file);
+    if (fs.realpathSync(file) !== file) throw new Error(`${plan.operation.file} is a symlink`);
+    return fs.readFileSync(file, 'utf8');
   }
 
   private async rollback(release: string, ns: string, revision: number): Promise<string> {
