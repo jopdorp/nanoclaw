@@ -243,7 +243,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // provider natively handles slash commands), others get XML.
     const resumed = keep.filter((m) => interruptedBy.delete(m.id)).length > 0;
     const prompt =
-      (resumed ? `${INTERRUPT_PREFIX}\n` : '') + formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
+      (resumed ? `${INTERRUPT_PREFIX}\n` : '') +
+      formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 

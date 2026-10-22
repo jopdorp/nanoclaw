@@ -152,7 +152,8 @@ export function isRunnerCommand(msg: MessageInRow, providerName: string): boolea
 
 /** A person typing in chat: not a bot, a cli: injection, an echo, or another agent. */
 export function isHumanChat(msg: MessageInRow): boolean {
-  if ((msg.kind !== 'chat' && msg.kind !== 'chat-sdk') || msg.trigger !== 1 || msg.channel_type === 'agent') return false;
+  if ((msg.kind !== 'chat' && msg.kind !== 'chat-sdk') || msg.trigger !== 1 || msg.channel_type === 'agent')
+    return false;
   if (isSessionEcho(msg) || isFailureNotice(msg)) return false;
   const content = parseContent(msg.content);
   const senderId = extractSenderId(msg, content);
