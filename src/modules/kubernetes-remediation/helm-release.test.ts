@@ -121,6 +121,14 @@ it('a helm result that differs from the recorded patch rolls back and pushes not
   expect(commits()).toBe('1');
 });
 
+it('a commitOnly plan pushes the values without a helm upgrade', async () => {
+  const { executor, helm, plan, commits } = fixture('1.27.0');
+  const result = await executor.apply({ ...plan, commitOnly: true });
+  expect(result).toMatchObject({ applied: true, message: expect.stringContaining('not applied; pushed ') });
+  expect(helm.mock.calls.map(([args]) => args[0])).not.toContain('upgrade');
+  expect(commits()).toBe('2');
+});
+
 it('helm-install needs its values file in the repo and never runs helm without it', async () => {
   const { executor, helm, plan } = fixture('1.27.0');
   const install = {

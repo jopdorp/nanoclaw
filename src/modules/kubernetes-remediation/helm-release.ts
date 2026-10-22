@@ -270,6 +270,8 @@ export function helmThroughOneCli(agent: string, apiServer: string, home: string
     ).stdout;
 }
 
+const COMMITTED = 'committed for the applier, not applied';
+
 export class HelmReleaseExecutor {
   // bind and apply share one checkout and must not overlap a running upgrade.
   private queue: Promise<unknown> = Promise.resolve();
@@ -317,7 +319,7 @@ export class HelmReleaseExecutor {
       const edited = editValues(doc.text, plan.operation.set);
       fs.writeFileSync(path.join(this.options.checkout, file), doc.before + edited + doc.after);
       try {
-        await this.serverSideApply(objectPath, this.object(edited, plan.target), false);
+        if (!plan.commitOnly) await this.serverSideApply(objectPath, this.object(edited, plan.target), false);
         // eslint-disable-next-line no-catch-all/no-catch-all -- a refused apply leaves the repo as it was
       } catch (error) {
         await this.options.git(['checkout', '--', file]);
@@ -327,7 +329,7 @@ export class HelmReleaseExecutor {
           automaticWrites: 0,
         };
       }
-      return this.commit(file, `Orfie: ${plan.reason.split('\n', 1)[0]}`, 'applied');
+      return this.commit(file, `Orfie: ${plan.reason.split('\n', 1)[0]}`, plan.commitOnly ? COMMITTED : 'applied');
     });
   }
 
@@ -458,7 +460,7 @@ export class HelmReleaseExecutor {
       fs.writeFileSync(absolute, content);
       let applied = 0;
       try {
-        for (const { path: objectPath, object } of objects) {
+        for (const { path: objectPath, object } of plan.commitOnly ? [] : objects) {
           await this.serverSideApply(objectPath, object, false);
           applied++;
         }
@@ -472,7 +474,11 @@ export class HelmReleaseExecutor {
           automaticWrites: 0,
         };
       }
-      return this.commit(file, `Orfie: ${plan.reason.split('\n', 1)[0]}`, `applied ${objects.length} objects`);
+      return this.commit(
+        file,
+        `Orfie: ${plan.reason.split('\n', 1)[0]}`,
+        plan.commitOnly ? COMMITTED : `applied ${objects.length} objects`,
+      );
     });
   }
 
@@ -736,6 +742,7 @@ export class HelmReleaseExecutor {
     await this.sync();
     const file = path.join(this.options.checkout, plan.operation.file);
     fs.writeFileSync(file, editValues(await this.unchangedFromLive(plan), plan.operation.set));
+    if (plan.commitOnly) return this.commit(plan.operation.file, `Orfie: ${plan.reason.split('\n', 1)[0]}`, COMMITTED);
 
     const upgrade = ['upgrade', release, ...this.chartRef(chart), '--version', metadata.version];
     try {

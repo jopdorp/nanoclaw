@@ -33,6 +33,8 @@ interface PlanBase {
   target: TargetRef;
   reason: string;
   expiresAt: string;
+  /** git-backed operations only: commit and push, and leave the apply to the git→cluster applier. */
+  commitOnly?: true;
 }
 
 export interface ImagePlan extends PlanBase {

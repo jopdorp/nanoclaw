@@ -112,7 +112,11 @@ function targetFrom(value: unknown, manifest: boolean): TargetRef {
 
 export function parseRemediationPlan(value: unknown): RemediationPlan {
   const input = record(value, 'plan');
-  exactKeys(input, ['schemaVersion', 'id', 'incidentIds', 'target', 'reason', 'expiresAt', 'operation'], 'plan');
+  exactKeys(
+    input,
+    ['schemaVersion', 'id', 'incidentIds', 'target', 'reason', 'expiresAt', 'operation', 'commitOnly'],
+    'plan',
+  );
   if (input.schemaVersion !== 1) throw new Error('plan.schemaVersion must be 1');
   const id = string(input.id, 'plan.id', 36);
   if (!UUID_RE.test(id)) throw new Error('plan.id must be a lowercase UUID');
@@ -123,6 +127,9 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
   if (new Set(incidentIds).size !== incidentIds.length) throw new Error('plan.incidentIds must be unique');
   const operation = record(input.operation, 'plan.operation');
   const type = string(operation.type, 'plan.operation.type');
+  const gitOps = ['helm-values', 'helm-sync-values', 'manifest-edit', 'manifest-sync', 'repo-write'];
+  if (input.commitOnly !== undefined && (input.commitOnly !== true || !gitOps.includes(type)))
+    throw new Error(`plan.commitOnly must be true and only on ${gitOps.join(', ')}`);
   const base = {
     schemaVersion: 1 as const,
     id,
@@ -130,6 +137,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     target: targetFrom(input.target, ['manifest-edit', 'manifest-sync', 'repo-write'].includes(type)),
     reason: string(input.reason, 'plan.reason', 2000),
     expiresAt: string(input.expiresAt, 'plan.expiresAt', 64),
+    ...(input.commitOnly ? { commitOnly: true as const } : {}),
   };
   const runningDigest = () => {
     if (operation.runningDigest === undefined) return {};

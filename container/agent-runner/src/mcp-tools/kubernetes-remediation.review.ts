@@ -14,7 +14,7 @@ export const proposeKubernetesRemediation: McpToolDefinition = {
         plan: {
           type: 'object',
           description:
-            'Keys exactly: schemaVersion (1), id, incidentIds, target {apiVersion, kind, namespace, name, uid, resourceVersion}, reason, expiresAt, operation. ' +
+            'Keys exactly: schemaVersion (1), id, incidentIds, target {apiVersion, kind, namespace, name, uid, resourceVersion}, reason, expiresAt, operation, optionally commitOnly:true (git-backed operations only, for namespaces the git→cluster applier owns: the host commits and pushes, and skips its own apply). ' +
             'operation is one of: {type:"patch-image", containers [{name, initContainer (boolean)}], before (the exact image every listed container runs now), after (registry/repo:tag@sha256:digest)} on a Deployment, StatefulSet, DaemonSet or batch/v1 CronJob (its job template containers; the only change allowed in backups); ' +
             '{type:"restart", restartedAt}; {type:"scale", before, after}; {type:"delete-job"} (target a finished batch/v1 Job); ' +
             '{type:"delete-storage", reclaimConfirmed:true} on a PV, PVC or Longhorn volume (apiVersion "longhorn.io/v1beta2", kind "Volume", namespace "longhorn-system"); {type:"delete-snapshot", volume} on a Longhorn Snapshot (apiVersion "longhorn.io/v1beta2", kind "Snapshot", namespace "longhorn-system"), never one a backup references; ' +
