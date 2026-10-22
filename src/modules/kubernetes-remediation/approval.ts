@@ -199,6 +199,8 @@ export function registerKubernetesRemediationApproval(options: {
   registry?: RegistryFetch;
   t1: ReadonlySet<string>;
   grants?: () => StandingGrant[];
+  /** The digest a workload's pods run, for a tag-only image moving to another repository. */
+  runningDigest?: (target: ValidatedPlan['plan']['target'], containers: string[]) => Promise<string | undefined>;
   /** Approved changes by changeKey, so a resubmission after the card expired applies for a day. */
   yesFile?: string;
 }): void {
@@ -224,8 +226,31 @@ export function registerKubernetesRemediationApproval(options: {
     const because = approvedBefore(prepared.validated);
     return because ? { ...prepared, auto: true, approvedBefore: because } : prepared;
   };
+  /** Binds runningDigest from the live pods; whatever the agent put there is never trusted. */
+  const bindRunningDigest = async (input: unknown): Promise<unknown> => {
+    const plan = (input ?? {}) as { operation?: Record<string, unknown>; target?: ValidatedPlan['plan']['target'] };
+    const op = plan.operation;
+    if (!op || !plan.target || (op.type !== 'patch-image' && op.type !== 'manifest-edit')) return input;
+    const { runningDigest: _untrusted, ...rest } = op;
+    const tagOnly =
+      op.type === 'patch-image'
+        ? !String(op.before ?? '').includes('@sha256:')
+        : (Array.isArray(op.set) ? op.set : []).some(
+            (e: { path?: string; before?: unknown }) =>
+              /(?:^|\.)image$/.test(String(e.path)) && !String(e.before ?? '').includes('@sha256:'),
+          );
+    const containers =
+      op.type === 'patch-image' && Array.isArray(op.containers)
+        ? op.containers.map((c: { name?: string }) => String(c.name))
+        : [];
+    const digest =
+      tagOnly && options.runningDigest
+        ? await options.runningDigest(plan.target, containers).catch(() => undefined)
+        : undefined;
+    return { ...plan, operation: { ...rest, ...(digest ? { runningDigest: digest } : {}) } };
+  };
   const prepare = async (content: Record<string, unknown>): Promise<Prepared> => {
-    let validated = validateRemediationPlan(planInput(content));
+    let validated = validateRemediationPlan(await bindRunningDigest(planInput(content)));
     const { operation } = validated.plan;
     const repo = validated.lane === 'C' ? options.breakGlassHelm : options.helm;
     if (operation.type === 'helm-values' || operation.type === 'manifest-edit') {

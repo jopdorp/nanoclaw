@@ -22,6 +22,9 @@ spec:
       expression: "['wireguard-home']"
     - name: restartAnnotation
       expression: "'kubectl.kubernetes.io/restartedAt'"
+    # Set by the host to the digest a tag-only image's pods run, read from their status; admits the same bits elsewhere.
+    - name: verifiedDigest
+      expression: "'nanoclaw.dev/verified-digest'"
     - name: trustedRegistries
       expression: "['docker.io', 'docker.gitea.com', 'cr.fluentbit.io', 'ghcr.io', 'quay.io', 'registry.k8s.io', 'mirror.gcr.io', 'lscr.io', 'registry.prophet.jopdorp.nl', 'gitea.claw.jopdorp.nl']"
     - name: digestImagePattern
@@ -71,8 +74,8 @@ spec:
         dyn(oldObject.metadata).all(k, k in ['annotations', 'generation', 'managedFields', 'resourceVersion'] || (k in dyn(object.metadata) && dyn(oldObject.metadata)[k] == dyn(object.metadata)[k]))
       message: workload metadata is immutable
     - expression: >-
-        variables.newObjectAnnotations.all(k, (request.resource.resource == 'daemonsets' && k == 'deprecated.daemonset.template.generation') || (k in variables.oldObjectAnnotations && variables.newObjectAnnotations[k] == variables.oldObjectAnnotations[k])) &&
-        variables.oldObjectAnnotations.all(k, (request.resource.resource == 'daemonsets' && k == 'deprecated.daemonset.template.generation') || (k in variables.newObjectAnnotations && variables.oldObjectAnnotations[k] == variables.newObjectAnnotations[k]))
+        variables.newObjectAnnotations.all(k, (request.resource.resource == 'daemonsets' && k == 'deprecated.daemonset.template.generation') || k == variables.verifiedDigest || (k in variables.oldObjectAnnotations && variables.newObjectAnnotations[k] == variables.oldObjectAnnotations[k])) &&
+        variables.oldObjectAnnotations.all(k, (request.resource.resource == 'daemonsets' && k == 'deprecated.daemonset.template.generation') || k == variables.verifiedDigest || (k in variables.newObjectAnnotations && variables.oldObjectAnnotations[k] == variables.newObjectAnnotations[k]))
       message: workload annotations are immutable
     - expression: >-
         dyn(object.spec).all(k, k in ['replicas', 'template'] || (k in dyn(oldObject.spec) && dyn(object.spec)[k] == dyn(oldObject.spec)[k])) &&
@@ -117,7 +120,9 @@ spec:
               (c.image.matches(variables.digestImagePattern) &&
                (variables.imageRepos.exists(n, n[0] == c.image &&
                  variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1])) ||
-                (oc.image.matches('@sha256:[0-9a-f]{64}$') && c.image.endsWith(oc.image.substring(oc.image.size() - 72))))))))
+                (oc.image.matches('@sha256:[0-9a-f]{64}$') && c.image.endsWith(oc.image.substring(oc.image.size() - 72))) ||
+                (!oc.image.contains('@') && variables.verifiedDigest in variables.newObjectAnnotations &&
+                 c.image.endsWith('@' + variables.newObjectAnnotations[variables.verifiedDigest])))))))
       message: a new container image must retain its repository (or its exact digest) and use a trusted registry sha256 digest
     - expression: >-
         variables.newInitContainers.all(c,
@@ -127,7 +132,9 @@ spec:
               (c.image.matches(variables.digestImagePattern) &&
                (variables.imageRepos.exists(n, n[0] == c.image &&
                  variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1])) ||
-                (oc.image.matches('@sha256:[0-9a-f]{64}$') && c.image.endsWith(oc.image.substring(oc.image.size() - 72))))))))
+                (oc.image.matches('@sha256:[0-9a-f]{64}$') && c.image.endsWith(oc.image.substring(oc.image.size() - 72))) ||
+                (!oc.image.contains('@') && variables.verifiedDigest in variables.newObjectAnnotations &&
+                 c.image.endsWith('@' + variables.newObjectAnnotations[variables.verifiedDigest])))))))
       message: a new init-container image must retain its repository (or its exact digest) and use a trusted registry sha256 digest
 ---
 apiVersion: admissionregistration.k8s.io/v1

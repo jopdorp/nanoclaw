@@ -109,7 +109,15 @@ it('a helm result that differs from the recorded patch rolls back and pushes not
   );
   const result = await executor.apply(plan);
   expect(result).toMatchObject({ applied: false, message: expect.stringContaining('live 1, patch 2') });
-  expect(helm.mock.calls.map(([args]) => args[0])).toEqual(['status', 'get', 'show', 'get', 'upgrade', 'get', 'rollback']);
+  expect(helm.mock.calls.map(([args]) => args[0])).toEqual([
+    'status',
+    'get',
+    'show',
+    'get',
+    'upgrade',
+    'get',
+    'rollback',
+  ]);
   expect(commits()).toBe('1');
 });
 

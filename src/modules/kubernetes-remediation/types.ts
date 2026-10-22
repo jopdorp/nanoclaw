@@ -41,6 +41,8 @@ export interface ImagePlan extends PlanBase {
     containers: Array<{ name: string; initContainer: boolean }>;
     before: string;
     after: string;
+    /** Bound by the host: the digest the target's pods run when `before` is tag-only. */
+    runningDigest?: string;
   };
 }
 
@@ -95,7 +97,7 @@ export interface HelmValuesPlan extends PlanBase {
 
 /** Edits one object of a k8s.jegor.nl manifest, the plan's target, and applies it server-side. */
 export interface ManifestEditPlan extends PlanBase {
-  operation: { type: 'manifest-edit'; file: string; set: ValuesEdit[] };
+  operation: { type: 'manifest-edit'; file: string; set: ValuesEdit[]; runningDigest?: string };
 }
 
 /** Writes the target's live object to its manifest file; no cluster change. */

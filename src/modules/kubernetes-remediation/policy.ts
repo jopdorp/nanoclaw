@@ -129,8 +129,14 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     reason: string(input.reason, 'plan.reason', 2000),
     expiresAt: string(input.expiresAt, 'plan.expiresAt', 64),
   };
+  const runningDigest = () => {
+    if (operation.runningDigest === undefined) return {};
+    const digest = string(operation.runningDigest, 'plan.operation.runningDigest', 71);
+    if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error('plan.operation.runningDigest must be a sha256 digest');
+    return { runningDigest: digest };
+  };
   if (type === 'patch-image') {
-    exactKeys(operation, ['type', 'containers', 'before', 'after'], 'plan.operation');
+    exactKeys(operation, ['type', 'containers', 'before', 'after', 'runningDigest'], 'plan.operation');
     if (!Array.isArray(operation.containers) || operation.containers.length === 0 || operation.containers.length > 16) {
       throw new Error('plan.operation.containers must contain 1 through 16 entries');
     }
@@ -155,6 +161,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
         containers,
         before: string(operation.before, 'plan.operation.before', 1000),
         after: string(operation.after, 'plan.operation.after', 1000),
+        ...runningDigest(),
       },
     };
   }
@@ -256,12 +263,16 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     return { ...base, operation: { type, file, ...(chart ? { chart } : {}), set: editsFrom(operation.set) } };
   }
   if (type === 'manifest-edit' || type === 'manifest-sync') {
-    exactKeys(operation, type === 'manifest-edit' ? ['type', 'file', 'set'] : ['type', 'file'], 'plan.operation');
+    exactKeys(
+      operation,
+      type === 'manifest-edit' ? ['type', 'file', 'set', 'runningDigest'] : ['type', 'file'],
+      'plan.operation',
+    );
     const file = string(operation.file, 'plan.operation.file', 256);
     if (!MANIFEST_FILE_RE.test(file) || file.split('/').includes('..'))
       throw new Error('plan.operation.file must be a kubernetes/**.yaml path in k8s.jegor.nl');
     return type === 'manifest-edit'
-      ? { ...base, operation: { type, file, set: editsFrom(operation.set) } }
+      ? { ...base, operation: { type, file, set: editsFrom(operation.set), ...runningDigest() } }
       : { ...base, operation: { type, file } };
   }
   if (type === 'pod-exec') {
@@ -375,7 +386,7 @@ export function parseImage(image: string) {
   return { registry, repository, tag, digest };
 }
 
-export function checkImageUpdate(beforeImage: string, afterImage: string): void {
+export function checkImageUpdate(beforeImage: string, afterImage: string, runningDigest?: string): void {
   const before = parseImage(beforeImage);
   const after = parseImage(afterImage);
   if (
@@ -387,14 +398,15 @@ export function checkImageUpdate(beforeImage: string, afterImage: string): void 
   // The same digest is the same content, so it may move to another trusted registry or repository.
   if (
     `${before.registry}/${before.repository}` !== `${after.registry}/${after.repository}` &&
-    !sameDigest(beforeImage, afterImage)
+    !sameDigest(beforeImage, afterImage, runningDigest)
   ) {
     throw new Error('image repository may not change unless the digest stays the same');
   }
 }
 
-function sameDigest(before: string, after: string): boolean {
-  const digest = parseImage(before).digest;
+/** The same bits: the digest `before` pins, or for a tag-only `before` the digest its pods run. */
+function sameDigest(before: string, after: string, runningDigest?: string): boolean {
+  const digest = parseImage(before).digest ?? runningDigest;
   return !!digest && digest === parseImage(after).digest;
 }
 
@@ -441,7 +453,7 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
 
   if (plan.operation.type === 'patch-image') {
     if (!IMAGE_KINDS.includes(plan.target.kind)) throw new Error('patch-image requires a workload or CronJob target');
-    checkImageUpdate(plan.operation.before, plan.operation.after);
+    checkImageUpdate(plan.operation.before, plan.operation.after, plan.operation.runningDigest);
     // The base admission policy rejects a rollback to a mutable tag unless the
     // pinned image was derived from exactly that tag. Any other rollout gets the
     // restart attempt only; a digest-pinned or exact-tag prior image may also
@@ -512,7 +524,7 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
         if (/(?:^|\.)image$/.test(path)) {
           if (typeof before !== 'string' || typeof after !== 'string')
             throw new Error(`${path} must be an image reference`);
-          checkImageUpdate(before, after);
+          checkImageUpdate(before, after, plan.operation.runningDigest);
         }
       }
     }
@@ -618,7 +630,7 @@ export function isAutoApproved(
   if (operation.type === 'manifest-edit') {
     return operation.set.every(({ path, before, after }) =>
       /(?:^|\.)image$/.test(path)
-        ? sameDigest(String(before), String(after)) ||
+        ? sameDigest(String(before), String(after), operation.runningDigest) ||
           sameVersionLine(parseImage(String(before)).tag, parseImage(String(after)).tag, critical)
         : path !== 'spec.replicas' || target.kind !== 'StatefulSet',
     );
@@ -626,7 +638,7 @@ export function isAutoApproved(
   if (operation.type === 'scale') return target.kind === 'Deployment';
   if (operation.type === 'patch-image')
     return (
-      sameDigest(operation.before, operation.after) ||
+      sameDigest(operation.before, operation.after, operation.runningDigest) ||
       sameVersionLine(parseImage(operation.before).tag, parseImage(operation.after).tag, critical)
     );
   if (operation.type !== 'helm-values' || !helm) return false;

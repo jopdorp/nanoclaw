@@ -30,6 +30,7 @@ import {
   KubernetesRolloutObserver,
   OneCliKubernetesClient,
   registryThroughOneCli,
+  runningDigest,
 } from './gateway-client.js';
 import { gitWithDeployKey, helmThroughOneCli, HelmReleaseExecutor, type HelmChart } from './helm-release.js';
 import { createAlertWebhookHandlers, runHealthWatch } from './health.js';
@@ -168,6 +169,7 @@ export async function startKubernetesRemediation(
   if (cleaned) log.warn('Cleaned stale Kubernetes remediation capabilities', { cleaned });
   registerKubernetesRemediationApproval({
     team,
+    runningDigest: (target, containers) => runningDigest(reader, target, containers),
     grants: () => readGrants(path.join(DATA_DIR, 'kubernetes-remediation.json')),
     yesFile: path.join(DATA_DIR, 'kubernetes-remediation-yes.json'),
     approverUserId: config.matrixApproverUserId,

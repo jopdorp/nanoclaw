@@ -18,6 +18,7 @@ import type {
   RemediationPlan,
   RepoWritePlan,
   SecretWritePlan,
+  TargetRef,
   SnapshotDeletePlan,
   ValidatedPlan,
 } from './types.js';
@@ -287,16 +288,53 @@ function kanikoJob(plan: BuildImagePlan, pushSecret: string): Record<string, unk
   };
 }
 
+const VERIFIED_DIGEST = 'nanoclaw.dev/verified-digest';
+
+interface ContainerStatus {
+  name: string;
+  imageID?: string;
+}
+
+/** The one digest every pod of the workload runs for these containers (all when none are named), from imageID. */
+export async function runningDigest(
+  client: KubernetesJsonClient,
+  target: TargetRef,
+  containers: string[],
+): Promise<string | undefined> {
+  const collection = WORKLOAD_COLLECTIONS[target.kind];
+  if (!collection || !target.namespace || target.kind === 'CronJob') return undefined;
+  const ns = encodeURIComponent(target.namespace);
+  const workload = (await client.request(
+    `/apis/${collection[0]}/namespaces/${ns}/${collection[1]}/${encodeURIComponent(target.name)}`,
+  )) as { spec?: { selector?: { matchLabels?: Record<string, string> } } };
+  const labels = Object.entries(workload.spec?.selector?.matchLabels ?? {}).map(([k, v]) => `${k}=${v}`);
+  if (!labels.length) return undefined;
+  const pods = (await client.request(
+    `/api/v1/namespaces/${ns}/pods?labelSelector=${encodeURIComponent(labels.join(','))}`,
+  )) as {
+    items?: Array<{ status?: { containerStatuses?: ContainerStatus[]; initContainerStatuses?: ContainerStatus[] } }>;
+  };
+  const digests = new Set(
+    (pods.items ?? []).flatMap((pod) =>
+      [...(pod.status?.containerStatuses ?? []), ...(pod.status?.initContainerStatuses ?? [])]
+        .filter((c) => !containers.length || containers.includes(c.name))
+        .map((c) => /sha256:[0-9a-f]{64}/.exec(c.imageID ?? '')?.[0] ?? ''),
+    ),
+  );
+  return digests.size === 1 && !digests.has('') ? [...digests][0] : undefined;
+}
+
 function mergePatch(plan: RemediationPlan): Record<string, unknown> {
   const resourceVersion = plan.target.resourceVersion;
   if (plan.operation.type === 'patch-image') {
-    const { containers, after } = plan.operation;
+    const { containers, after, runningDigest } = plan.operation;
     const images = (init: boolean) =>
       containers.filter((c) => c.initContainer === init).map(({ name }) => ({ name, image: after }));
     const spec = { containers: images(false), initContainers: images(true) };
     const template = { spec: Object.fromEntries(Object.entries(spec).filter(([, list]) => list.length)) };
     return {
-      metadata: { resourceVersion },
+      // The workload guard reads this to admit a tag-only image moving to another repository with the same bits.
+      metadata: { resourceVersion, ...(runningDigest ? { annotations: { [VERIFIED_DIGEST]: runningDigest } } : {}) },
       spec: plan.target.kind === 'CronJob' ? { jobTemplate: { spec: { template } } } : { template },
     };
   }
