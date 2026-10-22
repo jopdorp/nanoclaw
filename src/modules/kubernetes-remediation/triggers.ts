@@ -11,15 +11,15 @@ const TRIVY_REPORTS = '/apis/aquasecurity.github.io/v1alpha1/vulnerabilityreport
 const TRIVY_CLUSTER_REPORTS = '/apis/aquasecurity.github.io/v1alpha1/clustervulnerabilityreports';
 const MAX_FALCO_BODY = 64 * 1024;
 
-type IncidentSink = (incident: RemediationIncident) => Promise<void>;
+export type IncidentSink = (incident: RemediationIncident) => Promise<void>;
 
-function record(value: unknown): Record<string, unknown> | null {
+export function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
 }
 
-function text(value: unknown): string | null {
+export function text(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
@@ -50,7 +50,7 @@ export function trivyIncident(value: unknown): RemediationIncident | null {
 }
 
 /** Survives restarts so a host restart does not replay every existing report. */
-class PersistentDedupe {
+export class PersistentDedupe {
   private readonly ids: Set<string>;
   constructor(
     private readonly file: string | undefined,
@@ -164,9 +164,11 @@ function bearerOk(header: string, secret: Buffer): boolean {
   return header.length === expected.length && timingSafeEqual(Buffer.from(header), Buffer.from(expected));
 }
 
-export function createFalcoWebhookHandler(options: {
+/** A bearer-authenticated, rate-limited JSON webhook whose payload becomes zero or more incidents. */
+export function createWebhookHandler(options: {
   secret: () => Buffer;
   sink: IncidentSink;
+  incidents: (payload: Record<string, unknown>, body: Buffer) => RemediationIncident[];
   requestsPerMinute?: number;
 }): (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void> {
   let window = 0;
@@ -204,23 +206,36 @@ export function createFalcoWebhookHandler(options: {
       res.writeHead(400).end();
       return;
     }
-    const outputFields = record(payload.output_fields) ?? record(payload.outputFields) ?? {};
-    const namespace = text(outputFields['k8s.ns.name']);
-    const workloadName = text(outputFields['k8s.deployment.name']) ?? text(outputFields['k8s.pod.name']);
-    const eventTime = text(payload.time) ?? new Date().toISOString();
-    const digest = createHash('sha256').update(body).digest('hex');
-    await options.sink({
-      id: `falco:${digest}`,
-      source: 'falco',
-      observedAt: eventTime,
-      namespace,
-      workload: workloadName
-        ? { kind: outputFields['k8s.deployment.name'] ? 'Deployment' : 'Pod', name: workloadName }
-        : null,
-      severity: text(payload.priority)?.toLowerCase() ?? 'unknown',
-      summary: text(payload.rule) ?? text(payload.output) ?? 'Falco event',
-      evidence: { rule: payload.rule ?? null, source: payload.source ?? null, outputFields },
-    });
+    for (const incident of options.incidents(payload, body)) await options.sink(incident);
     res.writeHead(202).end();
   };
+}
+
+export function createFalcoWebhookHandler(options: {
+  secret: () => Buffer;
+  sink: IncidentSink;
+  requestsPerMinute?: number;
+}): (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void> {
+  return createWebhookHandler({
+    ...options,
+    incidents: (payload, body) => {
+      const outputFields = record(payload.output_fields) ?? record(payload.outputFields) ?? {};
+      const namespace = text(outputFields['k8s.ns.name']);
+      const workloadName = text(outputFields['k8s.deployment.name']) ?? text(outputFields['k8s.pod.name']);
+      return [
+        {
+          id: `falco:${createHash('sha256').update(body).digest('hex')}`,
+          source: 'falco',
+          observedAt: text(payload.time) ?? new Date().toISOString(),
+          namespace,
+          workload: workloadName
+            ? { kind: outputFields['k8s.deployment.name'] ? 'Deployment' : 'Pod', name: workloadName }
+            : null,
+          severity: text(payload.priority)?.toLowerCase() ?? 'unknown',
+          summary: text(payload.rule) ?? text(payload.output) ?? 'Falco event',
+          evidence: { rule: payload.rule ?? null, source: payload.source ?? null, outputFields },
+        },
+      ];
+    },
+  });
 }

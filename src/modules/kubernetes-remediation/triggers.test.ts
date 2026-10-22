@@ -3,6 +3,7 @@ import type http from 'node:http';
 import { describe, expect, it } from 'vitest';
 
 import type { KubernetesJsonClient } from './gateway-client.js';
+import { alertmanagerIncidents } from './health.js';
 import { createFalcoWebhookHandler, runTrivyWatchers, trivyIncident } from './triggers.js';
 
 describe('Trivy trigger normalization', () => {
@@ -106,4 +107,28 @@ describe('Falco webhook authentication', () => {
     await expect(invoke('Bearer review-secret')).resolves.toBe(202);
     expect(incidents).toHaveLength(1);
   });
+});
+
+it('an Alertmanager firing and resolved alert become an incident and a resolution with their own ids', () => {
+  const alert = {
+    fingerprint: 'f1',
+    startsAt: '2026-10-22T10:00:00Z',
+    labels: { alertname: 'KubePodCrashLooping', severity: 'critical', namespace: 'gitea', pod: 'gitea-0' },
+    annotations: { description: 'gitea-0 restarts' },
+  };
+  const [firing, resolved] = alertmanagerIncidents({
+    groupKey: 'g',
+    alerts: [
+      { ...alert, status: 'firing' },
+      { ...alert, status: 'resolved', endsAt: '2026-10-22T10:05:00Z' },
+    ],
+  });
+  expect(firing).toMatchObject({
+    id: 'alert:f1:2026-10-22T10:00:00Z',
+    source: 'alertmanager',
+    severity: 'critical',
+    namespace: 'gitea',
+    summary: 'KubePodCrashLooping: gitea-0 restarts',
+  });
+  expect(resolved).toMatchObject({ id: 'alert:f1:2026-10-22T10:00:00Z:resolved', severity: 'resolved' });
 });

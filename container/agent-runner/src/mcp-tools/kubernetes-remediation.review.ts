@@ -26,7 +26,8 @@ export const proposeKubernetesRemediation: McpToolDefinition = {
             '{type:"manifest-edit", file ("kubernetes/<path>.yaml" in k8s.jegor.nl), set [{path (dotted, numeric list indices, e.g. "spec.template.spec.containers.0.image"), before, after}]} with target the object in that file (any apiVersion/kind, uid:"-", resourceVersion:"-"): the object must equal live, then the host applies it server-side and pushes; ' +
             '{type:"manifest-sync", file} with the same target writes the live object to the file and pushes, no cluster change; ' +
             '{type:"build-image", dockerfile, context (k8s.jegor.nl paths, dockerfile inside context), image ("registry.prophet.jopdorp.nl/<name>:<tag>")} with target {apiVersion:"batch/v1", kind:"Job", namespace:"security", name (the build Job to create), uid:"-", resourceVersion:"-"}: the host builds with kaniko, pushes and replies with the digest; ' +
-            'Changes no operation covers are not plans: send Jegor the exact commands.',
+            'Changes no operation covers are not plans: send Jegor the exact commands. ' +
+            'Incidents reach you from http://nanoclaw-remediator.nanoclaw-remediator.svc:3000/webhook/<kubernetes-falco|alertmanager|uptime-kuma|crowdsec> (CrowdSec http plugin format `{"alerts": {{.|toJson}}}`); the last three take Authorization: Bearer from Secret orfie-alert-webhook (key bearer) in monitoring and crowdsec.',
         },
       },
       required: ['plan'],

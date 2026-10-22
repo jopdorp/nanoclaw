@@ -148,7 +148,7 @@ export interface ValidatedPlan {
 
 export interface RemediationIncident {
   id: string;
-  source: 'trivy' | 'falco';
+  source: 'trivy' | 'falco' | 'alertmanager' | 'uptime-kuma' | 'crowdsec' | 'health';
   observedAt: string;
   namespace: string | null;
   workload: { kind: string; name: string } | null;

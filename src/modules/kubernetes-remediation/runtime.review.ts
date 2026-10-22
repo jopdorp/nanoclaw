@@ -24,6 +24,7 @@ import {
   registryThroughOneCli,
 } from './gateway-client.js';
 import { gitWithDeployKey, helmThroughOneCli, HelmReleaseExecutor, type HelmChart } from './helm-release.js';
+import { createAlertWebhookHandlers, runHealthWatch } from './health.js';
 import { createFalcoWebhookHandler, runTrivyWatchers } from './triggers.js';
 import type { RemediationIncident } from './types.js';
 
@@ -122,6 +123,20 @@ export async function startKubernetesRemediation(
     'kubernetes-falco',
     createFalcoWebhookHandler({ secret: () => fs.readFileSync(config.falcoBearerFile), sink }),
   );
+  // Its own bearer, mounted next to Falco's, so Orfie may hand it to the Alertmanager, Uptime Kuma and CrowdSec it configures.
+  const alerts = createAlertWebhookHandlers({
+    secret: () => fs.readFileSync(path.join(path.dirname(config.falcoBearerFile), 'alerts')),
+    sink,
+    seenFile: path.join(DATA_DIR, 'kubernetes-remediation-alerts-seen.json'),
+  });
+  registerWebhookHandler('alertmanager', alerts.alertmanager);
+  registerWebhookHandler('uptime-kuma', alerts.uptimeKuma);
+  registerWebhookHandler('crowdsec', alerts.crowdsec);
+  void runHealthWatch(reader, sink, signal, path.join(DATA_DIR, 'kubernetes-remediation-health.json')).catch(
+    (error) => {
+      if (!signal.aborted) log.error('Kubernetes remediation health watch stopped', { error });
+    },
+  );
   registerDeliveryAction(
     'kubernetes_repo_read',
     async (content, session) => {
@@ -154,7 +169,7 @@ async function enqueueIncident(agentGroupId: string, incident: RemediationIncide
     content: JSON.stringify({
       sender: 'kubernetes-remediation-trigger',
       senderId: 'system',
-      text: `Investigate this Kubernetes incident. Read only until you submit a typed remediation proposal.\n${JSON.stringify(incident)}`,
+      text: `${incident.severity === 'resolved' ? 'This Kubernetes incident cleared; close what you opened for it.' : 'Investigate this Kubernetes incident. Read only until you submit a typed remediation proposal.'}\n${JSON.stringify(incident)}`,
     }),
   });
   const fresh = await import('../../db/sessions.js').then(({ getSession }) => getSession(session.id));
