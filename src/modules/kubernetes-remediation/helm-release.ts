@@ -20,7 +20,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
-import { isMap, isScalar, parseAllDocuments, parseDocument, stringify } from 'yaml';
+import { isMap, isNode, isScalar, isSeq, parseAllDocuments, parseDocument, stringify } from 'yaml';
 
 import type { KubernetesJsonClient } from './gateway-client.js';
 import {
@@ -182,6 +182,23 @@ export function editValues(text: string, set: HelmValuesPlan['operation']['set']
       let depth = keys.length - 1;
       while (depth > 0 && !doc.hasIn(keys.slice(0, depth))) depth--;
       const parent = depth ? doc.getIn(keys.slice(0, depth), true) : doc.contents;
+      const last = isSeq(parent) && !parent.flow ? parent.items.at(-1) : undefined;
+      if (
+        node === undefined &&
+        keys[depth] === String(isSeq(parent) && parent.items.length) &&
+        isNode(last) &&
+        last.range
+      ) {
+        const at = result.indexOf('\n', last.range[1] - 1) + 1;
+        const dash = ' '.repeat(last.range[0] - result.lastIndexOf('\n', last.range[0]) - 3);
+        const rest = keys.slice(depth + 1);
+        const item = rest.length
+          ? rest.map((key, i) => `${'  '.repeat(i)}${key}:${i === rest.length - 1 ? ` ${JSON.stringify(after)}` : ''}`)
+          : [JSON.stringify(after)];
+        result =
+          result.slice(0, at) + item.map((line, i) => `${dash}${i ? '  ' : '- '}${line}\n`).join('') + result.slice(at);
+        continue;
+      }
       const first = isMap(parent) && !parent.flow ? parent.items[0]?.key : undefined;
       if (node !== undefined || !isScalar(first) || !first.range) {
         throw new Error(`repo drift: ${dotted} ${node === undefined ? 'has no block map to join' : 'already exists'}`);

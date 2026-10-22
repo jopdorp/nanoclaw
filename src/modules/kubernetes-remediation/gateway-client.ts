@@ -295,7 +295,10 @@ interface ContainerStatus {
   imageID?: string;
 }
 
-/** The one digest every pod of the workload runs for these containers (all when none are named), from imageID. */
+/**
+ * The one digest every pod of the workload runs for these containers (all when none are named), from imageID.
+ * A manifest edit names a container by its place in the pod template, `containers.0`, resolved against the workload.
+ */
 export async function runningDigest(
   client: KubernetesJsonClient,
   target: TargetRef,
@@ -306,7 +309,15 @@ export async function runningDigest(
   const ns = encodeURIComponent(target.namespace);
   const workload = (await client.request(
     `/apis/${collection[0]}/namespaces/${ns}/${collection[1]}/${encodeURIComponent(target.name)}`,
-  )) as { spec?: { selector?: { matchLabels?: Record<string, string> } } };
+  )) as {
+    spec?: {
+      selector?: { matchLabels?: Record<string, string> };
+      template?: { spec?: Record<string, Array<{ name?: string }> | undefined> };
+    };
+  };
+  const names = containers.map((c) =>
+    c.includes('.') ? workload.spec?.template?.spec?.[c.split('.')[0]]?.[Number(c.split('.')[1])]?.name : c,
+  );
   const labels = Object.entries(workload.spec?.selector?.matchLabels ?? {}).map(([k, v]) => `${k}=${v}`);
   if (!labels.length) return undefined;
   const pods = (await client.request(
@@ -314,13 +325,13 @@ export async function runningDigest(
   )) as {
     items?: Array<{ status?: { containerStatuses?: ContainerStatus[]; initContainerStatuses?: ContainerStatus[] } }>;
   };
-  const digests = new Set(
-    (pods.items ?? []).flatMap((pod) =>
-      [...(pod.status?.containerStatuses ?? []), ...(pod.status?.initContainerStatuses ?? [])]
-        .filter((c) => !containers.length || containers.includes(c.name))
-        .map((c) => /sha256:[0-9a-f]{64}/.exec(c.imageID ?? '')?.[0] ?? ''),
+  const statuses = (pods.items ?? []).flatMap((pod) =>
+    [...(pod.status?.containerStatuses ?? []), ...(pod.status?.initContainerStatuses ?? [])].filter(
+      (c) => !names.length || names.includes(c.name),
     ),
   );
+  if (!names.every((n) => statuses.some((c) => c.name === n))) return undefined;
+  const digests = new Set(statuses.map((c) => /sha256:[0-9a-f]{64}/.exec(c.imageID ?? '')?.[0] ?? ''));
   return digests.size === 1 && !digests.has('') ? [...digests][0] : undefined;
 }
 

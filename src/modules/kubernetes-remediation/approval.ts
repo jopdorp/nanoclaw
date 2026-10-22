@@ -65,7 +65,8 @@ const preparedFor = new WeakMap<Record<string, unknown>, Prepared>();
 
 function decide(input: GuardInput) {
   if (input.actor.kind !== 'agent') return DENY('remediation proposals must originate from the dedicated agent group');
-  validateRemediationPlan(input.payload.plan);
+  // The prepared plan carries what the host bound from the cluster, the running digest; the agent's never does.
+  validateRemediationPlan(preparedFor.get(input.payload)?.validated.plan ?? input.payload.plan);
   return preparedFor.get(input.payload)?.auto
     ? ALLOW('the owner lists this plan as automatic')
     : HOLD('this remediation plan requires an explicit Matrix approval');
@@ -232,17 +233,15 @@ export function registerKubernetesRemediationApproval(options: {
     const op = plan.operation;
     if (!op || !plan.target || (op.type !== 'patch-image' && op.type !== 'manifest-edit')) return input;
     const { runningDigest: _untrusted, ...rest } = op;
-    const tagOnly =
-      op.type === 'patch-image'
-        ? !String(op.before ?? '').includes('@sha256:')
-        : (Array.isArray(op.set) ? op.set : []).some(
-            (e: { path?: string; before?: unknown }) =>
-              /(?:^|\.)image$/.test(String(e.path)) && !String(e.before ?? '').includes('@sha256:'),
-          );
+    const images = (Array.isArray(op.set) ? op.set : []).filter(
+      (e: { path?: string; before?: unknown }) =>
+        /(?:^|\.)image$/.test(String(e.path)) && !String(e.before ?? '').includes('@sha256:'),
+    );
+    const tagOnly = op.type === 'patch-image' ? !String(op.before ?? '').includes('@sha256:') : images.length > 0;
     const containers =
-      op.type === 'patch-image' && Array.isArray(op.containers)
-        ? op.containers.map((c: { name?: string }) => String(c.name))
-        : [];
+      op.type === 'patch-image'
+        ? (Array.isArray(op.containers) ? op.containers : []).map((c: { name?: string }) => String(c.name))
+        : images.map((e: { path?: string }) => /(?:initC|c)ontainers\.\d+(?=\.image$)/.exec(String(e.path))?.[0] ?? '');
     const digest =
       tagOnly && options.runningDigest
         ? await options.runningDigest(plan.target, containers).catch(() => undefined)

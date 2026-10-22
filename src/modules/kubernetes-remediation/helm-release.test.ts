@@ -166,3 +166,10 @@ it('reads \\. as a literal dot in a values key and removes a key with after null
     ]),
   ).toBe('customRules:\n  new.yaml: "z"\n  keep.yaml: y\n');
 });
+
+it('appends a sequence item when the index is the current length and before is null', () => {
+  const text = 'spec:\n  imagePullSecrets:\n    - name: registry\n  containers: []\n';
+  expect(editValues(text, [{ path: 'spec.imagePullSecrets.1.name', before: null, after: 'gitea' }])).toBe(
+    'spec:\n  imagePullSecrets:\n    - name: registry\n    - name: "gitea"\n  containers: []\n',
+  );
+});

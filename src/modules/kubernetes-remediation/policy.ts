@@ -71,9 +71,11 @@ function string(value: unknown, label: string, max = 1024): string {
   return value;
 }
 
+const VALUE_MAX = 65536;
+
 function scalar(value: unknown, label: string): ValuesScalar {
   if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return value;
-  return string(value, label, 1000);
+  return string(value, label, VALUE_MAX);
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
@@ -159,8 +161,8 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
       operation: {
         type,
         containers,
-        before: string(operation.before, 'plan.operation.before', 1000),
-        after: string(operation.after, 'plan.operation.after', 1000),
+        before: string(operation.before, 'plan.operation.before', VALUE_MAX),
+        after: string(operation.after, 'plan.operation.after', VALUE_MAX),
         ...runningDigest(),
       },
     };
