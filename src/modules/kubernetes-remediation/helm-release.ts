@@ -17,6 +17,7 @@
  */
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { isMap, isScalar, parseAllDocuments, parseDocument, stringify } from 'yaml';
@@ -258,13 +259,17 @@ export class HelmReleaseExecutor {
     return this.serial(() => this.syncNow(plan));
   }
 
-  bindManifest(plan: ManifestEditPlan): Promise<ManifestEditPlan> {
+  bindManifest(plan: ManifestEditPlan): Promise<{ plan: ManifestEditPlan; unchanged: boolean }> {
     return this.serial(async () => {
       await this.sync();
-      const { live } = await this.unchangedManifest(plan);
-      editValues(this.document(plan.operation.file, plan.target).text, plan.operation.set);
+      const { live, path: objectPath } = await this.unchangedManifest(plan);
+      const edited = editValues(this.document(plan.operation.file, plan.target).text, plan.operation.set);
+      const dry = await this.serverSideApply(objectPath, this.object(edited, plan.target), true);
       const { uid = '', resourceVersion = '' } = (live.metadata as { uid?: string; resourceVersion?: string }) ?? {};
-      return { ...plan, target: { ...plan.target, uid, resourceVersion } };
+      return {
+        plan: { ...plan, target: { ...plan.target, uid, resourceVersion } },
+        unchanged: !valuesDiff(declared(live), declared(dry)).length,
+      };
     });
   }
 
@@ -575,17 +580,18 @@ export class HelmReleaseExecutor {
   private async bindNow(plan: HelmValuesPlan): Promise<HelmBinding> {
     const { name: release, namespace } = plan.target;
     const ns = namespace ?? '';
-    await this.resolveChart(plan);
+    const { chart, metadata } = await this.resolveChart(plan);
     const anchor = await this.latestRelease(plan);
     await this.sync();
     const text = await this.unchangedFromLive(plan);
     const live = parseValues(text);
+    const edited = editValues(text, plan.operation.set);
     const stateful = parseAllDocuments(await this.options.helm(['get', 'manifest', release, '-n', ns]))
       .map((doc) => doc.toJS() as { kind?: string; spec?: Workload['spec'] } | null)
       .filter((object): object is { kind: string; spec?: Workload['spec'] } => object?.kind === 'StatefulSet');
     return {
       plan: { ...plan, target: { ...plan.target, ...anchor } },
-      diff: valuesDiff(live, parseValues(editValues(text, plan.operation.set))),
+      diff: valuesDiff(live, parseValues(edited)),
       images: imageEdits(live, plan.operation.set),
       statefulRepositories: stateful.flatMap(({ spec }) =>
         [...(spec?.template?.spec?.containers ?? []), ...(spec?.template?.spec?.initContainers ?? [])].map((c) =>
@@ -593,7 +599,60 @@ export class HelmReleaseExecutor {
         ),
       ),
       hasStatefulSet: stateful.length > 0,
+      unchanged: await this.rendersLive(release, ns, chart, metadata.version, edited),
     };
+  }
+
+  /** true when the chart rendered with these values leaves every live object as it is. */
+  private async rendersLive(release: string, ns: string, chart: HelmChart, version: string, values: string) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orfie-values-'));
+    fs.writeFileSync(path.join(dir, 'values.yaml'), values);
+    try {
+      const { manifest = '' } = JSON.parse(
+        await this.options.helm([
+          'upgrade',
+          release,
+          ...this.chartRef(chart),
+          '--version',
+          version,
+          '-n',
+          ns,
+          '-f',
+          path.join(dir, 'values.yaml'),
+          '--dry-run=server',
+          '-o',
+          'json',
+        ]),
+      ) as { manifest?: string };
+      let compared = 0;
+      for (const doc of parseAllDocuments(manifest)) {
+        const object = doc.toJS() as Values | null;
+        if (!object?.kind) continue;
+        compared++;
+        const { name = '', namespace = ns } = (object.metadata as { name?: string; namespace?: string }) ?? {};
+        const objectPath = await this.objectPath({
+          apiVersion: String(object.apiVersion),
+          kind: String(object.kind),
+          namespace,
+          name,
+          uid: '',
+          resourceVersion: '',
+        });
+        const live = (await this.options.client.request(objectPath)) as Values;
+        const dry = await this.serverSideApply(
+          objectPath,
+          { ...object, metadata: { ...(object.metadata as Values), namespace } },
+          true,
+        );
+        if (valuesDiff(declared(live), declared(dry)).length) return false;
+      }
+      return compared > 0;
+      // eslint-disable-next-line no-catch-all/no-catch-all -- anything it cannot prove unchanged counts as a change
+    } catch {
+      return false;
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }
 
   private async applyNow(plan: HelmValuesPlan): Promise<ExecutionResult> {

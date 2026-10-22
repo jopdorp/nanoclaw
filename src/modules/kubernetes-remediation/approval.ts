@@ -25,6 +25,8 @@ interface Prepared {
   validated: ValidatedPlan;
   auto: boolean;
   diff: string[];
+  /** Only the repo or Helm record changes; the cluster stays as it is. */
+  unchanged?: boolean;
 }
 const preparedFor = new WeakMap<Record<string, unknown>, Prepared>();
 
@@ -179,13 +181,24 @@ export function registerKubernetesRemediationApproval(options: {
       if (!repo) throw new Error('the Helm and manifest path is not configured');
       if (operation.type === 'manifest-edit') {
         await verify(operation.set.filter((e) => /(?:^|\.)image$/.test(e.path)).map((e) => String(e.after)));
-        validated = validateRemediationPlan(await repo.bindManifest(validated.plan as ManifestEditPlan));
-        return { validated, auto: isAutoApproved(validated, t1), diff: [] };
+        const bound = await repo.bindManifest(validated.plan as ManifestEditPlan);
+        validated = validateRemediationPlan(bound.plan);
+        return {
+          validated,
+          auto: bound.unchanged || isAutoApproved(validated, t1),
+          diff: [],
+          unchanged: bound.unchanged,
+        };
       }
       const binding = await repo.bind(validated.plan as HelmValuesPlan);
       await verify(Object.values(binding.images).map((image) => image.after));
       validated = validateRemediationPlan(binding.plan);
-      return { validated, auto: isAutoApproved(validated, t1, binding), diff: binding.diff };
+      return {
+        validated,
+        auto: binding.unchanged || isAutoApproved(validated, t1, binding),
+        diff: binding.diff,
+        unchanged: binding.unchanged,
+      };
     }
     await verify(operation.type === 'patch-image' ? [operation.after] : []);
     return { validated, auto: isAutoApproved(validated, t1), diff: [] };
@@ -222,7 +235,8 @@ export function registerKubernetesRemediationApproval(options: {
           planId: validated.plan.id,
           planDigest: validated.digest,
         });
-        message = result.message;
+        message =
+          prepared.unchanged && result.applied ? `record updated, nothing changed; ${result.message}` : result.message;
       } catch (error) {
         if (!auto) throw error;
         message = `Auto-approved plan ${validated.plan.id} failed: ${error instanceof Error ? error.message : String(error)}`;

@@ -131,6 +131,8 @@ export interface HelmBinding {
   images: Record<string, { before?: string; after?: string }>;
   statefulRepositories: string[];
   hasStatefulSet: boolean;
+  /** The upgrade would leave every live object as it is, so it only updates the record. */
+  unchanged: boolean;
 }
 
 export type RemediationPlan =
