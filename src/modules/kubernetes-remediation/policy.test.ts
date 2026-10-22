@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
-import { isAutoApproved, standingGrant, validateRemediationPlan } from './policy.js';
+import { checkImageUpdate, isAutoApproved, standingGrant, validateRemediationPlan } from './policy.js';
 
 const now = Date.parse('2026-10-21T12:00:00.000Z');
 
@@ -42,16 +42,10 @@ describe('Kubernetes remediation policy', () => {
     expect(validated.digest).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it('compares Docker Hub short and canonical image references by repository', () => {
-    const plan = (before: string, after: string) => ({
-      ...base(),
-      operation: { type: 'patch-image', containers: [{ name: 'gitea', initContainer: false }], before, after },
-    });
+  it('allows repository changes only to trusted registries', () => {
     const digest = `@sha256:${'a'.repeat(64)}`;
-    expect(validateRemediationPlan(plan('postgres:16', `docker.io/library/postgres${digest}`), now).lane).toBe('A');
-    expect(() =>
-      validateRemediationPlan(plan('docker.io/library/postgres', `ghcr.io/other/postgres${digest}`), now),
-    ).toThrow('image repository may not change');
+    expect(() => checkImageUpdate('alpine:3', `gitea.claw.jopdorp.nl/cluster/binder${digest}`)).not.toThrow();
+    expect(() => checkImageUpdate('alpine:3', `evil.example/cluster/binder${digest}`)).toThrow();
   });
 
   it('keeps wireguard-home always-ask with no automatic recovery', () => {

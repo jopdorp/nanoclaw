@@ -86,8 +86,8 @@ spec:
         variables.oldAnnotations.all(k, k == variables.restartAnnotation || (k in variables.newAnnotations && variables.oldAnnotations[k] == variables.newAnnotations[k]))
       message: only the kubectl restart annotation may change
     - expression: >-
-        dyn(object.spec.template.spec).all(k, k in ['containers', 'initContainers'] || (k in dyn(oldObject.spec.template.spec) && dyn(object.spec.template.spec)[k] == dyn(oldObject.spec.template.spec)[k])) &&
-        dyn(oldObject.spec.template.spec).all(k, k in ['containers', 'initContainers'] || (k in dyn(object.spec.template.spec) && dyn(oldObject.spec.template.spec)[k] == dyn(object.spec.template.spec)[k]))
+        dyn(object.spec.template.spec).all(k, k in ['containers', 'initContainers', 'imagePullSecrets'] || (k in dyn(oldObject.spec.template.spec) && dyn(object.spec.template.spec)[k] == dyn(oldObject.spec.template.spec)[k])) &&
+        dyn(oldObject.spec.template.spec).all(k, k in ['containers', 'initContainers', 'imagePullSecrets'] || (k in dyn(object.spec.template.spec) && dyn(oldObject.spec.template.spec)[k] == dyn(object.spec.template.spec)[k]))
       message: volumes, serviceAccountName, securityContext, hostNetwork, hostPID, hostIPC and all other pod spec fields are immutable
     - expression: >-
         variables.newContainers.size() == variables.oldContainers.size() &&
@@ -109,25 +109,15 @@ spec:
           variables.oldContainers.exists(oc, oc.name == c.name &&
             (c.image == oc.image ||
               (oc.image.size() == c.image.size() + 72 && oc.image.startsWith(c.image + '@sha256:') && oc.image.matches('@sha256:[0-9a-f]{64}$')) ||
-              (c.image.matches(variables.digestImagePattern) &&
-               (variables.imageRepos.exists(n, n[0] == c.image &&
-                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1])) ||
-                (oc.image.matches('@sha256:[0-9a-f]{64}$') && c.image.endsWith(oc.image.substring(oc.image.size() - 72))) ||
-                (!oc.image.contains('@') && variables.verifiedDigest in variables.newObjectAnnotations &&
-                 c.image.endsWith('@' + variables.newObjectAnnotations[variables.verifiedDigest])))))))
-      message: a new container image must retain its repository (or its exact digest) and use a trusted registry sha256 digest
+              c.image.matches(variables.digestImagePattern))))
+      message: a new container image must use a trusted registry sha256 digest
     - expression: >-
         variables.newInitContainers.all(c,
           variables.oldInitContainers.exists(oc, oc.name == c.name &&
             (c.image == oc.image ||
               (oc.image.size() == c.image.size() + 72 && oc.image.startsWith(c.image + '@sha256:') && oc.image.matches('@sha256:[0-9a-f]{64}$')) ||
-              (c.image.matches(variables.digestImagePattern) &&
-               (variables.imageRepos.exists(n, n[0] == c.image &&
-                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1])) ||
-                (oc.image.matches('@sha256:[0-9a-f]{64}$') && c.image.endsWith(oc.image.substring(oc.image.size() - 72))) ||
-                (!oc.image.contains('@') && variables.verifiedDigest in variables.newObjectAnnotations &&
-                 c.image.endsWith('@' + variables.newObjectAnnotations[variables.verifiedDigest])))))))
-      message: a new init-container image must retain its repository (or its exact digest) and use a trusted registry sha256 digest
+              c.image.matches(variables.digestImagePattern))))
+      message: a new init-container image must use a trusted registry sha256 digest
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

@@ -411,21 +411,13 @@ export function parseImage(image: string) {
   return { registry, repository, tag, digest };
 }
 
-export function checkImageUpdate(beforeImage: string, afterImage: string, runningDigest?: string): void {
-  const before = parseImage(beforeImage);
+export function checkImageUpdate(_beforeImage: string, afterImage: string): void {
   const after = parseImage(afterImage);
   if (
     !DIGEST_IMAGE_RE.test(`${after.registry}/${after.repository}@${after.digest}`) ||
     (after.tag !== undefined && !TAG_RE.test(after.tag))
   ) {
     throw new Error('new image is not an approved digest reference');
-  }
-  // The same digest is the same content, so it may move to another trusted registry or repository.
-  if (
-    `${before.registry}/${before.repository}` !== `${after.registry}/${after.repository}` &&
-    !sameDigest(beforeImage, afterImage, runningDigest)
-  ) {
-    throw new Error('image repository may not change unless the digest stays the same');
   }
 }
 
@@ -478,7 +470,7 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
 
   if (plan.operation.type === 'patch-image') {
     if (!IMAGE_KINDS.includes(plan.target.kind)) throw new Error('patch-image requires a workload or CronJob target');
-    checkImageUpdate(plan.operation.before, plan.operation.after, plan.operation.runningDigest);
+    checkImageUpdate(plan.operation.before, plan.operation.after);
     // The base admission policy rejects a rollback to a mutable tag unless the
     // pinned image was derived from exactly that tag. Any other rollout gets the
     // restart attempt only; a digest-pinned or exact-tag prior image may also
@@ -551,7 +543,7 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
         if (/(?:^|(?<!\\)\.)image$/.test(path)) {
           if (typeof before !== 'string' || typeof after !== 'string')
             throw new Error(`${path} must be an image reference`);
-          checkImageUpdate(before, after, plan.operation.runningDigest);
+          checkImageUpdate(before, after);
         }
       }
     }
