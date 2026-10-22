@@ -40,6 +40,9 @@ export interface KubernetesRemediationConfig {
   breakGlassOneCliAgent?: string;
   /** Verified chart sources keyed `<namespace>/<release>`, cached by the host; hints only. */
   helmReleases?: Record<string, HelmChart>;
+  /** Where build-image pushes and the Secret in security holding its push credentials; registry.prophet by default. */
+  imageRegistry?: string;
+  registryPullSecret?: string;
   /** `namespace` or `namespace/name`: image updates there need approval beyond a patch version. */
   t1: string[];
 }
@@ -87,6 +90,9 @@ export async function startKubernetesRemediation(
     helm,
     config.breakGlassOneCliAgent
       ? { client: new OneCliKubernetesClient(config.breakGlassOneCliAgent, config.apiServer), helm: breakGlassHelm }
+      : undefined,
+    config.imageRegistry && config.registryPullSecret
+      ? { registry: config.imageRegistry, pushSecret: config.registryPullSecret }
       : undefined,
   );
   const cleaned = await cleanupRemediationOrphans(annotator);

@@ -34,7 +34,7 @@ const IMAGE_KINDS = [...WORKLOAD_KINDS, 'CronJob'];
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DIGEST_IMAGE_RE =
-  /^(docker\.io|docker\.gitea\.com|cr\.fluentbit\.io|ghcr\.io|quay\.io|registry\.k8s\.io|mirror\.gcr\.io|lscr\.io|registry\.prophet\.jopdorp\.nl)\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/;
+  /^(docker\.io|docker\.gitea\.com|cr\.fluentbit\.io|ghcr\.io|quay\.io|registry\.k8s\.io|mirror\.gcr\.io|lscr\.io|registry\.prophet\.jopdorp\.nl|gitea\.claw\.jopdorp\.nl)\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/;
 const TAG_RE = /^\w[\w.-]{0,127}$/;
 const CHART_REPO_RE = /^(?:https|oci):\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[\w.~%-]+)*\/?$/;
 const VALUES_PATH_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
@@ -51,7 +51,8 @@ const CHART_VERSION_RE = /^v?\d+\.\d+\.\d+[\w.+-]*$/;
 export const SECRET_KEY_RE = /password|token|secret|key/i;
 const SECRET_REFERENCE_RE = /(?:name|ref|file|path)$|^existingsecret/i;
 const REPO_PATH_RE = /^[\w-][\w.-]*(?:\/[\w-][\w.-]*)*$/;
-const BUILD_IMAGE_RE = /^registry\.prophet\.jopdorp\.nl\/[a-z0-9]+(?:[._/-][a-z0-9]+)*:\w[\w.-]{0,127}$/;
+const BUILD_IMAGE_RE =
+  /^(?:registry\.prophet\.jopdorp\.nl|gitea\.claw\.jopdorp\.nl)\/[a-z0-9]+(?:[._/-][a-z0-9]+)*:\w[\w.-]{0,127}$/;
 const DNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?$/;
 const RELEASE_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,51}[a-z0-9])?$/;
 const API_VERSION_RE = /^(?:[a-z0-9.-]+\/)?v\d+(?:(?:alpha|beta)\d+)?$/;
@@ -257,7 +258,9 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
       throw new Error('plan.operation.dockerfile must be a k8s.jegor.nl path inside plan.operation.context');
     const image = string(operation.image, 'plan.operation.image', 256);
     if (!BUILD_IMAGE_RE.test(image))
-      throw new Error('plan.operation.image must be registry.prophet.jopdorp.nl/<name>:<tag>');
+      throw new Error(
+        'plan.operation.image must be <registry.prophet.jopdorp.nl or gitea.claw.jopdorp.nl>/<name>:<tag>',
+      );
     return { ...base, operation: { type, dockerfile, context, image } };
   }
   throw new Error(

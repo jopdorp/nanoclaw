@@ -60,7 +60,7 @@ export interface PodExecPlan extends PlanBase {
 }
 
 export interface BuildImagePlan extends PlanBase {
-  /** `dockerfile` and `context` are k8s.jegor.nl paths; `image` is registry.prophet.jopdorp.nl/<name>:<tag>. */
+  /** `dockerfile` and `context` are k8s.jegor.nl paths; `image` is <own registry>/<name>:<tag>. */
   operation: { type: 'build-image'; dockerfile: string; context: string; image: string };
 }
 

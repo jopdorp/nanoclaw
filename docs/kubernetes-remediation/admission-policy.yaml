@@ -23,9 +23,9 @@ spec:
     - name: restartAnnotation
       expression: "'kubectl.kubernetes.io/restartedAt'"
     - name: trustedRegistries
-      expression: "['docker.io', 'docker.gitea.com', 'cr.fluentbit.io', 'ghcr.io', 'quay.io', 'registry.k8s.io', 'mirror.gcr.io', 'lscr.io', 'registry.prophet.jopdorp.nl']"
+      expression: "['docker.io', 'docker.gitea.com', 'cr.fluentbit.io', 'ghcr.io', 'quay.io', 'registry.k8s.io', 'mirror.gcr.io', 'lscr.io', 'registry.prophet.jopdorp.nl', 'gitea.claw.jopdorp.nl']"
     - name: digestImagePattern
-      expression: "'^(docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io|lscr[.]io|registry[.]prophet[.]jopdorp[.]nl)/[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
+      expression: "'^(docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io|lscr[.]io|registry[.]prophet[.]jopdorp[.]nl|gitea[.]claw[.]jopdorp[.]nl)/[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
     - name: newAnnotations
       expression: "has(object.spec.template.metadata.annotations) ? object.spec.template.metadata.annotations : {}"
     - name: oldAnnotations
@@ -270,9 +270,9 @@ spec:
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
   variables:
     - name: trustedRegistries
-      expression: "['docker.io', 'docker.gitea.com', 'cr.fluentbit.io', 'ghcr.io', 'quay.io', 'registry.k8s.io', 'mirror.gcr.io', 'lscr.io', 'registry.prophet.jopdorp.nl']"
+      expression: "['docker.io', 'docker.gitea.com', 'cr.fluentbit.io', 'ghcr.io', 'quay.io', 'registry.k8s.io', 'mirror.gcr.io', 'lscr.io', 'registry.prophet.jopdorp.nl', 'gitea.claw.jopdorp.nl']"
     - name: digestImagePattern
-      expression: "'^(docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io|lscr[.]io|registry[.]prophet[.]jopdorp[.]nl)/[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
+      expression: "'^(docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io|lscr[.]io|registry[.]prophet[.]jopdorp[.]nl|gitea[.]claw[.]jopdorp[.]nl)/[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
     - name: newPod
       expression: object.spec.jobTemplate.spec.template.spec
     - name: oldPod
@@ -409,7 +409,7 @@ spec:
         oldObject == null ? [] : oldObject.spec.template.spec.containers.map(c, c.image) +
         (has(oldObject.spec.template.spec.initContainers) ? oldObject.spec.template.spec.initContainers.map(c, c.image) : [])
     - name: pinnedImagePattern
-      expression: "'^((docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io|lscr[.]io|registry[.]prophet[.]jopdorp[.]nl)/)?[a-z0-9]+([_-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
+      expression: "'^((docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io|lscr[.]io|registry[.]prophet[.]jopdorp[.]nl|gitea[.]claw[.]jopdorp[.]nl)/)?[a-z0-9]+([_-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
   validations:
     - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
       message: kube-system and longhorn-system go through the break-glass identity
@@ -509,7 +509,7 @@ spec:
     - expression: >-
         request.namespace != 'security' ||
         (variables.pod.containers[0].image == 'gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd80edc663df6def362cd22e79bcdf00ac53f' &&
-         variables.volumes.all(v, has(v.secret) && v.secret.secretName == 'registry-prophet'))
+         variables.volumes.all(v, has(v.secret) && has(v.secret.items) && v.secret.items.all(i, i.key == '.dockerconfigjson')))
       message: the build Job is the pinned kaniko image with only the registry credentials
 ---
 apiVersion: admissionregistration.k8s.io/v1

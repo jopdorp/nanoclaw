@@ -245,7 +245,7 @@ function runnerJob(plan: PodExecPlan, serviceAccount: string): Record<string, un
   };
 }
 
-function kanikoJob(plan: BuildImagePlan): Record<string, unknown> {
+function kanikoJob(plan: BuildImagePlan, pushSecret: string): Record<string, unknown> {
   const { dockerfile, context, image } = plan.operation;
   return {
     apiVersion: 'batch/v1',
@@ -276,7 +276,7 @@ function kanikoJob(plan: BuildImagePlan): Record<string, unknown> {
           volumes: [
             {
               name: 'docker',
-              secret: { secretName: 'registry-prophet', items: [{ key: '.dockerconfigjson', path: 'config.json' }] },
+              secret: { secretName: pushSecret, items: [{ key: '.dockerconfigjson', path: 'config.json' }] },
             },
           ],
         },
@@ -468,6 +468,7 @@ export class GatewayRemediationExecutor {
     private readonly observer: RolloutObserver,
     private readonly helm?: HelmReleaseExecutor,
     private readonly breakGlass?: { client: KubernetesJsonClient; helm?: HelmReleaseExecutor },
+    private readonly build = { registry: 'registry.prophet.jopdorp.nl', pushSecret: 'registry-prophet' },
   ) {}
 
   async execute(validated: ValidatedPlan, grant: ApprovalGrant) {
@@ -665,7 +666,9 @@ export class GatewayRemediationExecutor {
   }
 
   private async buildImage(plan: BuildImagePlan): Promise<ExecutionResult> {
-    const { exitCode, message, output } = await this.runJob(kanikoJob(plan), 30 * 60_000);
+    if (!plan.operation.image.startsWith(`${this.build.registry}/`))
+      throw new Error(`build-image pushes to ${this.build.registry}`);
+    const { exitCode, message, output } = await this.runJob(kanikoJob(plan, this.build.pushSecret), 30 * 60_000);
     const digest = /sha256:[0-9a-f]{64}/.exec(message)?.[0];
     return exitCode === 0 && digest
       ? { applied: true, message: `built ${plan.operation.image}@${digest}`, automaticWrites: 0 }
