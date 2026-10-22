@@ -378,12 +378,14 @@ done
 kubectl exec -n "$NAMESPACE" "$LOGIN_POD" -c login -- rm -f "${TOKEN_FILES[@]}"
 
 # The agents hold only the read-only reader, never another API token (older runs' included); each host identity holds exactly its own.
+READER_AGENT_IDS=$(jq -r --arg ids "$ORCHESTRATOR_GROUP $INVESTIGATOR_GROUP $VERIFIER_GROUP" \
+  '.data[] | select(.identifier | IN($ids | split(" ")[])) | .id' <<<"$AGENTS" | tr '\n' ' ')
 API_SECRET_IDS=$(onecli_cli secrets list | jq -c --arg host "$API_HOST" --arg read "${SECRET_IDS[0]}" \
   '[.data[] | select(.hostPattern == $host and .id != $read) | .id]')
 for agent in $(jq -r '.data[].id' <<<"$AGENTS"); do
   [[ " $EXECUTOR_AGENT_ID $ANNOTATOR_AGENT_ID $HELM_AGENT_ID $BREAKGLASS_AGENT_ID " == *" $agent "* ]] && continue
   current=$(onecli_cli agents secrets --id "$agent" | jq -c '.data | unique')
-  wanted=$(jq -c --argjson api "$API_SECRET_IDS" --arg read "${SECRET_IDS[0]}" --arg add "$([[ $agent == "$PRIMARY_AGENT_ID" ]] && echo 1)" \
+  wanted=$(jq -c --argjson api "$API_SECRET_IDS" --arg read "${SECRET_IDS[0]}" --arg add "$([[ " $READER_AGENT_IDS " == *" $agent "* ]] && echo 1)" \
     '[(. - $api)[], (if $add == "1" then $read else empty end)] | unique' <<<"$current")
   [[ "$wanted" == "$current" ]] \
     || onecli_cli agents set-secrets --id "$agent" --secret-ids "$(jq -r 'join(",")' <<<"$wanted")" >/dev/null

@@ -2,18 +2,23 @@
  * REVIEW ARTIFACT: this file is intentionally absent from src/modules/index.ts.
  * Import and call it only after the deployment runbook's checkpoints pass.
  */
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import { DATA_DIR } from '../../config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
+import { getContainerConfig } from '../../db/container-configs.js';
 import { registerDeliveryAction } from '../../delivery.js';
 import { unguarded } from '../../guard/index.js';
+import { onOneCliAgentEnsured } from '../../gateway-providers/onecli.js';
 import { resolveGroupFolderPath } from '../../group-folder.js';
 import { requestWake } from '../../request-wake.js';
 import { resolveSession, writeSessionMessage } from '../../session-manager.js';
 import { registerWebhookHandler } from '../../webhook-server.js';
 import { log } from '../../log.js';
+import { getDestinations } from '../agent-to-agent/db/agent-destinations.js';
 import { notifyAgent } from '../approvals/index.js';
 import { notifyApprover, registerKubernetesRemediationApproval } from './approval.js';
 import {
@@ -49,6 +54,32 @@ export interface KubernetesRemediationConfig {
 }
 
 const DAY = 24 * 60 * 60_000;
+const exec = promisify(execFile);
+
+async function onecli<T>(...args: string[]): Promise<T> {
+  return (JSON.parse((await exec('onecli', args)).stdout) as { data: T }).data;
+}
+
+/** The agent holds the reader and its model key, never a host identity's Kubernetes token. */
+async function scopeHelperSecrets(agentGroupId: string, apiHost: string): Promise<void> {
+  const agent = (await onecli<Array<{ id: string; identifier: string }>>('agents', 'list')).find(
+    (a) => a.identifier === agentGroupId,
+  );
+  if (!agent) return;
+  const secrets = await onecli<Array<{ id: string; name: string; hostPattern: string }>>('secrets', 'list');
+  const id = (name: string) => secrets.find((s) => s.name === name)?.id;
+  const reader = id('Kubernetes reader');
+  const provider = (await getContainerConfig(agentGroupId))?.provider ?? 'claude';
+  const model = id(provider === 'claude' ? 'Claude subscription' : 'Codex');
+  const hostTokens = secrets.filter((s) => s.hostPattern === apiHost && s.id !== reader).map((s) => s.id);
+  const current = await onecli<string[]>('agents', 'secrets', '--id', agent.id);
+  const wanted = [...new Set([...current.filter((s) => !hostTokens.includes(s)), reader, model])].filter(
+    (s): s is string => !!s,
+  );
+  await exec('onecli', ['agents', 'set-secret-mode', '--id', agent.id, '--mode', 'selective']);
+  if (wanted.sort().join() !== [...current].sort().join())
+    await exec('onecli', ['agents', 'set-secrets', '--id', agent.id, '--secret-ids', wanted.join(',')]);
+}
 
 export async function startKubernetesRemediation(
   config: KubernetesRemediationConfig,
@@ -96,10 +127,17 @@ export async function startKubernetesRemediation(
       ? { registry: config.imageRegistry, pushSecret: config.registryPullSecret }
       : undefined,
   );
+  const team = async (groupId: string) =>
+    groupId === config.agentGroupId ||
+    (await getDestinations(config.agentGroupId)).some((d) => d.target_type === 'agent' && d.target_id === groupId);
+  const apiHost = new URL(config.apiServer).hostname;
+  onOneCliAgentEnsured(async (groupId) => {
+    if (groupId !== config.agentGroupId && (await team(groupId))) await scopeHelperSecrets(groupId, apiHost);
+  });
   const cleaned = await cleanupRemediationOrphans(annotator);
   if (cleaned) log.warn('Cleaned stale Kubernetes remediation capabilities', { cleaned });
   registerKubernetesRemediationApproval({
-    agentGroupId: config.agentGroupId,
+    team,
     approverUserId: config.matrixApproverUserId,
     executor,
     helm,
@@ -147,7 +185,7 @@ export async function startKubernetesRemediation(
   registerDeliveryAction(
     'kubernetes_repo_read',
     async (content, session) => {
-      if (session.agent_group_id !== config.agentGroupId || !helm) return;
+      if (!helm || !(await team(session.agent_group_id))) return;
       const relative = typeof content.path === 'string' ? content.path : '';
       const reply = await helm.readRepo(relative).then(
         (body) => `k8s.jegor.nl/${relative}:\n${body}`,
@@ -167,7 +205,7 @@ export async function startKubernetesRemediation(
     registerDeliveryAction(
       'kubernetes_check_updates',
       async (_content, session) => {
-        if (session.agent_group_id !== config.agentGroupId) return;
+        if (!(await team(session.agent_group_id))) return;
         await notifyAgent(
           session,
           await checkUpdates().catch(

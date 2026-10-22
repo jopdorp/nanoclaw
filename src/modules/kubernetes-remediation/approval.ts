@@ -155,7 +155,8 @@ export async function notifyApprover(userId: string, text: string): Promise<void
 }
 
 export function registerKubernetesRemediationApproval(options: {
-  agentGroupId: string;
+  /** Orfie's group and the agents it works with; only they may propose. */
+  team: (agentGroupId: string) => Promise<boolean>;
   approverUserId: string;
   executor: RemediationExecutor;
   helm?: HelmReleaseExecutor;
@@ -190,7 +191,7 @@ export function registerKubernetesRemediationApproval(options: {
     return { validated, auto: isAutoApproved(validated, t1), diff: [] };
   };
   const precheck = async (content: Record<string, unknown>, session: Session) => {
-    if (session.agent_group_id !== options.agentGroupId) return false;
+    if (!(await options.team(session.agent_group_id))) return false;
     try {
       preparedFor.set(content, await prepare(content));
       return true;

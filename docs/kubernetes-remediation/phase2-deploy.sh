@@ -380,6 +380,10 @@ jq -e --arg n remediation-investigator '.[] | select(.local_name == $n)' <<<"$DE
 jq -e --arg n remediation-verifier '.[] | select(.local_name == $n)' <<<"$DESTINATIONS" >/dev/null \
   || ncl destinations add --agent-group-id "$PRIMARY_ID" --local-name remediation-verifier \
     --target-type agent --target-id "$VERIFIER_ID" >/dev/null
+for helper in "$INVESTIGATOR_ID" "$VERIFIER_ID"; do
+  ncl destinations list --agent-group-id "$helper" --json | jq -e '.[] | select(.local_name == "parent")' >/dev/null \
+    || ncl destinations add --agent-group-id "$helper" --local-name parent --target-type agent --target-id "$PRIMARY_ID" >/dev/null
+done
 
 USER_ID="matrix:$OWNER_MATRIX_ID"
 ncl users create --id "$USER_ID" --kind matrix --display-name jopdorp >/dev/null

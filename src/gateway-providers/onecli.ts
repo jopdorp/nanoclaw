@@ -153,10 +153,18 @@ function monitorLease(signal: AbortSignal): Pick<GatewaySessionLease, 'onUnavail
   };
 }
 
+const agentHooks: Array<(agentGroupId: string) => Promise<void>> = [];
+
+/** Runs after a session's OneCLI agent exists and before its config is read, so a module can scope its secrets first. */
+export function onOneCliAgentEnsured(hook: (agentGroupId: string) => Promise<void>): void {
+  agentHooks.push(hook);
+}
+
 async function ensureSession(input: GatewaySessionInput, signal: AbortSignal): Promise<GatewaySessionLease> {
   // The OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
   await onecli.ensureAgent({ name: input.groupName, identifier: input.key.agentGroupId });
+  for (const hook of agentHooks) await hook(input.key.agentGroupId);
   const config = await onecli.getContainerConfig({ agent: input.key.agentGroupId });
   const accountId = await stubAccountId(config);
   log.info('OneCLI gateway applied', { agentGroupId: input.key.agentGroupId, sessionId: input.key.sessionId });
