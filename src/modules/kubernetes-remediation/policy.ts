@@ -488,6 +488,15 @@ function sameVersionLine(before: string | undefined, after: string | undefined, 
   return from[0] === to[0] && (!t1 || from[1] === to[1]);
 }
 
+/** The owner's standing yes: Traefik's own configuration applies without asking, in kube-system through break-glass. */
+function traefikConfig({ apiVersion, kind, name, namespace }: Omit<TargetRef, 'uid' | 'resourceVersion'>): boolean {
+  return (
+    namespace === 'kube-system' &&
+    (/^traefik\.(?:io|containo\.us)\//.test(apiVersion) ||
+      (apiVersion === 'helm.cattle.io/v1' && kind === 'HelmChartConfig' && name === 'traefik'))
+  );
+}
+
 /**
  * Plans the host applies without a Matrix card; the approver still hears what ran.
  * `t1` holds `namespace` or `namespace/name` entries; every StatefulSet is T1 too.
@@ -499,6 +508,20 @@ export function isAutoApproved(
 ): boolean {
   const { target, operation } = plan;
   if (operation.type === 'helm-sync-values' || operation.type === 'manifest-sync') return true;
+  if (lane === 'C') {
+    const objects =
+      operation.type === 'repo-write'
+        ? repoObjects(operation.content).map(({ apiVersion, kind, metadata }) => ({
+            apiVersion,
+            kind,
+            name: metadata?.name ?? '',
+            namespace: metadata?.namespace ?? null,
+          }))
+        : operation.type === 'manifest-edit'
+          ? [target]
+          : [];
+    return objects.length > 0 && objects.every(traefikConfig);
+  }
   if (lane !== 'A') return false;
   const critical =
     target.kind === 'StatefulSet' || t1.has(target.namespace ?? '') || t1.has(`${target.namespace}/${target.name}`);
