@@ -146,6 +146,12 @@ write_group_file() {
     sh -c "umask 077; cat > '/opt/nanoclaw/groups/$folder/$destination'" <"$source"
 }
 
+install_group_dir() {
+  local folder=$1 destination=$2 source=$3
+  tar -C "$source" -cf - . | kubectl exec -i -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -- \
+    sh -c "d='/opt/nanoclaw/groups/$folder/$destination'; rm -rf \"\$d\" && mkdir -p \"\$d\" && tar -C \"\$d\" -xf -"
+}
+
 cd "$ROOT"
 
 step '1/6 install Matrix adapter, rebuild immutable images, and redeploy'
@@ -372,6 +378,18 @@ sed '1,/^---$/d' "$DOCS/agent-group/.claude/agents/remediation-investigator.md" 
 sed '1,/^---$/d' "$DOCS/agent-group/.claude/agents/remediation-verifier.md" >"$TMP_DIR/verifier.md"
 write_group_file kubernetes-remediation-investigator instructions.prepend.md "$TMP_DIR/investigator.md"
 write_group_file kubernetes-remediation-verifier instructions.prepend.md "$TMP_DIR/verifier.md"
+
+# Claude reads role personas and skills from .claude/{agents,skills}, Codex from .agents/{roles,skills}.
+mkdir -p "$TMP_DIR/roles"
+find "$DOCS/agent-group/.claude/agents" -name '*.md' ! -name 'remediation-*' -exec cp {} "$TMP_DIR/roles" \;
+install_group_dir kubernetes-remediator .claude/agents "$TMP_DIR/roles"
+install_group_dir kubernetes-remediator .claude/skills "$DOCS/agent-group/.claude/skills"
+for folder in kubernetes-remediation-investigator kubernetes-remediation-verifier; do
+  install_group_dir "$folder" .agents/roles "$TMP_DIR/roles"
+  for skill in "$DOCS"/agent-group/.claude/skills/*/; do
+    install_group_dir "$folder" ".agents/skills/$(basename "$skill")" "$skill"
+  done
+done
 
 DESTINATIONS=$(ncl destinations list --agent-group-id "$PRIMARY_ID" --json)
 jq -e --arg n remediation-investigator '.[] | select(.local_name == $n)' <<<"$DESTINATIONS" >/dev/null \

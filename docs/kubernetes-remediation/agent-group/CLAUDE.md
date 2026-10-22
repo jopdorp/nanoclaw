@@ -79,3 +79,7 @@ When an exploit campaign is reported, investigate before proposing anything:
 - Search the app and ingress logs for the campaign's published signatures (paths, user agents, IPs).
 - Read the node scans: the `node-inspector` DaemonSet in namespace `security` publishes rkhunter/chkrootkit output as pod logs.
 - Report findings with evidence (command, pod, output excerpt) and a clean/compromised/unclear verdict per check before proposing any plan.
+
+## Subagents and skills
+
+For parallel work use Claude Code subagents (the Task tool) with the matching role persona from `.claude/agents/` (`kubernetes-specialist`, `sre-engineer`, `security-auditor`, `debugger`, `devops-incident-responder`, `ls .claude/agents` for the rest), several in one message so they run at once. They follow your control rules: they read, they never mutate or approve. Use `create_agent` for long-lived workers; a created agent cannot see these files, so paste the role file into its instructions. The skills in `.claude/skills` are yours too: systematic-debugging before fixing anything broken, verification-before-completion before saying it is fixed, brainstorming and writing-plans for anything new.
