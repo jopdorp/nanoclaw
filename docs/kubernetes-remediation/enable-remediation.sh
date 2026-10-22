@@ -16,13 +16,14 @@ API_HOST=192.168.1.11
 EXECUTOR=nanoclaw-remediation-executor
 ANNOTATOR=nanoclaw-remediation-annotator
 HELM=nanoclaw-helm
-HELM_SECRET='Kubernetes helm'
-READ_SECRET=nanoclaw-remediator-kubernetes
-APPROVER_SECRET=nanoclaw-remediation-approver-kubernetes
+BREAKGLASS=nanoclaw-breakglass
+# OneCLI secret names, in TOKEN_FILES order: the agent's reader, then the host executor, annotator, helm and break-glass.
+SECRET_NAMES=('Kubernetes reader' 'Kubernetes remediator' 'Kubernetes approver' 'Kubernetes helm' 'Kubernetes breakglass')
 LOGIN_JOB=nanoclaw-provider-login
 LOGIN_POD=
 CREATED_LOGIN_JOB=0
-TOKEN_FILES=(/tmp/nanoclaw-remediator.token /tmp/nanoclaw-remediation-approver.token /tmp/nanoclaw-helm.token)
+TOKEN_FILES=(/tmp/nanoclaw-remediator-reader.token /tmp/nanoclaw-remediator.token /tmp/nanoclaw-remediation-approver.token
+  /tmp/nanoclaw-helm.token /tmp/nanoclaw-breakglass.token)
 
 step() { printf '\n==> %s\n' "$*"; }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -90,21 +91,25 @@ step '1/6 apply the approval-controller identity and admission policies idempote
 kubectl apply -f "$DOCS/approval-controller-rbac.yaml" >/dev/null
 kubectl apply --server-side -f "$DOCS/approval-controller-policy.yaml" >/dev/null
 printf '%s\n' 'approval-controller RBAC and policies are present'
-kubectl apply -f - >/dev/null <<'YAML'
+for account in nanoclaw-remediator nanoclaw-remediation-approver nanoclaw-helm nanoclaw-breakglass; do
+  kubectl apply -f - >/dev/null <<YAML
 apiVersion: v1
 kind: ServiceAccount
-metadata: { name: nanoclaw-helm, namespace: nanoclaw-remediator }
+metadata: { name: $account, namespace: $NAMESPACE }
 automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: Secret
 type: kubernetes.io/service-account-token
 metadata:
-  name: nanoclaw-helm-token
-  namespace: nanoclaw-remediator
-  annotations: { kubernetes.io/service-account.name: nanoclaw-helm }
+  name: $account-token
+  namespace: $NAMESPACE
+  annotations: { kubernetes.io/service-account.name: $account }
 YAML
-printf '%s\n' 'nanoclaw-helm ServiceAccount and token Secret are present'
+done
+kubectl get secret -n "$NAMESPACE" nanoclaw-remediator-reader-token >/dev/null 2>&1 \
+  || todo 'apply reader-rbac.yaml first: the nanoclaw-remediator-reader token Secret is absent'
+printf '%s\n' 'ServiceAccounts and token Secrets are present'
 
 step '2/6 start or reuse the disposable OneCLI setup Job'
 if kubectl get job -n "$NAMESPACE" "$LOGIN_JOB" >/dev/null 2>&1; then
@@ -233,63 +238,67 @@ onecli_cli agents set-secret-mode --id "$ANNOTATOR_AGENT_ID" --mode selective >/
 ensure_agent "$HELM" 'NanoClaw Helm Executor' true
 HELM_AGENT_ID=$ENSURED_AGENT_ID
 onecli_cli agents set-secret-mode --id "$HELM_AGENT_ID" --mode selective >/dev/null
+ensure_agent "$BREAKGLASS" 'NanoClaw Break-glass Executor' true
+BREAKGLASS_AGENT_ID=$ENSURED_AGENT_ID
+onecli_cli agents set-secret-mode --id "$BREAKGLASS_AGENT_ID" --mode selective >/dev/null
 AGENTS=$(onecli_cli agents list)
-for id in "$PRIMARY_AGENT_ID" "$EXECUTOR_AGENT_ID" "$ANNOTATOR_AGENT_ID" "$HELM_AGENT_ID"; do
+for id in "$PRIMARY_AGENT_ID" "$EXECUTOR_AGENT_ID" "$ANNOTATOR_AGENT_ID" "$HELM_AGENT_ID" "$BREAKGLASS_AGENT_ID"; do
   jq -e --arg id "$id" '.data[] | select(.id == $id and .secretMode == "selective")' <<<"$AGENTS" >/dev/null \
     || fail "OneCLI agent $id is not in selective secret mode"
 done
 printf '%s\n' 'selective OneCLI identities and orchestrator write blocks are active'
 
-step '4/6 rotate one-hour TokenRequest credentials in the OneCLI vault'
-kubectl create token -n "$NAMESPACE" nanoclaw-remediator --duration=1h \
-  | kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- \
-      sh -c 'umask 077; cat > /tmp/nanoclaw-remediator.token'
-kubectl create token -n "$NAMESPACE" nanoclaw-remediation-approver --duration=1h \
-  | kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- \
-      sh -c 'umask 077; cat > /tmp/nanoclaw-remediation-approver.token'
-for _ in $(seq 30); do
-  HELM_TOKEN_B64=$(kubectl get secret -n "$NAMESPACE" nanoclaw-helm-token -o jsonpath='{.data.token}')
-  [[ -n "$HELM_TOKEN_B64" ]] && break
-  sleep 1
+step '4/6 copy the ServiceAccount tokens into the OneCLI vault'
+copy_token() {
+  local secret=$1 file=$2 token_b64=
+  for _ in $(seq 30); do
+    token_b64=$(kubectl get secret -n "$NAMESPACE" "$secret" -o jsonpath='{.data.token}')
+    [[ -n "$token_b64" ]] && break
+    sleep 1
+  done
+  [[ -n "$token_b64" ]] || todo "the $secret Secret has no token yet"
+  base64 -d <<<"$token_b64" | kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- \
+    sh -c "umask 077; cat > $file"
+}
+SECRET_IDS=()
+for i in 0 1 2 3 4; do
+  copy_token "$(basename "${TOKEN_FILES[$i]}" .token)-token" "${TOKEN_FILES[$i]}"
+  SECRET_IDS[$i]=$(upsert_kubernetes_secret "${SECRET_NAMES[$i]}" "${TOKEN_FILES[$i]}") \
+    || todo "could not create or rotate OneCLI secret ${SECRET_NAMES[$i]}"
 done
-[[ -n "$HELM_TOKEN_B64" ]] || todo 'the nanoclaw-helm-token Secret has no token yet'
-base64 -d <<<"$HELM_TOKEN_B64" | kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- \
-  sh -c 'umask 077; cat > /tmp/nanoclaw-helm.token'
-unset HELM_TOKEN_B64
-printf '%s\n' 'created fresh one-hour tokens and copied the nanoclaw-helm token without printing their values'
-
-READ_SECRET_ID=$(upsert_kubernetes_secret "$READ_SECRET" "${TOKEN_FILES[0]}") \
-  || todo "could not create or rotate OneCLI secret $READ_SECRET"
-APPROVER_SECRET_ID=$(upsert_kubernetes_secret "$APPROVER_SECRET" "${TOKEN_FILES[1]}") \
-  || todo "could not create or rotate OneCLI secret $APPROVER_SECRET"
-HELM_SECRET_ID=$(upsert_kubernetes_secret "$HELM_SECRET" "${TOKEN_FILES[2]}") \
-  || todo "could not create or rotate OneCLI secret $HELM_SECRET"
 kubectl exec -n "$NAMESPACE" "$LOGIN_POD" -c login -- rm -f "${TOKEN_FILES[@]}"
 
+# The agent holds only the read-only reader; each host identity holds exactly its own token.
 PRIMARY_SECRET_IDS=$(onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" \
-  | jq -r --arg read "$READ_SECRET_ID" '[.data[], $read] | unique | join(",")')
+  | jq -r --arg read "${SECRET_IDS[0]}" --argjson others "$(printf '%s\n' "${SECRET_IDS[@]:1}" | jq -R . | jq -s .)" \
+      '[(.data - $others)[], $read] | unique | join(",")')
 onecli_cli agents set-secrets --id "$PRIMARY_AGENT_ID" --secret-ids "$PRIMARY_SECRET_IDS" >/dev/null
-onecli_cli agents set-secrets --id "$EXECUTOR_AGENT_ID" --secret-ids "$READ_SECRET_ID" >/dev/null
-onecli_cli agents set-secrets --id "$ANNOTATOR_AGENT_ID" --secret-ids "$APPROVER_SECRET_ID" >/dev/null
-onecli_cli agents set-secrets --id "$HELM_AGENT_ID" --secret-ids "$HELM_SECRET_ID" >/dev/null
-onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" | jq -e --arg id "$READ_SECRET_ID" '.data | index($id)' >/dev/null
-onecli_cli agents secrets --id "$EXECUTOR_AGENT_ID" | jq -e --arg id "$READ_SECRET_ID" '.data == [$id]' >/dev/null
-onecli_cli agents secrets --id "$ANNOTATOR_AGENT_ID" | jq -e --arg id "$APPROVER_SECRET_ID" '.data == [$id]' >/dev/null
-onecli_cli agents secrets --id "$HELM_AGENT_ID" | jq -e --arg id "$HELM_SECRET_ID" '.data == [$id]' >/dev/null
+onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" | jq -e --arg id "${SECRET_IDS[0]}" '.data | index($id)' >/dev/null
+for pair in "$EXECUTOR_AGENT_ID:1" "$ANNOTATOR_AGENT_ID:2" "$HELM_AGENT_ID:3" "$BREAKGLASS_AGENT_ID:4"; do
+  agent=${pair%:*} id=${SECRET_IDS[${pair#*:}]}
+  onecli_cli agents set-secrets --id "$agent" --secret-ids "$id" >/dev/null
+  onecli_cli agents secrets --id "$agent" | jq -e --arg id "$id" '.data == [$id]' >/dev/null
+done
 printf '%s\n' 'stored and assigned the Kubernetes credentials; values were not printed'
-printf '%s\n' 'WARNING: these TokenRequest credentials expire after one hour; production still requires the reviewed refresher.'
 
-step '5/6 write the approval-required runtime config atomically into the state PVC'
+step '5/6 merge the runtime config atomically into the state PVC'
 # Releases whose live values equal their k8s.jegor.nl file. mail/docker-mailserver and logging/vlogs
 # have drifted from their files, and hermes is a local chart, so they stay off the Helm path.
-# fluent-bit and trivy-operator stay off too: their charts write ClusterRoles the helm SA cannot.
+# longhorn's file is ahead of live (defaultSettings), so its first upgrade applies that too.
+# vaultwarden stays off because its chart renders the admin-token Secret, and cert-manager has no file.
 HELM_RELEASES='{
   "gitea/gitea": {"chart": "gitea", "repo": "https://dl.gitea.com/charts/", "file": "kubernetes/helm-charts/gitea-values.yaml"},
   "nextcloud/nextcloud": {"chart": "nextcloud", "repo": "https://nextcloud.github.io/helm/", "file": "kubernetes/helm-charts/nextcloud-values.yaml"},
   "excalidraw/excalidraw": {"chart": "excalidraw", "repo": "https://pmoscode-helm.github.io/excalidraw/", "file": "kubernetes/helm-charts/excalidraw-values.yaml"},
-  "wiki-js/wiki-js": {"chart": "wiki", "repo": "https://charts.js.wiki", "file": "kubernetes/helm-charts/wiki-js-values.yaml"}
+  "wiki-js/wiki-js": {"chart": "wiki", "repo": "https://charts.js.wiki", "file": "kubernetes/helm-charts/wiki-js-values.yaml"},
+  "logging/fluent-bit": {"chart": "fluent-bit", "repo": "https://fluent.github.io/helm-charts", "file": "kubernetes/helm-charts/fluent-bit-values.yaml"},
+  "trivy-operator/trivy-operator": {"chart": "trivy-operator", "repo": "https://aquasecurity.github.io/helm-charts/", "file": "kubernetes/helm-charts/trivy-operator-values.yaml"},
+  "longhorn-system/longhorn": {"chart": "longhorn", "repo": "https://charts.longhorn.io", "file": "kubernetes/helm-charts/longhorn-values.yaml"}
 }'
+CURRENT_CONFIG=$(kubectl exec -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -c orchestrator -- \
+  sh -c 'cat /opt/nanoclaw/data/kubernetes-remediation.json 2>/dev/null || echo {}')
 jq -n \
+  --argjson current "$CURRENT_CONFIG" \
   --arg agentGroupId "$ORCHESTRATOR_GROUP" \
   --arg matrixApproverUserId "$APPROVER" \
   --arg apiServer "$API_SERVER" \
@@ -297,18 +306,20 @@ jq -n \
   --arg annotatorOneCliAgent "$ANNOTATOR" \
   --arg falcoBearerFile /run/nanoclaw/falco/bearer \
   --arg helmOneCliAgent "$HELM" \
+  --arg breakGlassOneCliAgent "$BREAKGLASS" \
   --argjson helmReleases "$HELM_RELEASES" \
-  '{agentGroupId:$agentGroupId,matrixApproverUserId:$matrixApproverUserId,apiServer:$apiServer,
+  '$current * {agentGroupId:$agentGroupId,matrixApproverUserId:$matrixApproverUserId,apiServer:$apiServer,
     executorOneCliAgent:$executorOneCliAgent,annotatorOneCliAgent:$annotatorOneCliAgent,
-    falcoBearerFile:$falcoBearerFile,approvalRequired:true,
-    helmOneCliAgent:$helmOneCliAgent,helmReleases:$helmReleases}' \
+    falcoBearerFile:$falcoBearerFile,
+    helmOneCliAgent:$helmOneCliAgent,breakGlassOneCliAgent:$breakGlassOneCliAgent,helmReleases:$helmReleases,
+    t1:["nextcloud","mail","gitea"]}' \
   | kubectl exec -i -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -c orchestrator -- \
       sh -c 'set -eu; umask 077; file=/opt/nanoclaw/data/kubernetes-remediation.json; cat > "$file.tmp"; mv "$file.tmp" "$file"'
 kubectl exec -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -c orchestrator -- \
   cat /opt/nanoclaw/data/kubernetes-remediation.json \
   | jq -e --arg group "$ORCHESTRATOR_GROUP" --arg approver "$APPROVER" \
-      '.agentGroupId == $group and .matrixApproverUserId == $approver and .approvalRequired == true' >/dev/null
-printf '%s\n' 'runtime config is present with approvalRequired=true'
+      '.agentGroupId == $group and .matrixApproverUserId == $approver and (.t1 | length) > 0' >/dev/null
+printf '%s\n' 'runtime config is present with its T1 list'
 
 step '6/6 restart the orchestrator and confirm remediation is enabled'
 kubectl rollout restart -n "$NAMESPACE" "deploy/$ORCHESTRATOR" >/dev/null
@@ -325,5 +336,5 @@ cat <<'EOF'
 
 Trigger exactly one safe proposal with:
 kubectl --kubeconfig=/home/jopdorp/.kube/mini-pc.fresh exec -n nanoclaw-remediator deploy/nanoclaw-remediator-orchestrator -c orchestrator -- sh -c 'curl -fsS -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $(cat /run/nanoclaw/falco/bearer)" -H "Content-Type: application/json" --data '\''{"time":"2026-10-21T00:00:00Z","rule":"NanoClaw safe smoke test","priority":"Notice","output_fields":{"k8s.ns.name":"gitea","k8s.pod.name":"nanoclaw-nonexistent-smoke-test"}}'\'' http://127.0.0.1:3000/webhook/kubernetes-falco'
-Nothing is applied unless matrix:@jopdorp:matrix.org explicitly approves it in Matrix.
+Low-risk plans apply on their own and are reported to matrix:@jopdorp:matrix.org; the rest wait for approval in Matrix.
 EOF

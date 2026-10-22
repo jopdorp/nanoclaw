@@ -10,7 +10,7 @@ Only the orchestrator Deployment has the `nanoclaw-remediation-executor` and `na
 
 The agent is unable to set the approval annotation three independent ways: its OneCLI identity blocks every mutating HTTP method; its RBAC has no PV/PVC patch and the base admission policy rejects workload-object annotation changes by the remediator SA; and the annotation method exists only on the host-side annotator client. The annotation is added after target revalidation for every non-Lane-C write, the resulting resourceVersion is used for the apply, and it is removed in `finally`. A storage delete also gets a plan-named temporary binding which is removed in `finally`.
 
-A Lane C approval records the human decision, but its executor result is read-only and never calls Kubernetes. Lane A recovery is an orchestrator state machine, not an agent loop: same UID only, ten-minute/plan deadline, and at most the operation-specific cap already shown on the approval card.
+An approved Lane C plan is applied by the host with the separate `nanoclaw-breakglass` identity, which no agent holds, with zero automatic recovery. Lane A recovery is an orchestrator state machine, not an agent loop: same UID only, ten-minute/plan deadline, and at most the operation-specific cap already shown on the approval card.
 
 Files remain inert because no review file is imported by a live barrel. The provider-only activation patch carries no remediation runtime; the second patch activates the MCP proposal tool and host module only after the later runbook gate.
 
