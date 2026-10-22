@@ -244,6 +244,10 @@ describe('Kubernetes remediation policy', () => {
     expect(validateRemediationPlan(write('name: apply', '.gitea/workflows/apply.yaml'), now).plan.commitOnly).toBe(
       true,
     );
-    expect(() => validateRemediationPlan(write('name: x', '.github/workflows/x.yaml'), now)).toThrow('allowed');
+    expect(
+      validateRemediationPlan(write('not: yaml: at all', 'kubernetes/security/images/x/Dockerfile'), now).plan
+        .commitOnly,
+    ).toBe(true);
+    expect(() => validateRemediationPlan(write('hi', 'README.md'), now)).toThrow('kubernetes/**');
   });
 });

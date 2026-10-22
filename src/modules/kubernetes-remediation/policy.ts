@@ -45,8 +45,8 @@ const IMAGE_KEY_RE = /(?:^|(?<!\\)\.)(image|repository|registry|tag|digest|sha)$
 const REPLICA_KEY_RE = /^(replicas|replicaCount)$/;
 const PINNED_RE = /^(?:\w[\w.-]{0,127}@)?sha256:[0-9a-f]{64}$/;
 const MANIFEST_FILE_RE = /^kubernetes\/(?:[\w-][\w.-]*\/)*[\w-][\w.-]*\.ya?ml$/;
-const REPO_FILE_RE =
-  /^(?:kubernetes\/(?:[\w-][\w.-]*\/)*[\w-][\w.-]*\.(?:ya?ml|json)|\.gitea\/workflows\/[\w-][\w.-]*\.ya?ml|(?:renovate|\.renovaterc)\.json|\.gitea\/renovate\.json)$/;
+const REPO_MANIFEST_RE = /^kubernetes\/(?:[\w-][\w.-]*\/)*[\w-][\w.-]*\.(?:ya?ml|json)$/;
+const REPO_FILE_RE = /^(?:(?:kubernetes|\.gitea)\/[\w.-]+(?:\/[\w.-]+)*|(?:renovate|\.renovaterc)\.json)$/;
 const VALUES_FILE_RE = /^kubernetes\/helm-charts\/[\w-][\w.-]*\.ya?ml$/;
 const CHART_RE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
 const CHART_VERSION_RE = /^v?\d+\.\d+\.\d+[\w.+-]*$/;
@@ -262,11 +262,11 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     const file = string(operation.path, 'plan.operation.path', 256);
     if (!REPO_FILE_RE.test(file) || file.split('/').includes('..') || base.target.name !== file)
       throw new Error(
-        'plan.operation.path must be an allowed manifest, workflow or Renovate path in k8s.jegor.nl, and target.name too',
+        'plan.operation.path must be under kubernetes/** or .gitea/**, or be a Renovate config; .git/** is refused, and target.name must match',
       );
     return {
       ...base,
-      ...(!file.startsWith('kubernetes/') ? { commitOnly: true as const } : {}),
+      ...(!REPO_MANIFEST_RE.test(file) ? { commitOnly: true as const } : {}),
       operation: { type, path: file, content: string(operation.content, 'plan.operation.content', 256 * 1024) },
     };
   }
@@ -523,12 +523,11 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     if (plan.target.kind !== 'Secret' || !namespace || !RELEASE_NAME_RE.test(name))
       throw new Error(`${plan.operation.type} requires a Helm release target`);
   } else if (plan.operation.type === 'repo-write') {
-    const objects = repoObjects(plan.operation.content);
-    const lanes = plan.operation.path.startsWith('kubernetes/')
-      ? objects.map((object) =>
+    const lanes = plan.commitOnly
+      ? []
+      : repoObjects(plan.operation.content).map((object) =>
           classifyTarget({ ...plan.target, kind: object.kind, namespace: object.metadata?.namespace ?? null }),
-        )
-      : [];
+        );
     lane = lanes.includes('C') ? 'C' : lanes.includes('always-ask') ? 'always-ask' : 'A';
   } else if (plan.operation.type === 'delete-storage') {
     if (!['PersistentVolume', 'PersistentVolumeClaim', 'Volume'].includes(plan.target.kind))
@@ -607,7 +606,7 @@ export interface StandingGrant {
 /** The grant that covers this approval-class plan; never-rules were already enforced by validation. */
 export function standingGrant({ plan }: ValidatedPlan, grants: StandingGrant[]): StandingGrant | undefined {
   const namespaces =
-    plan.operation.type === 'repo-write'
+    plan.operation.type === 'repo-write' && !plan.commitOnly
       ? repoObjects(plan.operation.content).map((object) => object.metadata?.namespace ?? null)
       : [plan.target.namespace];
   const fits = (e: GrantEntry, namespace: string | null) =>
