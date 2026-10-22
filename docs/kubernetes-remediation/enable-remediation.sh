@@ -52,7 +52,7 @@ test "$(kubectl config current-context)" = default || fail 'HOME kubeconfig cont
 test "$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')" = "$API_SERVER" \
   || fail "kubeconfig does not point at HOME ($API_SERVER)"
 
-step 'precheck: prove the latest Investigator turn used working DeepSeek routing'
+step 'precheck: prove the latest Investigator turn used working gateway routing'
 GROUPS=$(ncl groups list --json --limit 100000)
 for group_id in "$ORCHESTRATOR_GROUP" "$INVESTIGATOR_GROUP" "$VERIFIER_GROUP"; do
   jq -e --arg id "$group_id" '.data[] | select(.id == $id)' <<<"$GROUPS" >/dev/null \
@@ -61,27 +61,27 @@ done
 
 INVESTIGATOR_POD=$(kubectl get pods -n "$NAMESPACE" -l "nanoclaw-group=$INVESTIGATOR_GROUP" \
   --sort-by=.metadata.creationTimestamp -o name | tail -n 1)
-DEEPSEEK_STATUS='not proven: no Investigator session pod exists'
+ROUTING_STATUS='not proven: no Investigator session pod exists'
 if [[ -n "$INVESTIGATOR_POD" ]]; then
   INVESTIGATOR_LOG=$(kubectl logs -n "$NAMESPACE" "$INVESTIGATOR_POD" -c agent --tail=1000 2>&1 || true)
   LAST_SIGNAL=$(grep -E '\[poll-loop\] (Result:|Error:)|\[agent-runner\] Fatal|Failed to authenticate|API Error:' \
     <<<"$INVESTIGATOR_LOG" | tail -n 1 || true)
   if [[ "$LAST_SIGNAL" == *'[poll-loop] Result:'* ]] \
     && ! grep -Eqi 'error|fail|401|403|no credentials|unauthorized|authentication' <<<"$LAST_SIGNAL"; then
-    DEEPSEEK_STATUS="proven by the latest successful Investigator result in ${INVESTIGATOR_POD#pod/}"
+    ROUTING_STATUS="proven by the latest successful Investigator result in ${INVESTIGATOR_POD#pod/}"
   elif [[ -n "$LAST_SIGNAL" ]]; then
-    DEEPSEEK_STATUS="not proven: the latest Investigator turn in ${INVESTIGATOR_POD#pod/} ended in an error"
+    ROUTING_STATUS="not proven: the latest Investigator turn in ${INVESTIGATOR_POD#pod/} ended in an error"
   else
-    DEEPSEEK_STATUS="not proven: ${INVESTIGATOR_POD#pod/} has no completed turn"
+    ROUTING_STATUS="not proven: ${INVESTIGATOR_POD#pod/} has no completed turn"
   fi
 fi
-printf 'DeepSeek routing: %s\n' "$DEEPSEEK_STATUS"
-if [[ "$DEEPSEEK_STATUS" != proven* && "${FORCE:-0}" != 1 ]]; then
-  printf '%s\n' 'WARNING: gateway-config.yaml keeps launch blocked until deepseek-routing-proven.' >&2
+printf 'Subagent routing: %s\n' "$ROUTING_STATUS"
+if [[ "$ROUTING_STATUS" != proven* && "${FORCE:-0}" != 1 ]]; then
+  printf '%s\n' 'WARNING: gateway-config.yaml keeps launch blocked until subagent-routing-proven.' >&2
   fail 're-run with FORCE=1 only if you intentionally accept this unresolved launch gate'
 fi
-if [[ "$DEEPSEEK_STATUS" != proven* ]]; then
-  printf '%s\n' 'WARNING: FORCE=1 accepted; DeepSeek routing remains an unresolved production gate.' >&2
+if [[ "$ROUTING_STATUS" != proven* ]]; then
+  printf '%s\n' 'WARNING: FORCE=1 accepted; Subagent routing remains an unresolved production gate.' >&2
 fi
 
 step '1/6 apply the approval-controller identity and admission policies idempotently'

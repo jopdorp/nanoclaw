@@ -5,8 +5,16 @@ model:
   orchestrator:
     model: gpt-5.6-sol
     credential: codex-subscription-oauth
+  next-orchestrator:
+    provider: claude
+    model: opus
+    credential: claude-setup-token
   subagents:
-    provider: deepseek
+    provider: codex
+    model: gpt-5.6-sol
+    credential: codex-subscription-oauth
+  fallback:
+    provider: claude-remediation
     model: deepseek-chat
     credential: gateway-managed
 identities:
@@ -24,4 +32,4 @@ runtime:
   matrixApproverUserId: 'matrix:<FULL_MATRIX_USER_ID>'
   falcoBearerFile: /run/nanoclaw/falco/bearer
   approvalRequired: true
-  launchBlockedUntil: [interactive-codex-login, deepseek-routing-proven, codex-provider-installed]
+  launchBlockedUntil: [interactive-codex-login, subagent-routing-proven, codex-provider-installed]
