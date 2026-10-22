@@ -35,9 +35,9 @@ spec:
   validations:
     - expression: >-
         request.resource.resource in ['persistentvolumes', 'persistentvolumeclaims'] ||
-        (has(request.namespace) ? request.namespace : '') == 'wireguard-home'
+        request.namespace == 'wireguard-home'
       message: approval annotations on workloads belong only to the always-ask namespaces
-    - expression: request.resource.resource != 'persistentvolumeclaims' || (has(request.namespace) ? request.namespace : '') != 'backups'
+    - expression: request.resource.resource != 'persistentvolumeclaims' || request.namespace != 'backups'
       message: backup PVCs are immutable
     - expression: >-
         dyn(object).all(k, k == 'metadata' || (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
@@ -105,7 +105,7 @@ spec:
         variables.binding.subjects[0].name == 'nanoclaw-remediator' &&
         variables.binding.subjects[0].namespace == 'nanoclaw-remediator'
       message: temporary binding may grant only the remediator ServiceAccount
-    - expression: variables.pv || (has(request.namespace) ? request.namespace : '') != 'backups'
+    - expression: variables.pv || request.namespace != 'backups'
       message: backup namespace bindings are forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
