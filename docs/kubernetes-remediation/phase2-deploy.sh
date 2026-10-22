@@ -302,7 +302,8 @@ ncl groups config update --id "$PRIMARY_ID" --provider codex --model gpt-5.6-sol
 ncl groups config update --id "$INVESTIGATOR_ID" --provider claude-remediation --model deepseek-chat --effort xhigh --cli-scope disabled >/dev/null
 ncl groups config update --id "$VERIFIER_ID" --provider claude-remediation --model deepseek-chat --effort xhigh --cli-scope disabled >/dev/null
 
-write_group_file kubernetes-remediator instructions.prepend.md "$DOCS/agent-group/CLAUDE.md"
+cat "$DOCS/agent-group/CLAUDE.md" "$DOCS/agent-group/approvals.md" >"$TMP_DIR/orfie.md"
+write_group_file kubernetes-remediator instructions.prepend.md "$TMP_DIR/orfie.md"
 write_group_file kubernetes-remediator kubeconfig.gateway.yaml "$DOCS/kubeconfig.gateway.yaml"
 sed '1,/^---$/d' "$DOCS/agent-group/.claude/agents/remediation-investigator.md" >"$TMP_DIR/investigator.md"
 sed '1,/^---$/d' "$DOCS/agent-group/.claude/agents/remediation-verifier.md" >"$TMP_DIR/verifier.md"
