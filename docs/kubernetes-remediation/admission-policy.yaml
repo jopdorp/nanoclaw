@@ -594,9 +594,9 @@ spec:
          !request.userInfo.username.startsWith('system:serviceaccount:kube-system:'))
   validations:
     - expression: >-
-        (request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator' &&
+        (request.userInfo.username in ['system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator', 'system:serviceaccount:nanoclaw-remediator:nanoclaw-orchestrator'] &&
          request.namespace == 'nanoclaw-remediator' && request.resource.group == 'batch' && request.resource.resource == 'jobs' &&
-         !has(request.subResource) && request.operation in ['CREATE', 'DELETE']) ||
+         !has(request.subResource) && request.operation in ['CREATE', 'DELETE', 'UPDATE', 'PATCH']) ||
         (request.userInfo.username == 'system:serviceaccount:orfie-ci:orfie-ci-deploy' &&
          request.namespace == 'nanoclaw-remediator' && request.resource.group == 'apps' && request.resource.resource == 'deployments' &&
          request.name == 'nanoclaw-remediator-orchestrator' && !has(request.subResource) && request.operation == 'UPDATE')
