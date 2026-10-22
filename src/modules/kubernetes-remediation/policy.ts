@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { RemediationLane, RemediationPlan, TargetRef, ValidatedPlan } from './types.js';
+import type { RemediationLane, RemediationPlan, TargetRef, ValidatedPlan, ValuesScalar } from './types.js';
 
 export const LANE_A_NAMESPACES = new Set([
   'nextcloud',
@@ -38,6 +38,7 @@ const API_VERSIONS: Record<TargetRef['kind'], TargetRef['apiVersion']> = {
   Job: 'batch/v1',
   PersistentVolume: 'v1',
   PersistentVolumeClaim: 'v1',
+  Secret: 'v1',
 };
 const WORKLOAD_KINDS = ['Deployment', 'StatefulSet', 'DaemonSet'];
 
@@ -45,6 +46,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const DIGEST_IMAGE_RE =
   /^(docker\.io|docker\.gitea\.com|cr\.fluentbit\.io|ghcr\.io|quay\.io|registry\.k8s\.io)\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/;
 const TAG_RE = /^\w[\w.-]{0,127}$/;
+const VALUES_FILE_RE = /^kubernetes\/helm-charts\/[a-z0-9]+(?:-[a-z0-9]+)*-values\.yaml$/;
+const VALUES_PATH_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
+const IMAGE_KEY_RE = /(?:^|\.)(image|repository|registry|tag|digest)$/;
+const PINNED_RE = /(?:^|@)sha256:[0-9a-f]{64}$/;
 const VAULTWARDEN_RE = /^docker\.io\/vaultwarden\/server@sha256:[0-9a-f]{64}$/;
 const WIREGUARD_RE = /^lscr\.io\/linuxserver\/wireguard@sha256:[0-9a-f]{64}$/;
 
@@ -59,6 +64,11 @@ function string(value: unknown, label: string, max = 1024): string {
     throw new Error(`${label} must be a non-empty string no longer than ${max} characters`);
   }
   return value;
+}
+
+function scalar(value: unknown, label: string): ValuesScalar {
+  if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return value;
+  return string(value, label, 1000);
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
@@ -161,6 +171,29 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     if (operation.reclaimConfirmed !== true) throw new Error('storage deletion requires reclaimConfirmed=true');
     return { ...base, operation: { type, reclaimConfirmed: true } };
   }
+  if (type === 'helm-values') {
+    exactKeys(operation, ['type', 'file', 'set'], 'plan.operation');
+    const file = string(operation.file, 'plan.operation.file', 256);
+    if (!VALUES_FILE_RE.test(file))
+      throw new Error('plan.operation.file must be kubernetes/helm-charts/<name>-values.yaml');
+    if (!Array.isArray(operation.set) || operation.set.length === 0 || operation.set.length > 8) {
+      throw new Error('plan.operation.set must contain 1 through 8 edits');
+    }
+    const set = operation.set.map((entry, index) => {
+      const edit = record(entry, `plan.operation.set[${index}]`);
+      exactKeys(edit, ['path', 'before', 'after'], `plan.operation.set[${index}]`);
+      const path = string(edit.path, `plan.operation.set[${index}].path`, 256);
+      if (!VALUES_PATH_RE.test(path)) throw new Error(`plan.operation.set[${index}].path must be a dotted values path`);
+      return {
+        path,
+        before: edit.before === null ? null : scalar(edit.before, `plan.operation.set[${index}].before`),
+        after: scalar(edit.after, `plan.operation.set[${index}].after`),
+      };
+    });
+    if (new Set(set.map((edit) => edit.path)).size !== set.length)
+      throw new Error('plan.operation.set paths must be unique');
+    return { ...base, operation: { type, file, set } };
+  }
   if (type === 'lane-c-escalation') {
     exactKeys(operation, ['type', 'requestedChange'], 'plan.operation');
     return {
@@ -169,7 +202,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     };
   }
   throw new Error(
-    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage or lane-c-escalation',
+    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values or lane-c-escalation',
   );
 }
 
@@ -194,6 +227,20 @@ function parseImage(image: string) {
   const rest = explicit ? path.slice(first.length + 1) : path;
   const repository = registry === 'docker.io' && !rest.includes('/') ? `library/${rest}` : rest;
   return { registry, repository, tag, digest };
+}
+
+function checkImageUpdate(beforeImage: string, afterImage: string, expected: RegExp): void {
+  const before = parseImage(beforeImage);
+  const after = parseImage(afterImage);
+  if (
+    !expected.test(`${after.registry}/${after.repository}@${after.digest}`) ||
+    (after.tag !== undefined && !TAG_RE.test(after.tag))
+  ) {
+    throw new Error('new image is not an approved digest reference');
+  }
+  if (`${before.registry}/${before.repository}` !== `${after.registry}/${after.repository}`) {
+    throw new Error('image repository may not change');
+  }
 }
 
 export function canonicalImage(image: string): string {
@@ -242,17 +289,7 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
         : plan.target.namespace === 'wireguard-home'
           ? WIREGUARD_RE
           : DIGEST_IMAGE_RE;
-    const before = parseImage(plan.operation.before);
-    const after = parseImage(plan.operation.after);
-    if (
-      !expected.test(`${after.registry}/${after.repository}@${after.digest}`) ||
-      (after.tag !== undefined && !TAG_RE.test(after.tag))
-    ) {
-      throw new Error('new image is not an approved digest reference');
-    }
-    if (`${before.registry}/${before.repository}` !== `${after.registry}/${after.repository}`) {
-      throw new Error('image repository may not change');
-    }
+    checkImageUpdate(plan.operation.before, plan.operation.after, expected);
     // The base admission policy rejects a rollback to a mutable tag. Such a
     // rollout gets the restart attempt only; a digest-pinned prior image may
     // also use the second, rollback write.
@@ -279,6 +316,17 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     automaticWriteCap = 1;
   } else if (plan.operation.type === 'delete-job') {
     if (lane !== 'A' || plan.target.kind !== 'Job') throw new Error('delete-job requires a Lane A Job');
+  } else if (plan.operation.type === 'helm-values') {
+    if (lane !== 'A' || plan.target.kind !== 'Secret') throw new Error('helm-values requires a Lane A Helm release');
+    for (const { path, before, after } of plan.operation.set) {
+      const key = IMAGE_KEY_RE.exec(path)?.[1];
+      if (!key) continue;
+      if (key === 'repository' || key === 'registry') throw new Error(`${path}: image repository may not change`);
+      if (typeof after !== 'string' || (key === 'image' ? typeof before !== 'string' : !PINNED_RE.test(after))) {
+        throw new Error(`${path} must pin a sha256 digest of the same image repository`);
+      }
+      if (key === 'image') checkImageUpdate(before as string, after, DIGEST_IMAGE_RE);
+    }
   } else if (plan.operation.type === 'delete-storage') {
     if (!plan.target.kind.startsWith('Persistent')) throw new Error('delete-storage requires PV or PVC');
     if (plan.target.namespace === 'backups') throw new Error('backup storage is immutable');

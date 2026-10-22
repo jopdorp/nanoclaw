@@ -6,7 +6,7 @@ export type WorkloadKind = 'Deployment' | 'StatefulSet' | 'DaemonSet';
 
 export interface TargetRef {
   apiVersion: 'apps/v1' | 'batch/v1' | 'v1';
-  kind: WorkloadKind | 'Job' | 'PersistentVolume' | 'PersistentVolumeClaim';
+  kind: WorkloadKind | 'Job' | 'PersistentVolume' | 'PersistentVolumeClaim' | 'Secret';
   namespace: string | null;
   name: string;
   uid: string;
@@ -47,6 +47,17 @@ export interface StorageDeletePlan extends PlanBase {
   operation: { type: 'delete-storage'; reclaimConfirmed: boolean };
 }
 
+export type ValuesScalar = string | number | boolean;
+
+/** Targets the Helm release: `target.name` is the release, uid/resourceVersion its latest release Secret. */
+export interface HelmValuesPlan extends PlanBase {
+  operation: {
+    type: 'helm-values';
+    file: string;
+    set: Array<{ path: string; before: ValuesScalar | null; after: ValuesScalar }>;
+  };
+}
+
 export interface LaneCEscalationPlan extends PlanBase {
   operation: { type: 'lane-c-escalation'; requestedChange: string };
 }
@@ -57,6 +68,7 @@ export type RemediationPlan =
   | ScalePlan
   | JobDeletePlan
   | StorageDeletePlan
+  | HelmValuesPlan
   | LaneCEscalationPlan;
 
 export interface ValidatedPlan {

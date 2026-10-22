@@ -18,7 +18,8 @@ export const proposeKubernetesRemediation: McpToolDefinition = {
             'operation is one of: {type:"patch-image", containers [{name, initContainer (boolean)}], before (the exact image every listed container runs now), after (new image)}; ' +
             '{type:"restart", restartedAt}; {type:"scale", before, after}; {type:"delete-job"} (target a finished batch/v1 Job); ' +
             '{type:"delete-storage", reclaimConfirmed:true}; ' +
-            '{type:"lane-c-escalation", requestedChange}. Any other change (values, probes, config) is lane-c-escalation.',
+            '{type:"helm-values", file ("kubernetes/helm-charts/<name>-values.yaml" in k8s.jegor.nl), set [{path (dotted values path, e.g. "image.tag"), before (the value in the file now, or null to add an absent key), after}] (1-8 string/number/boolean edits; image, tag and digest values must pin a same-repository sha256 digest)} with target {apiVersion:"v1", kind:"Secret", namespace, name (the Helm release), uid:"-", resourceVersion:"-"}: the host binds it to the latest release revision, checks every before against the repo and rejects with the actual value on a mismatch, then after approval runs helm upgrade and commits the values only if the release comes up healthy and matches any open Helm drift; ' +
+            '{type:"lane-c-escalation", requestedChange}. Any other change (probes, config outside a values file) is lane-c-escalation.',
         },
       },
       required: ['plan'],

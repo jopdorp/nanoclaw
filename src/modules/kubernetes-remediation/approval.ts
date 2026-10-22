@@ -4,7 +4,8 @@ import { log } from '../../log.js';
 import { notifyAgent, registerApprovalHandler, requestApproval } from '../approvals/index.js';
 import { pickApprovalDelivery } from '../approvals/primitive.js';
 import { isLowRiskAutoApprove, validateRemediationPlan } from './policy.js';
-import { REMEDIATION_ACTION, type RemediationExecutor, type ValidatedPlan } from './types.js';
+import type { HelmReleaseExecutor } from './helm-release.js';
+import { REMEDIATION_ACTION, type HelmValuesPlan, type RemediationExecutor, type ValidatedPlan } from './types.js';
 import type { Session } from '../../types.js';
 
 const AUTO_APPROVER = 'auto:low-risk';
@@ -47,7 +48,9 @@ function renderQuestion({ plan, lane, digest, automaticWriteCap }: ValidatedPlan
           ? `restart at ${operation.restartedAt}`
           : operation.type === 'delete-storage' || operation.type === 'delete-job'
             ? `delete ${plan.target.kind}`
-            : `manual Lane C request: ${operation.requestedChange}`;
+            : operation.type === 'helm-values'
+              ? `helm release ${plan.target.name}, ${operation.file}: ${operation.set.map((e) => `${e.path}: ${JSON.stringify(e.before)} -> ${JSON.stringify(e.after)}`).join(', ')}`
+              : `manual Lane C request: ${operation.requestedChange}`;
   return [
     `lane: ${lane}`,
     `target: ${plan.target.namespace ?? '_cluster'}/${plan.target.kind}/${plan.target.name}`,
@@ -61,7 +64,7 @@ function renderQuestion({ plan, lane, digest, automaticWriteCap }: ValidatedPlan
   ].join('\n');
 }
 
-async function notifyApprover(userId: string, text: string): Promise<void> {
+export async function notifyApprover(userId: string, text: string): Promise<void> {
   const adapter = getDeliveryAdapter();
   const target = adapter && (await pickApprovalDelivery([userId], ''));
   if (!adapter || !target) {
@@ -89,6 +92,7 @@ export function registerKubernetesRemediationApproval(options: {
   agentGroupId: string;
   approverUserId: string;
   executor: RemediationExecutor;
+  helm?: HelmReleaseExecutor;
 }): void {
   const validate = async (content: Record<string, unknown>, session: Session) => {
     if (session.agent_group_id !== options.agentGroupId) return false;
@@ -137,7 +141,20 @@ export function registerKubernetesRemediationApproval(options: {
       guardAction: remediationGuard,
       precheck: validate,
       requestHold: async (content, session) => {
-        const validated = validateRemediationPlan(planInput(content));
+        let validated = validateRemediationPlan(planInput(content));
+        if (validated.plan.operation.type === 'helm-values') {
+          try {
+            if (!options.helm) throw new Error('the Helm path is not configured');
+            validated = validateRemediationPlan(await options.helm.bind(validated.plan as HelmValuesPlan));
+            // eslint-disable-next-line no-catch-all/no-catch-all -- the agent hears why its plan got no card
+          } catch (error) {
+            await notifyAgent(
+              session,
+              `kubernetes remediation rejected: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return;
+          }
+        }
         await requestApproval({
           session,
           agentName: 'Kubernetes Remediator',

@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
+import type { HelmReleaseExecutor } from './helm-release.js';
 import { canonicalImage } from './policy.js';
-import type { ApprovalGrant, ExecutionResult, RemediationPlan, ValidatedPlan } from './types.js';
+import type { ApprovalGrant, ExecutionResult, HelmValuesPlan, RemediationPlan, ValidatedPlan } from './types.js';
 
 const APPROVAL_ANNOTATION = 'remediation.nanoclaw.io/approval-id';
 const TEMPORARY_BINDING_RE = /^nanoclaw-remediation-[0-9a-f-]{36}$/;
@@ -322,6 +323,7 @@ export class GatewayRemediationExecutor {
     private readonly executor: KubernetesJsonClient,
     private readonly annotator: KubernetesJsonClient,
     private readonly observer: RolloutObserver,
+    private readonly helm?: HelmReleaseExecutor,
   ) {}
 
   async execute(validated: ValidatedPlan, grant: ApprovalGrant) {
@@ -335,6 +337,10 @@ export class GatewayRemediationExecutor {
         message: 'Lane C stays read-only; approval recorded for manual escalation.',
         automaticWrites: 0,
       };
+    if (plan.operation.type === 'helm-values') {
+      if (!this.helm) throw new Error('the Helm path is not configured');
+      return this.helm.apply(plan as HelmValuesPlan);
+    }
 
     const path =
       plan.operation.type === 'delete-storage'
@@ -466,6 +472,14 @@ export class GatewayRemediationExecutor {
       throw new AggregateError(errors, 'remediation execution or cleanup failed');
     }
     if (!result) throw new Error('remediation execution produced no result');
+    if (this.helm && (plan.operation.type === 'patch-image' || plan.operation.type === 'scale')) {
+      const note = await this.helm
+        .recordPatch(plan, await this.executor.request(path))
+        .catch(
+          (error: unknown) => `Helm drift was not recorded: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      if (note) return { ...result, message: `${result.message} ${note}` };
+    }
     return result;
   }
 
