@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 
+import * as config from './config.js';
 import { getPendingMessages } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { getCurrentReplyRoute, getContinuation, setContinuation } from './db/session-state.js';
@@ -156,6 +157,25 @@ describe('provider throws with active or queued turns', () => {
       [true, 'a2a-1'],
       [true, 'a2a-2'],
     ]);
+  });
+
+  it('sends one notice for abandoned self-addressed requests', async () => {
+    const spy = spyOn(config, 'loadConfig').mockReturnValue({
+      ...config.runnerConfigFromRaw({}),
+      agentGroupId: 'ag-a',
+    });
+    try {
+      await runFailure(async function* (pushes) {
+        insertAgentMessage('trigger-1', { text: 'incident one' });
+        await waitFor(() => pushes.length === 1);
+        insertAgentMessage('trigger-2', { text: 'incident two' });
+        await waitFor(() => pushes.length === 2);
+        throw new Error(DIAGNOSTIC);
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(visibleRows().filter((row) => row.channel_type === 'agent')).toHaveLength(1);
   });
 
   it('sends no notice for a queued turn woken only by a failure notice', async () => {

@@ -1,3 +1,4 @@
+import { loadConfig } from './config.js';
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import {
   getPendingMessages,
@@ -730,8 +731,10 @@ export async function processQuery(
       // output from unfinished turns and report that the run did not finish.
       // Retrying the same route or several queued turns in one thread needs
       // only one notice. The host picks an a2a reply's session by in_reply_to,
-      // so agent routes also compare it.
+      // so agent routes also compare it, except self-addressed ones: host
+      // triggers queue many of those and every notice lands back here.
       const failedRoutes = [...(answering ? [routing] : []), ...queuedTurns.map((turn) => turn.routing)];
+      const self = loadConfig().agentGroupId;
       const noticed: RoutingContext[] = [];
       for (const target of failedRoutes) {
         if (!sendsFailureNotice(target)) continue;
@@ -741,7 +744,7 @@ export async function processQuery(
               prior.platformId === target.platformId &&
               prior.channelType === target.channelType &&
               prior.threadId === target.threadId &&
-              (target.channelType !== 'agent' || prior.inReplyTo === target.inReplyTo),
+              (target.channelType !== 'agent' || target.platformId === self || prior.inReplyTo === target.inReplyTo),
           )
         )
           continue;
