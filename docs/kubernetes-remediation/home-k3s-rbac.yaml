@@ -235,6 +235,26 @@ roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanocla
 subjects:
   - { kind: ServiceAccount, name: nanoclaw-helm, namespace: nanoclaw-remediator }
 ---
+# Charts put leader-election Roles and RoleBindings in kube-system; the rest of kube-system stays break-glass.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nanoclaw-helm-rbac
+  namespace: kube-system
+rules:
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles, rolebindings]
+    verbs: ['*']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nanoclaw-helm-rbac
+  namespace: kube-system
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-helm-rbac }
+subjects:
+  - { kind: ServiceAccount, name: nanoclaw-helm, namespace: nanoclaw-remediator }
+---
 # Break-glass. Only the host executor holds this identity (OneCLI agent
 # nanoclaw-breakglass), and only to apply an approved Lane C plan. It reads
 # everything but Secrets cluster-wide, owns kube-system and longhorn-system, and
