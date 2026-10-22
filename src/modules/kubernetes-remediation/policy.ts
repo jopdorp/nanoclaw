@@ -384,9 +384,18 @@ export function checkImageUpdate(beforeImage: string, afterImage: string): void 
   ) {
     throw new Error('new image is not an approved digest reference');
   }
-  if (`${before.registry}/${before.repository}` !== `${after.registry}/${after.repository}`) {
-    throw new Error('image repository may not change');
+  // The same digest is the same content, so it may move to another trusted registry or repository.
+  if (
+    `${before.registry}/${before.repository}` !== `${after.registry}/${after.repository}` &&
+    !sameDigest(beforeImage, afterImage)
+  ) {
+    throw new Error('image repository may not change unless the digest stays the same');
   }
+}
+
+function sameDigest(before: string, after: string): boolean {
+  const digest = parseImage(before).digest;
+  return !!digest && digest === parseImage(after).digest;
 }
 
 export function imageRepository(image: string): string {
@@ -454,28 +463,24 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     if (plan.target.kind !== 'Job') throw new Error('delete-job requires a Job');
   } else if (plan.operation.type === 'helm-values') {
     if (plan.target.kind !== 'Secret') throw new Error('helm-values requires a Helm release');
-    // Charts pin in different shapes: tag@sha256, a sibling digest or sha key, or repository@sha256.
+    // Charts pin in different shapes: tag@sha256, a sibling digest or sha key, or repository@sha256. The host
+    // then checks the image the chart renders: pinned, and the same repository or the same digest.
     const planned = new Map(plan.operation.set.map((edit) => [edit.path, edit.after]));
     for (const { path, before, after } of plan.operation.set) {
       const key = IMAGE_KEY_RE.exec(path)?.[1];
-      if (!key) continue;
+      if (!key || key === 'registry' || key === 'repository') continue;
       const parent = path.slice(0, -key.length);
       const siblingPin = ['digest', 'sha'].some((k) => PINNED_RE.test(String(planned.get(`${parent}${k}`) ?? '')));
-      const sameRepository =
-        typeof before === 'string' && typeof after === 'string' && before.split('@')[0] === after.split('@')[0];
-      if (key === 'registry') throw new Error(`${path}: image registry may not change`);
+      const repositoryPin = /@sha256:[0-9a-f]{64}$/.test(String(planned.get(`${parent}repository`) ?? ''));
       if (key === 'image') {
         if (typeof before !== 'string' || typeof after !== 'string')
           throw new Error(`${path} must be an image reference`);
         checkImageUpdate(before, after);
       } else if (
-        key === 'repository'
-          ? !sameRepository || !/@sha256:[0-9a-f]{64}$/.test(String(after))
-          : typeof after !== 'string' || !(PINNED_RE.test(after) || (key === 'tag' && siblingPin))
+        typeof after !== 'string' ||
+        !(PINNED_RE.test(after) || (key === 'tag' && (siblingPin || repositoryPin)))
       )
-        throw new Error(
-          `${path} must pin a sha256 digest of the same image repository, in the tag or a sibling digest key`,
-        );
+        throw new Error(`${path} must pin a sha256 digest, in the tag or a sibling digest key`);
     }
   } else if (['helm-sync-values', 'helm-install', 'helm-uninstall'].includes(plan.operation.type)) {
     if (plan.target.kind !== 'Secret' || !namespace || !RELEASE_NAME_RE.test(name))
@@ -613,13 +618,17 @@ export function isAutoApproved(
   if (operation.type === 'manifest-edit') {
     return operation.set.every(({ path, before, after }) =>
       /(?:^|\.)image$/.test(path)
-        ? sameVersionLine(parseImage(String(before)).tag, parseImage(String(after)).tag, critical)
+        ? sameDigest(String(before), String(after)) ||
+          sameVersionLine(parseImage(String(before)).tag, parseImage(String(after)).tag, critical)
         : path !== 'spec.replicas' || target.kind !== 'StatefulSet',
     );
   }
   if (operation.type === 'scale') return target.kind === 'Deployment';
   if (operation.type === 'patch-image')
-    return sameVersionLine(parseImage(operation.before).tag, parseImage(operation.after).tag, critical);
+    return (
+      sameDigest(operation.before, operation.after) ||
+      sameVersionLine(parseImage(operation.before).tag, parseImage(operation.after).tag, critical)
+    );
   if (operation.type !== 'helm-values' || !helm) return false;
   // Which workload a replica key sizes is chart-specific, so a release with a StatefulSet asks.
   const edits = operation.set.every(({ path }) =>
@@ -629,7 +638,11 @@ export function isAutoApproved(
     edits &&
     Object.values(helm.images).every(({ before, after }) => {
       const strict = critical || helm.statefulRepositories.includes(imageRepository(after ?? ''));
-      return !!after && !!before && sameVersionLine(parseImage(before).tag, parseImage(after).tag, strict);
+      return (
+        !!after &&
+        !!before &&
+        (sameDigest(before, after) || sameVersionLine(parseImage(before).tag, parseImage(after).tag, strict))
+      );
     })
   );
 }

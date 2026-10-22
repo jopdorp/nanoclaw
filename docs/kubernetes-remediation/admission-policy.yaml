@@ -115,18 +115,20 @@ spec:
             (c.image == oc.image ||
               (oc.image.size() == c.image.size() + 72 && oc.image.startsWith(c.image + '@sha256:') && oc.image.matches('@sha256:[0-9a-f]{64}$')) ||
               (c.image.matches(variables.digestImagePattern) &&
-               variables.imageRepos.exists(n, n[0] == c.image &&
-                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1]))))))
-      message: a new container image must retain its repository and use a trusted registry sha256 digest
+               (variables.imageRepos.exists(n, n[0] == c.image &&
+                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1])) ||
+                (oc.image.matches('@sha256:[0-9a-f]{64}$') && c.image.endsWith(oc.image.substring(oc.image.size() - 72))))))))
+      message: a new container image must retain its repository (or its exact digest) and use a trusted registry sha256 digest
     - expression: >-
         variables.newInitContainers.all(c,
           variables.oldInitContainers.exists(oc, oc.name == c.name &&
             (c.image == oc.image ||
               (oc.image.size() == c.image.size() + 72 && oc.image.startsWith(c.image + '@sha256:') && oc.image.matches('@sha256:[0-9a-f]{64}$')) ||
               (c.image.matches(variables.digestImagePattern) &&
-               variables.imageRepos.exists(n, n[0] == c.image &&
-                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1]))))))
-      message: a new init-container image must retain its repository and use a trusted registry sha256 digest
+               (variables.imageRepos.exists(n, n[0] == c.image &&
+                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1])) ||
+                (oc.image.matches('@sha256:[0-9a-f]{64}$') && c.image.endsWith(oc.image.substring(oc.image.size() - 72))))))))
+      message: a new init-container image must retain its repository (or its exact digest) and use a trusted registry sha256 digest
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -351,18 +353,20 @@ spec:
             (c.image == oc.image ||
               (oc.image.size() == c.image.size() + 72 && oc.image.startsWith(c.image + '@sha256:') && oc.image.matches('@sha256:[0-9a-f]{64}$')) ||
               (c.image.matches(variables.digestImagePattern) &&
-               variables.imageRepos.exists(n, n[0] == c.image &&
-                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1]))))))
-      message: a new container image must retain its repository and use a trusted registry sha256 digest
+               (variables.imageRepos.exists(n, n[0] == c.image &&
+                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1])) ||
+                (oc.image.matches('@sha256:[0-9a-f]{64}$') && c.image.endsWith(oc.image.substring(oc.image.size() - 72))))))))
+      message: a new container image must retain its repository (or its exact digest) and use a trusted registry sha256 digest
     - expression: >-
         variables.newInitContainers.all(c,
           variables.oldInitContainers.exists(oc, oc.name == c.name &&
             (c.image == oc.image ||
               (oc.image.size() == c.image.size() + 72 && oc.image.startsWith(c.image + '@sha256:') && oc.image.matches('@sha256:[0-9a-f]{64}$')) ||
               (c.image.matches(variables.digestImagePattern) &&
-               variables.imageRepos.exists(n, n[0] == c.image &&
-                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1]))))))
-      message: a new init-container image must retain its repository and use a trusted registry sha256 digest
+               (variables.imageRepos.exists(n, n[0] == c.image &&
+                 variables.imageRepos.exists(o, o[0] == oc.image && o[1] == n[1])) ||
+                (oc.image.matches('@sha256:[0-9a-f]{64}$') && c.image.endsWith(oc.image.substring(oc.image.size() - 72))))))))
+      message: a new init-container image must retain its repository (or its exact digest) and use a trusted registry sha256 digest
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
