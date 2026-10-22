@@ -18,8 +18,6 @@ spec:
     - name: remediator-service-account
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
   variables:
-    - name: approvalRequiredNamespaces
-      expression: "['wireguard-home']"
     - name: restartAnnotation
       expression: "'kubectl.kubernetes.io/restartedAt'"
     # Set by the host to the digest a tag-only image's pods run, read from their status; admits the same bits elsewhere.
@@ -59,12 +57,6 @@ spec:
   validations:
     - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
       message: kube-system and longhorn-system are written only by the break-glass identity
-    - expression: >-
-        !(request.namespace in variables.approvalRequiredNamespaces) ||
-        (has(oldObject.metadata.annotations) &&
-         'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations &&
-         oldObject.metadata.annotations['remediation.nanoclaw.io/approval-id'].matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'))
-      message: always-ask remediation requires a proxy-verified per-action Matrix approval annotation
     - expression: >-
         dyn(object).all(k, k in ['metadata', 'spec'] || (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
         dyn(oldObject).all(k, k in ['metadata', 'spec'] || (k in dyn(object) && dyn(oldObject)[k] == dyn(object)[k]))
@@ -242,10 +234,6 @@ spec:
     - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
       message: kube-system and longhorn-system are written only by the break-glass identity
     - expression: >-
-        request.namespace != 'wireguard-home' ||
-        (has(oldObject.metadata.annotations) && 'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations)
-      message: always-ask remediation requires a proxy-verified per-action Matrix approval annotation
-    - expression: >-
         has(oldObject.status.conditions) &&
         oldObject.status.conditions.exists(c, c.type in ['Complete', 'Failed'] && c.status == 'True') &&
         (!has(oldObject.status.active) || oldObject.status.active == 0)
@@ -308,10 +296,6 @@ spec:
   validations:
     - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
       message: kube-system and longhorn-system are written only by the break-glass identity
-    - expression: >-
-        request.namespace != 'wireguard-home' ||
-        (has(oldObject.metadata.annotations) && 'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations)
-      message: always-ask remediation requires a proxy-verified per-action Matrix approval annotation
     - expression: >-
         dyn(object).all(k, k in ['metadata', 'spec'] || (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
         dyn(oldObject).all(k, k in ['metadata', 'spec'] || (k in dyn(object) && dyn(oldObject)[k] == dyn(object)[k]))
@@ -555,9 +539,10 @@ spec:
     - expression: "!has(request.namespace) || request.namespace != 'backups'"
       message: nothing in backups is ever deleted
     - expression: >-
-        request.resource.group != 'longhorn.io' ||
-        !(request.resource.resource in ['backups', 'backupvolumes', 'backuptargets', 'backupbackingimages'])
-      message: Longhorn backups are never deleted
+        !(request.resource.group == 'longhorn.io' && request.resource.resource in
+            ['backups', 'backupvolumes', 'backuptargets', 'backupbackingimages', 'snapshots', 'snapshotgroups', 'systembackups']) &&
+        !(request.resource.group == 'k3s.cattle.io' && request.resource.resource == 'etcdsnapshotfiles')
+      message: backups and snapshots are never deleted
     - expression: >-
         request.resource.resource != 'persistentvolumes' ||
         !has(dyn(oldObject).spec.claimRef) || dyn(oldObject).spec.claimRef.namespace != 'backups'
@@ -576,6 +561,184 @@ metadata:
   name: nanoclaw-never-guard
 spec:
   policyName: nanoclaw-never-guard
+  validationActions: [Deny, Audit]
+
+---
+# Orfie's own namespaces change only through its CI or by hand; the writer still runs the pinned pod-exec Jobs there.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-own-namespace-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ['*']
+        apiVersions: ['*']
+        operations: ['*']
+        resources: ['*/*']
+        scope: '*'
+  matchConditions:
+    - name: own-namespace
+      expression: has(request.namespace) && request.namespace in ['nanoclaw-remediator', 'orfie-ci']
+    - name: host-identities
+      expression: >-
+        request.userInfo.username in ['nanoclaw-remediator', 'nanoclaw-helm', 'nanoclaw-breakglass', 'nanoclaw-remediation-approver', 'nanoclaw-remediator-reader']
+          .map(n, 'system:serviceaccount:nanoclaw-remediator:' + n)
+  validations:
+    - expression: >-
+        request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator' &&
+        request.namespace == 'nanoclaw-remediator' && request.resource.group == 'batch' && request.resource.resource == 'jobs' &&
+        !has(request.subResource) && request.operation in ['CREATE', 'DELETE']
+      message: Orfie's own namespaces change only through its CI or by hand
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-own-namespace-guard
+spec:
+  policyName: nanoclaw-own-namespace-guard
+  validationActions: [Deny, Audit]
+---
+# Admission policies are exempt from admission, so no host identity may grant itself the RBAC to write them.
+# Charts may bring ordinary RBAC, but no host identity rewrites Orfie's RBAC or hands out RBAC or admission rights.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-rbac-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [rbac.authorization.k8s.io]
+        apiVersions: ['*']
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [clusterroles, clusterrolebindings, roles, rolebindings]
+        scope: '*'
+  matchConditions:
+    - name: host-identities
+      expression: >-
+        request.userInfo.username in ['nanoclaw-remediator', 'nanoclaw-helm', 'nanoclaw-breakglass', 'nanoclaw-remediation-approver', 'nanoclaw-remediator-reader']
+          .map(n, 'system:serviceaccount:nanoclaw-remediator:' + n)
+  variables:
+    - name: obj
+      expression: "request.operation == 'DELETE' ? dyn(oldObject) : dyn(object)"
+    - name: protectedName
+      expression: "'^(nanoclaw|orfie)-'"
+  validations:
+    # The approval controller's per-plan storage-delete binding, pinned by nanoclaw-remediation-approver-binding.
+    - expression: >-
+        (request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediation-approver' &&
+         variables.obj.metadata.name.matches('^nanoclaw-remediation-[0-9a-f-]{36}$')) ||
+        (!variables.obj.metadata.name.matches(variables.protectedName) &&
+         (request.resource.resource in ['clusterroles', 'roles'] ||
+          !(variables.obj.roleRef.name in ['cluster-admin', 'admin'] || variables.obj.roleRef.name.matches(variables.protectedName))))
+      message: Orfie's RBAC changes only by hand, and no binding may grant cluster-admin, admin or an Orfie role
+    - expression: >-
+        request.operation == 'DELETE' || !(request.resource.resource in ['clusterroles', 'roles']) ||
+        (request.operation == 'UPDATE' &&
+         (has(variables.obj.rules) ? variables.obj.rules : []) == (has(oldObject.rules) ? oldObject.rules : []) &&
+         (has(variables.obj.aggregationRule) ? variables.obj.aggregationRule : {}) == (has(oldObject.aggregationRule) ? oldObject.aggregationRule : {})) ||
+        (!has(variables.obj.aggregationRule) && (!has(variables.obj.rules) || variables.obj.rules.all(r,
+          !has(r.apiGroups) || !r.apiGroups.exists(g, g in ['*', 'rbac.authorization.k8s.io', 'admissionregistration.k8s.io']) ||
+          r.verbs.all(v, v in ['get', 'list', 'watch']))))
+      message: a role may not grant write verbs on RBAC or admission resources, nor aggregate other roles
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-rbac-guard
+spec:
+  policyName: nanoclaw-rbac-guard
+  validationActions: [Deny, Audit]
+---
+# Only the approval controller sets the per-action approval annotation, and every host write in wireguard-home needs one.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-approval-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ['*']
+        apiVersions: ['*']
+        operations: [CREATE, UPDATE, DELETE]
+        resources: ['*']
+        scope: '*'
+  matchConditions:
+    - name: host-identities-but-the-approval-controller
+      expression: >-
+        request.userInfo.username in ['nanoclaw-remediator', 'nanoclaw-helm', 'nanoclaw-breakglass', 'nanoclaw-remediator-reader']
+          .map(n, 'system:serviceaccount:nanoclaw-remediator:' + n)
+  variables:
+    - name: key
+      expression: "'remediation.nanoclaw.io/approval-id'"
+    - name: newApproval
+      expression: "object != null && has(object.metadata.annotations) && variables.key in object.metadata.annotations ? object.metadata.annotations[variables.key] : ''"
+    - name: oldApproval
+      expression: "oldObject != null && has(oldObject.metadata.annotations) && variables.key in oldObject.metadata.annotations ? oldObject.metadata.annotations[variables.key] : ''"
+  validations:
+    - expression: request.operation == 'DELETE' || variables.newApproval == variables.oldApproval
+      message: only the approval controller sets the approval annotation
+    - expression: "!has(request.namespace) || request.namespace != 'wireguard-home' || variables.oldApproval.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')"
+      message: wireguard-home changes need a per-action Matrix approval annotation
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-approval-guard
+spec:
+  policyName: nanoclaw-approval-guard
+  validationActions: [Deny, Audit]
+---
+# vaultwarden runs only the vaultwarden server image, whoever writes the workload.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-vaultwarden-image-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods, pods/ephemeralcontainers, replicationcontrollers]
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [deployments, statefulsets, daemonsets, replicasets]
+      - apiGroups: [batch]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [jobs, cronjobs]
+  matchConditions:
+    - name: vaultwarden
+      expression: has(request.namespace) && request.namespace == 'vaultwarden'
+  variables:
+    - name: pod
+      expression: >-
+        request.resource.resource == 'pods' ? dyn(object).spec :
+        request.resource.resource == 'cronjobs' ? dyn(object).spec.jobTemplate.spec.template.spec : dyn(object).spec.template.spec
+  validations:
+    - expression: >-
+        (variables.pod.containers.map(c, c.image) +
+         (has(variables.pod.initContainers) ? variables.pod.initContainers.map(c, c.image) : []) +
+         (has(variables.pod.ephemeralContainers) ? variables.pod.ephemeralContainers.map(c, c.image) : []))
+          .all(i, i.matches('^(docker[.]io/)?vaultwarden/server(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(@sha256:[0-9a-f]{64})?$'))
+      message: vaultwarden runs only docker.io/vaultwarden/server
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-vaultwarden-image-guard
+spec:
+  policyName: nanoclaw-vaultwarden-image-guard
   validationActions: [Deny, Audit]
 
 # PSA inventory, read-only inspection on 2026-10-21:
