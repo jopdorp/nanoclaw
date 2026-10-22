@@ -219,7 +219,7 @@ function runnerJob(plan: PodExecPlan, serviceAccount: string): Record<string, un
     spec: {
       backoffLimit: 0,
       activeDeadlineSeconds: 600,
-      ttlSecondsAfterFinished: 3600,
+      ttlSecondsAfterFinished: 600,
       template: {
         spec: {
           restartPolicy: 'Never',
@@ -256,7 +256,7 @@ function kanikoJob(plan: BuildImagePlan, pushSecret: string): Record<string, unk
     spec: {
       backoffLimit: 0,
       activeDeadlineSeconds: 1800,
-      ttlSecondsAfterFinished: 86400,
+      ttlSecondsAfterFinished: 600,
       template: {
         spec: {
           restartPolicy: 'Never',

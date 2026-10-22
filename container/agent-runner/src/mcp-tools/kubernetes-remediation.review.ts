@@ -81,4 +81,21 @@ export const checkUpdates: McpToolDefinition = {
   },
 };
 
-registerTools([proposeKubernetesRemediation, readK8sRepo, checkUpdates]);
+export const stopSession: McpToolDefinition = {
+  tool: {
+    name: 'stop_session',
+    description:
+      'Stop the running container of one of your agents (its destination name or agent group id, never yourself) to free memory; it starts again on its next message.',
+    inputSchema: { type: 'object', properties: { agent: { type: 'string' } }, required: ['agent'] },
+  },
+  async handler(args) {
+    await writeMessageOut({
+      id: `k8s-stop-session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'system',
+      content: JSON.stringify({ action: 'kubernetes_stop_session', agent: String(args.agent ?? '') }),
+    });
+    return { content: [{ type: 'text', text: 'Requested; the host confirms.' }] };
+  },
+};
+
+registerTools([proposeKubernetesRemediation, readK8sRepo, checkUpdates, stopSession]);

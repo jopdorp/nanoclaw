@@ -30,6 +30,13 @@ import { getMessagePolicy } from './db/agent-message-policies.js';
  */
 export const A2A_MESSAGE_GATE_ACTION = 'a2a_message_gate';
 
+const trustedCreators: Array<(agentGroupId: string) => Promise<boolean>> = [];
+
+/** Lets a module name agent groups whose create_agent needs no admin approval. */
+export function trustCreateAgent(check: (agentGroupId: string) => Promise<boolean>): void {
+  trustedCreators.push(check);
+}
+
 export const agentsCreate = defineGuardedAction({
   action: 'agents.create',
   grantActionName: 'create_agent',
@@ -54,6 +61,8 @@ export const agentsCreate = defineGuardedAction({
     // The realistic prompt-injection victim (default `group` scope) — and any
     // unknown config value, fail-closed — requires an admin before any
     // central-DB write.
+    for (const trusted of trustedCreators)
+      if (await trusted(input.actor.agentGroupId)) return ALLOW('a module trusts this agent group to create agents');
     return HOLD('agent-initiated create_agent requires admin approval');
   },
 });

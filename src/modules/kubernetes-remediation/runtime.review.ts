@@ -18,7 +18,10 @@ import { requestWake } from '../../request-wake.js';
 import { resolveSession, writeSessionMessage } from '../../session-manager.js';
 import { registerWebhookHandler } from '../../webhook-server.js';
 import { log } from '../../log.js';
+import { killContainer } from '../../container-runner.js';
+import { getSessionsByAgentGroup } from '../../db/sessions.js';
 import { getDestinations } from '../agent-to-agent/db/agent-destinations.js';
+import { trustCreateAgent } from '../agent-to-agent/guard.js';
 import { notifyAgent } from '../approvals/index.js';
 import { notifyApprover, registerKubernetesRemediationApproval } from './approval.js';
 import {
@@ -55,6 +58,8 @@ export interface KubernetesRemediationConfig {
 }
 
 const DAY = 24 * 60 * 60_000;
+// The investigator, the verifier and six workers.
+const TEAM_LIMIT = 8;
 const exec = promisify(execFile);
 
 async function onecli<T>(...args: string[]): Promise<T> {
@@ -128,6 +133,30 @@ export async function startKubernetesRemediation(
   const team = async (groupId: string) =>
     groupId === config.agentGroupId ||
     (await getDestinations(config.agentGroupId)).some((d) => d.target_type === 'agent' && d.target_id === groupId);
+  trustCreateAgent(
+    async (groupId) =>
+      groupId === config.agentGroupId &&
+      (await getDestinations(config.agentGroupId)).filter((d) => d.target_type === 'agent').length < TEAM_LIMIT,
+  );
+  registerDeliveryAction(
+    'kubernetes_stop_session',
+    async (content, session) => {
+      if (session.agent_group_id !== config.agentGroupId) return;
+      const agent = String(content.agent ?? '');
+      const target = (await getDestinations(config.agentGroupId)).find(
+        (d) => d.target_type === 'agent' && (d.local_name === agent || d.target_id === agent),
+      )?.target_id;
+      const sessions = target ? await getSessionsByAgentGroup(target) : [];
+      for (const s of sessions) killContainer(s.id, 'stopped by Orfie');
+      await notifyAgent(
+        session,
+        target
+          ? `stopped the running sessions of ${agent}; it starts again on its next message`
+          : `stop_session: ${agent} is not one of your agents`,
+      );
+    },
+    unguarded('stops only a team agent’s container; it respawns on its next message'),
+  );
   onOneCliAgentEnsured(async (groupId) => {
     if (groupId !== config.agentGroupId && (await team(groupId))) await scopeHelperSecrets(groupId);
   });
