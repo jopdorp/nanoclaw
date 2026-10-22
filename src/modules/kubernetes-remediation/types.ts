@@ -5,8 +5,8 @@ export type RemediationLane = 'A' | 'always-ask' | 'C';
 export type WorkloadKind = 'Deployment' | 'StatefulSet' | 'DaemonSet';
 
 export interface TargetRef {
-  apiVersion: 'apps/v1' | 'v1';
-  kind: WorkloadKind | 'PersistentVolume' | 'PersistentVolumeClaim';
+  apiVersion: 'apps/v1' | 'batch/v1' | 'v1';
+  kind: WorkloadKind | 'Job' | 'PersistentVolume' | 'PersistentVolumeClaim';
   namespace: string | null;
   name: string;
   uid: string;
@@ -25,8 +25,7 @@ interface PlanBase {
 export interface ImagePlan extends PlanBase {
   operation: {
     type: 'patch-image';
-    container: string;
-    initContainer: boolean;
+    containers: Array<{ name: string; initContainer: boolean }>;
     before: string;
     after: string;
   };
@@ -40,6 +39,10 @@ export interface ScalePlan extends PlanBase {
   operation: { type: 'scale'; before: number; after: number };
 }
 
+export interface JobDeletePlan extends PlanBase {
+  operation: { type: 'delete-job' };
+}
+
 export interface StorageDeletePlan extends PlanBase {
   operation: { type: 'delete-storage'; reclaimConfirmed: boolean };
 }
@@ -48,7 +51,13 @@ export interface LaneCEscalationPlan extends PlanBase {
   operation: { type: 'lane-c-escalation'; requestedChange: string };
 }
 
-export type RemediationPlan = ImagePlan | RestartPlan | ScalePlan | StorageDeletePlan | LaneCEscalationPlan;
+export type RemediationPlan =
+  | ImagePlan
+  | RestartPlan
+  | ScalePlan
+  | JobDeletePlan
+  | StorageDeletePlan
+  | LaneCEscalationPlan;
 
 export interface ValidatedPlan {
   plan: RemediationPlan;

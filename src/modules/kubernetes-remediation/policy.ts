@@ -31,6 +31,16 @@ export const LANE_C_NAMESPACES = new Set([
   'system-upgrade',
 ]);
 
+const API_VERSIONS: Record<TargetRef['kind'], TargetRef['apiVersion']> = {
+  Deployment: 'apps/v1',
+  StatefulSet: 'apps/v1',
+  DaemonSet: 'apps/v1',
+  Job: 'batch/v1',
+  PersistentVolume: 'v1',
+  PersistentVolumeClaim: 'v1',
+};
+const WORKLOAD_KINDS = ['Deployment', 'StatefulSet', 'DaemonSet'];
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DIGEST_IMAGE_RE =
   /^(docker\.io|docker\.gitea\.com|cr\.fluentbit\.io|ghcr\.io|quay\.io|registry\.k8s\.io)\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/;
@@ -59,24 +69,17 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[], labe
 function targetFrom(value: unknown): TargetRef {
   const input = record(value, 'target');
   exactKeys(input, ['apiVersion', 'kind', 'namespace', 'name', 'uid', 'resourceVersion'], 'target');
-  const kind = string(input.kind, 'target.kind');
-  if (!['Deployment', 'StatefulSet', 'DaemonSet', 'PersistentVolume', 'PersistentVolumeClaim'].includes(kind)) {
-    throw new Error('target.kind is unsupported');
-  }
+  const kind = string(input.kind, 'target.kind') as TargetRef['kind'];
+  if (!Object.hasOwn(API_VERSIONS, kind)) throw new Error('target.kind is unsupported');
   const apiVersion = string(input.apiVersion, 'target.apiVersion');
-  if (
-    (kind.startsWith('Persistent') && apiVersion !== 'v1') ||
-    (!kind.startsWith('Persistent') && apiVersion !== 'apps/v1')
-  ) {
-    throw new Error('target.apiVersion does not match target.kind');
-  }
+  if (apiVersion !== API_VERSIONS[kind]) throw new Error('target.apiVersion does not match target.kind');
   const namespace = input.namespace === null ? null : string(input.namespace, 'target.namespace', 63);
   if ((kind === 'PersistentVolume') !== (namespace === null)) {
     throw new Error('only PersistentVolume targets may omit namespace');
   }
   return {
-    apiVersion: apiVersion as TargetRef['apiVersion'],
-    kind: kind as TargetRef['kind'],
+    apiVersion: API_VERSIONS[kind],
+    kind,
     namespace,
     name: string(input.name, 'target.name', 253),
     uid: string(input.uid, 'target.uid', 128),
@@ -106,14 +109,29 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
   const operation = record(input.operation, 'plan.operation');
   const type = string(operation.type, 'plan.operation.type');
   if (type === 'patch-image') {
-    exactKeys(operation, ['type', 'container', 'initContainer', 'before', 'after'], 'plan.operation');
-    if (typeof operation.initContainer !== 'boolean') throw new Error('plan.operation.initContainer must be boolean');
+    exactKeys(operation, ['type', 'containers', 'before', 'after'], 'plan.operation');
+    if (!Array.isArray(operation.containers) || operation.containers.length === 0 || operation.containers.length > 16) {
+      throw new Error('plan.operation.containers must contain 1 through 16 entries');
+    }
+    const containers = operation.containers.map((entry, index) => {
+      const container = record(entry, `plan.operation.containers[${index}]`);
+      exactKeys(container, ['name', 'initContainer'], `plan.operation.containers[${index}]`);
+      if (typeof container.initContainer !== 'boolean') {
+        throw new Error(`plan.operation.containers[${index}].initContainer must be boolean`);
+      }
+      return {
+        name: string(container.name, `plan.operation.containers[${index}].name`, 253),
+        initContainer: container.initContainer,
+      };
+    });
+    if (new Set(containers.map((c) => `${c.initContainer}/${c.name}`)).size !== containers.length) {
+      throw new Error('plan.operation.containers must be unique');
+    }
     return {
       ...base,
       operation: {
         type,
-        container: string(operation.container, 'plan.operation.container', 253),
-        initContainer: operation.initContainer,
+        containers,
         before: string(operation.before, 'plan.operation.before', 1000),
         after: string(operation.after, 'plan.operation.after', 1000),
       },
@@ -133,6 +151,10 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     }
     return { ...base, operation: { type, before: operation.before as number, after: operation.after as number } };
   }
+  if (type === 'delete-job') {
+    exactKeys(operation, ['type'], 'plan.operation');
+    return { ...base, operation: { type } };
+  }
   if (type === 'delete-storage') {
     exactKeys(operation, ['type', 'reclaimConfirmed'], 'plan.operation');
     if (operation.reclaimConfirmed !== true) throw new Error('storage deletion requires reclaimConfirmed=true');
@@ -146,7 +168,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     };
   }
   throw new Error(
-    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-storage or lane-c-escalation',
+    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage or lane-c-escalation',
   );
 }
 
@@ -199,7 +221,7 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
   }
 
   if (plan.operation.type === 'patch-image') {
-    if (!['Deployment', 'StatefulSet', 'DaemonSet'].includes(plan.target.kind)) {
+    if (!WORKLOAD_KINDS.includes(plan.target.kind)) {
       throw new Error('patch-image requires a workload target');
     }
     const expected =
@@ -217,7 +239,9 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     // also use the second, rollback write.
     automaticWriteCap = lane === 'A' ? (DIGEST_IMAGE_RE.test(plan.operation.before) ? 2 : 1) : 0;
   } else if (plan.operation.type === 'restart') {
-    if (lane !== 'A') throw new Error('restart is permitted only in Lane A');
+    if (lane !== 'A' || !WORKLOAD_KINDS.includes(plan.target.kind)) {
+      throw new Error('restart requires a Lane A workload');
+    }
     if (!Number.isFinite(Date.parse(plan.operation.restartedAt)))
       throw new Error('restartedAt must be an ISO timestamp');
     automaticWriteCap = 1;
@@ -234,6 +258,8 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
       throw new Error('replicas must be between 0 and 10');
     }
     automaticWriteCap = 1;
+  } else if (plan.operation.type === 'delete-job') {
+    if (lane !== 'A' || plan.target.kind !== 'Job') throw new Error('delete-job requires a Lane A Job');
   } else if (plan.operation.type === 'delete-storage') {
     if (!plan.target.kind.startsWith('Persistent')) throw new Error('delete-storage requires PV or PVC');
     if (plan.target.namespace === 'backups') throw new Error('backup storage is immutable');
@@ -247,4 +273,9 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     digest: createHash('sha256').update(canonical).digest('hex'),
     automaticWriteCap,
   };
+}
+
+/** The only plans that apply without a Matrix card; the executor still refuses a Job that has not finished. */
+export function isLowRiskAutoApprove({ lane, plan }: ValidatedPlan): boolean {
+  return lane === 'A' && (plan.operation.type === 'restart' || plan.operation.type === 'delete-job');
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
-import { validateRemediationPlan } from './policy.js';
+import { isLowRiskAutoApprove, validateRemediationPlan } from './policy.js';
 
 const now = Date.parse('2026-10-21T12:00:00.000Z');
 
@@ -30,8 +30,7 @@ describe('Kubernetes remediation policy', () => {
         ...base(),
         operation: {
           type: 'patch-image',
-          container: 'gitea',
-          initContainer: false,
+          containers: [{ name: 'gitea', initContainer: false }],
           before: `docker.io/gitea/gitea@sha256:${'c'.repeat(64)}`,
           after: `docker.io/gitea/gitea@sha256:${'a'.repeat(64)}`,
         },
@@ -49,8 +48,7 @@ describe('Kubernetes remediation policy', () => {
         ...base('vaultwarden'),
         operation: {
           type: 'patch-image',
-          container: 'vaultwarden',
-          initContainer: false,
+          containers: [{ name: 'vaultwarden', initContainer: false }],
           before: 'docker.io/vaultwarden/server:latest',
           after: `docker.io/vaultwarden/server@sha256:${'b'.repeat(64)}`,
         },
@@ -72,6 +70,33 @@ describe('Kubernetes remediation policy', () => {
     ).toThrow('Lane C is read/propose only');
   });
 
+  it('auto-approves only Lane A restarts and Job deletes', () => {
+    const restart = { type: 'restart', restartedAt: new Date(now).toISOString() };
+    const job = (namespace: string) => ({
+      ...base(namespace),
+      target: { ...base(namespace).target, apiVersion: 'batch/v1', kind: 'Job' },
+      operation: { type: 'delete-job' },
+    });
+    expect(isLowRiskAutoApprove(validateRemediationPlan({ ...base(), operation: restart }, now))).toBe(true);
+    expect(isLowRiskAutoApprove(validateRemediationPlan(job('gitea'), now))).toBe(true);
+    const image = {
+      type: 'patch-image',
+      containers: [{ name: 'gitea', initContainer: false }],
+      before: `docker.io/gitea/gitea@sha256:${'c'.repeat(64)}`,
+      after: `docker.io/gitea/gitea@sha256:${'a'.repeat(64)}`,
+    };
+    expect(isLowRiskAutoApprove(validateRemediationPlan({ ...base(), operation: image }, now))).toBe(false);
+    const laneC = {
+      ...base('kube-system'),
+      operation: { type: 'lane-c-escalation', requestedChange: 'restart coredns' },
+    };
+    expect(isLowRiskAutoApprove(validateRemediationPlan(laneC, now))).toBe(false);
+    for (const namespace of ['vaultwarden', 'wireguard-home', 'kube-system', 'backups']) {
+      expect(() => validateRemediationPlan({ ...base(namespace), operation: restart }, now)).toThrow();
+      expect(() => validateRemediationPlan(job(namespace), now)).toThrow();
+    }
+  });
+
   it('rejects tag updates, target drift fields, backup deletion, and stale plans', () => {
     expect(() =>
       validateRemediationPlan(
@@ -79,8 +104,7 @@ describe('Kubernetes remediation policy', () => {
           ...base(),
           operation: {
             type: 'patch-image',
-            container: 'gitea',
-            initContainer: false,
+            containers: [{ name: 'gitea', initContainer: false }],
             before: 'gitea/gitea:old',
             after: 'gitea/gitea:new',
           },

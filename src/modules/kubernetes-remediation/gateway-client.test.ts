@@ -28,8 +28,7 @@ function plan(namespace: 'vaultwarden' | 'kube-system' | 'gitea') {
       namespace === 'vaultwarden'
         ? {
             type: 'patch-image',
-            container: 'vaultwarden',
-            initContainer: false,
+            containers: [{ name: 'vaultwarden', initContainer: false }],
             before: 'docker.io/vaultwarden/server:latest',
             after: `docker.io/vaultwarden/server@sha256:${'a'.repeat(64)}`,
           }
@@ -107,6 +106,47 @@ describe('gateway remediation executor', () => {
     expect(JSON.stringify(executorCalls)).not.toContain('remediation.nanoclaw.io/approval-id');
     expect(annotatorCalls.filter((call) => call.options?.method === 'PATCH')).toHaveLength(2);
     expect(JSON.stringify(annotatorCalls)).toContain('remediation.nanoclaw.io/approval-id');
+  });
+
+  it('deletes a Job only once it has finished', async () => {
+    const validated = validateRemediationPlan({
+      ...plan('gitea'),
+      target: { ...plan('gitea').target, apiVersion: 'batch/v1', kind: 'Job' },
+      operation: { type: 'delete-job' },
+    });
+    const grant = {
+      approvalRowId: '',
+      approverUserId: 'auto:low-risk',
+      planId: validated.plan.id,
+      planDigest: validated.digest,
+    };
+    const job = (status: Record<string, unknown>) => {
+      const request = vi.fn(async (_path: string, options?: unknown) =>
+        options ? {} : { metadata: { uid: 'uid-1', resourceVersion: '42' }, status },
+      );
+      return {
+        request,
+        executor: new GatewayRemediationExecutor(
+          { request, watch: vi.fn() },
+          { request: vi.fn(), watch: vi.fn() },
+          { ready: vi.fn() },
+        ),
+      };
+    };
+
+    const running = job({ active: 1, conditions: [{ type: 'Complete', status: 'False' }] });
+    await expect(running.executor.execute(validated, grant)).rejects.toThrow('Job is still running');
+    expect(running.request).toHaveBeenCalledTimes(1);
+
+    const done = job({ conditions: [{ type: 'Failed', status: 'True' }] });
+    await expect(done.executor.execute(validated, grant)).resolves.toMatchObject({ applied: true });
+    expect(done.request).toHaveBeenLastCalledWith('/apis/batch/v1/namespaces/gitea/jobs/gitea', {
+      method: 'DELETE',
+      body: expect.objectContaining({
+        propagationPolicy: 'Background',
+        preconditions: { uid: 'uid-1', resourceVersion: '42' },
+      }),
+    });
   });
 
   it('records Lane C approval without touching Kubernetes', async () => {

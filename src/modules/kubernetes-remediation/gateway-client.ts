@@ -138,6 +138,10 @@ function workloadPath(plan: RemediationPlan): string {
   return `/apis/apps/v1/namespaces/${namespace}/${plural}/${name}`;
 }
 
+function jobPath(plan: RemediationPlan): string {
+  return `/apis/batch/v1/namespaces/${encodeURIComponent(plan.target.namespace ?? '')}/jobs/${encodeURIComponent(plan.target.name)}`;
+}
+
 function storagePath(plan: RemediationPlan): string {
   const name = encodeURIComponent(plan.target.name);
   return plan.target.kind === 'PersistentVolume'
@@ -148,10 +152,13 @@ function storagePath(plan: RemediationPlan): string {
 function mergePatch(plan: RemediationPlan): Record<string, unknown> {
   const resourceVersion = plan.target.resourceVersion;
   if (plan.operation.type === 'patch-image') {
-    const key = plan.operation.initContainer ? 'initContainers' : 'containers';
+    const { containers, after } = plan.operation;
+    const images = (init: boolean) =>
+      containers.filter((c) => c.initContainer === init).map(({ name }) => ({ name, image: after }));
+    const spec = { containers: images(false), initContainers: images(true) };
     return {
       metadata: { resourceVersion },
-      spec: { template: { spec: { [key]: [{ name: plan.operation.container, image: plan.operation.after }] } } },
+      spec: { template: { spec: Object.fromEntries(Object.entries(spec).filter(([, list]) => list.length)) } },
     };
   }
   if (plan.operation.type === 'restart') {
@@ -174,6 +181,14 @@ function approvalAnnotationPatch(plan: RemediationPlan, value: string | null): R
       annotations: { [APPROVAL_ANNOTATION]: value },
     },
   };
+}
+
+interface LiveObject {
+  metadata?: { uid?: string; resourceVersion?: string };
+  spec?: {
+    template?: { spec?: Partial<Record<'containers' | 'initContainers', Array<{ name?: string; image?: string }>>> };
+  };
+  status?: { active?: number; conditions?: Array<{ type?: string; status?: string }> };
 }
 
 interface ListedObject {
@@ -320,10 +335,38 @@ export class GatewayRemediationExecutor {
         automaticWrites: 0,
       };
 
-    const path = plan.operation.type === 'delete-storage' ? storagePath(plan) : workloadPath(plan);
-    const live = (await this.executor.request(path)) as { metadata?: { uid?: string; resourceVersion?: string } };
+    const path =
+      plan.operation.type === 'delete-storage'
+        ? storagePath(plan)
+        : plan.operation.type === 'delete-job'
+          ? jobPath(plan)
+          : workloadPath(plan);
+    const live = (await this.executor.request(path)) as LiveObject;
     if (live.metadata?.uid !== plan.target.uid || live.metadata?.resourceVersion !== plan.target.resourceVersion) {
       throw new Error('target UID or resourceVersion changed after proposal');
+    }
+    if (plan.operation.type === 'delete-job') {
+      const finished = live.status?.conditions?.some(
+        (c) => (c.type === 'Complete' || c.type === 'Failed') && c.status === 'True',
+      );
+      if (!finished || live.status?.active) throw new Error('Job is still running');
+      await this.executor.request(path, {
+        method: 'DELETE',
+        body: {
+          apiVersion: 'v1',
+          kind: 'DeleteOptions',
+          propagationPolicy: 'Background',
+          preconditions: { uid: plan.target.uid, resourceVersion: plan.target.resourceVersion },
+        },
+      });
+      return { applied: true, message: `Deleted finished Job for plan ${plan.id}.`, automaticWrites: 0 };
+    }
+    if (plan.operation.type === 'patch-image') {
+      const pod = live.spec?.template?.spec;
+      for (const { name, initContainer } of plan.operation.containers) {
+        const image = (initContainer ? pod?.initContainers : pod?.containers)?.find((c) => c.name === name)?.image;
+        if (image !== plan.operation.before) throw new Error(`container ${name} does not run the before image`);
+      }
     }
 
     let currentPlan = plan;
