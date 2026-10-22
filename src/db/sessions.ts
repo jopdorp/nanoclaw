@@ -302,15 +302,10 @@ export async function deletePendingApproval(approvalId: string): Promise<void> {
   await getDb().run('DELETE FROM pending_approvals WHERE approval_id = ?', approvalId);
 }
 
-/** Pending module approvals delivered to one chat whose id ends in `shortId`. */
-export async function getPendingApprovalsByShortId(
-  shortId: string,
-  channelType: string,
-  platformId: string,
-): Promise<PendingApproval[]> {
+/** Pending module approvals delivered to one chat. */
+export async function getPendingApprovalsInChat(channelType: string, platformId: string): Promise<PendingApproval[]> {
   return getDb().all<PendingApproval>(
-    "SELECT * FROM pending_approvals WHERE approval_id LIKE ? AND status = 'pending' AND channel_type = ? AND platform_id = ?",
-    `appr-%-${shortId}`,
+    "SELECT * FROM pending_approvals WHERE approval_id LIKE 'appr-%' AND status = 'pending' AND channel_type = ? AND platform_id = ? ORDER BY created_at",
     channelType,
     platformId,
   );

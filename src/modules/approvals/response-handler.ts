@@ -19,7 +19,7 @@ import { requestWake } from '../../request-wake.js';
 import {
   deletePendingApproval,
   getPendingApproval,
-  getPendingApprovalsByShortId,
+  getPendingApprovalsInChat,
   getSession,
   transitionPendingApprovalStatus,
 } from '../../db/sessions.js';
@@ -31,7 +31,7 @@ import type { PendingApproval } from '../../types.js';
 import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
 import { finalizeReject } from './finalize.js';
 import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
-import { armReasonCapture, clampReason, extractText } from './reason-capture.js';
+import { armReasonCapture, clampReason } from './reason-capture.js';
 
 export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
   const approval = await getPendingApproval(payload.questionId);
@@ -125,59 +125,110 @@ async function handleRegisteredApproval(
 }
 
 const TEXT_REPLY = /^(approve|reject)\s+([a-z0-9]{6})(?:\s+(\S[\s\S]*))?$/i;
+const onlyPhrases = (phrases: string) => new RegExp(`^(?:(?:${phrases}|i|please|thanks|it)(?:[\\s.,!]+|$))+$`);
+const APPROVE_REPLY = onlyPhrases(
+  "yes|yep|ok|okay|approved?|go ahead|go|do it|fix it|that's fine|fine|sure|ship it|proceed|lgtm",
+);
+const REJECT_REPLY = onlyPhrases("no|nope|rejected?|don't|do not|stop|wait|hold|cancel|not now");
+
+interface ChatAddress {
+  channelType: string;
+  platformId: string;
+  threadId: string | null;
+  instance: string;
+}
 
 /**
  * Typed answer to an approval card on a channel that rendered it as text
  * (see sendApprovalCard's fallbackText). Only the card's own chat can name it,
- * and the sender is checked exactly like a button click.
+ * and the sender is checked exactly like a button click. `approve <id>` names
+ * the card; a bare yes or no decides the card it replies to, or the only one
+ * pending; anything else reaches the agent as normal chat.
  */
 export async function handleApprovalTextReply(event: InboundEvent): Promise<boolean> {
-  const match = TEXT_REPLY.exec(extractText(event).trim());
-  if (!match) return false;
-  const [, verb, shortId, reason] = match;
-  const option = verb.toLowerCase();
-  if (option === 'approve' && reason) return false;
-
-  const instance = event.instance ?? event.channelType;
-  const reply = (text: string) =>
-    getDeliveryAdapter()?.deliver(
-      event.channelType,
-      event.platformId,
-      event.threadId,
-      'chat-sdk',
-      JSON.stringify({ text }),
-      undefined,
-      instance,
-    );
-  const approvals = (
-    await getPendingApprovalsByShortId(shortId.toLowerCase(), event.channelType, event.platformId)
-  ).filter((a) => (a.instance ?? a.channel_type) === instance);
-  if (approvals.length !== 1) {
-    await reply(`No pending approval ${shortId}.`);
-    return true;
+  let content: Record<string, unknown>;
+  try {
+    content = JSON.parse(event.message.content);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- content that is not JSON is not an approval answer
+  } catch {
+    return false;
   }
+  const text = typeof content.text === 'string' ? content.text.trim() : '';
+  const explicit = TEXT_REPLY.exec(text);
+  if (explicit?.[1].toLowerCase() === 'approve' && explicit[3]) return false;
 
-  const [approval] = approvals;
-  const { senderId } = JSON.parse(event.message.content) as { senderId?: unknown };
-  const payload: ResponsePayload = {
-    questionId: approval.approval_id,
-    value: option,
-    userId: typeof senderId === 'string' ? senderId : null,
+  const chat: ChatAddress = {
     channelType: event.channelType,
-    instance,
     platformId: event.platformId,
     threadId: event.threadId,
+    instance: event.instance ?? event.channelType,
   };
-  if (!(await isAuthorizedApprovalClick(approval, payload))) {
-    log.warn('Ignoring approval reply from a non-approver', {
-      approvalId: approval.approval_id,
-      userId: payload.userId,
-    });
+  const inChat = (await getPendingApprovalsInChat(chat.channelType, chat.platformId)).filter(
+    (a) => (a.instance ?? a.channel_type) === chat.instance,
+  );
+  const payload: ResponsePayload = {
+    questionId: '',
+    value: '',
+    userId: typeof content.senderId === 'string' ? content.senderId : null,
+    ...chat,
+  };
+  const userId = namespacedUserId(payload) ?? '';
+
+  if (explicit) {
+    const [, verb, shortId, reason] = explicit;
+    const named = inChat.filter((a) => a.approval_id.endsWith(`-${shortId.toLowerCase()}`));
+    if (named.length !== 1) {
+      await say(chat, `No pending approval ${shortId}.`);
+      return true;
+    }
+    if (!(await isAuthorizedApprovalClick(named[0], payload))) {
+      log.warn('Ignoring approval reply from a non-approver', { approvalId: named[0].approval_id, userId });
+      return true;
+    }
+    await decide(named[0], verb.toLowerCase(), userId, chat, reason && clampReason(reason));
     return true;
   }
-  await handleRegisteredApproval(approval, option, namespacedUserId(payload) ?? '', reason && clampReason(reason));
-  await reply(option === 'approve' ? '✅ Approved' : '❌ Rejected');
-  return true;
+
+  const mine: PendingApproval[] = [];
+  for (const a of inChat) if (a.platform_message_id && (await isAuthorizedApprovalClick(a, payload))) mine.push(a);
+  if (mine.length === 0) return false;
+
+  const replyToId = (content.replyTo as { id?: unknown } | undefined)?.id;
+  const target = replyToId
+    ? mine.find((a) => a.platform_message_id === replyToId)
+    : mine.length === 1
+      ? mine[0]
+      : undefined;
+  const said = text.toLowerCase().replace(/’/g, "'");
+  const option = APPROVE_REPLY.test(said) ? 'approve' : REJECT_REPLY.test(said) ? 'reject' : null;
+  if (target && option) {
+    await decide(target, option, userId, chat);
+    return true;
+  }
+  return false;
+}
+
+async function decide(
+  approval: PendingApproval,
+  option: string,
+  userId: string,
+  chat: ChatAddress,
+  reason?: string,
+): Promise<void> {
+  await handleRegisteredApproval(approval, option, userId, reason);
+  await say(chat, `${option === 'approve' ? '✅ Approved' : '❌ Rejected'}: ${approval.title}`);
+}
+
+async function say(chat: ChatAddress, text: string): Promise<void> {
+  await getDeliveryAdapter()?.deliver(
+    chat.channelType,
+    chat.platformId,
+    chat.threadId,
+    'chat-sdk',
+    JSON.stringify({ text }),
+    undefined,
+    chat.instance,
+  );
 }
 
 registerMessageInterceptor(handleApprovalTextReply);

@@ -46,8 +46,9 @@ interface ConnectionAwareAdapter extends Adapter {
 
 /** Reply context extracted from a platform's raw message. */
 export interface ReplyContext {
-  text: string;
-  sender: string;
+  id?: string;
+  text?: string;
+  sender?: string;
 }
 
 // ---------------------------------------------------------------------------

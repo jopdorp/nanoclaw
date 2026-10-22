@@ -178,6 +178,8 @@ registerChannelAdapter('matrix', {
       concurrency: 'concurrent',
       supportsThreads: false,
       defaults: MATRIX_DEFAULTS,
+      // raw is the matrix-js-sdk MatrixEvent; replyEventId reads m.relates_to.m.in_reply_to.event_id.
+      extractReplyContext: (raw) => (typeof raw.replyEventId === 'string' ? { id: raw.replyEventId } : null),
     });
 
     // Matrix user IDs contain ":" (e.g. "@user:matrix.org") which the shared

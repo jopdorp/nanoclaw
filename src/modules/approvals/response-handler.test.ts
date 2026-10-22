@@ -298,4 +298,49 @@ describe('approval response authorization', () => {
     expect(handler).toHaveBeenCalledTimes(1);
     expect(await getPendingApproval('appr-5-abc123')).toBeUndefined();
   });
+
+  describe('plain-language replies', () => {
+    const chat = { channelType: 'matrix', platformId: 'matrix:@dana:hs', threadId: null };
+    const card = (id: string) =>
+      createPendingApproval({
+        approval_id: id,
+        session_id: 'sess-1',
+        request_id: id,
+        action: 'plain_reply_action',
+        payload: JSON.stringify({}),
+        created_at: now(),
+        channel_type: 'matrix',
+        platform_id: 'matrix:@dana:hs',
+        platform_message_id: `$card-${id}`,
+        title: 'Restart web',
+        question: 'Restart deployment web',
+        options_json: JSON.stringify([]),
+        approver_user_id: 'matrix:@dana:hs',
+      });
+    const inbound = (id: string, senderId: string, text: string) => ({
+      ...chat,
+      message: { id, kind: 'chat-sdk' as const, content: JSON.stringify({ text, senderId }), timestamp: now() },
+    });
+
+    it("a non-approver's yes resolves nothing and carries no approval context", async () => {
+      const { handleApprovalTextReply } = await import('./response-handler.js');
+      await card('appr-6-aaaaaa');
+      const event = inbound('$m1', 'matrix:@mallory:hs', 'yes');
+
+      expect(await handleApprovalTextReply(event)).toBe(false);
+      expect(JSON.parse(event.message.content).pendingApprovals).toBeUndefined();
+      expect((await getPendingApproval('appr-6-aaaaaa'))?.status).toBe('pending');
+    });
+
+    it('a yes with two cards pending and no reply-to is not resolved', async () => {
+      const { handleApprovalTextReply } = await import('./response-handler.js');
+      await card('appr-7-bbbbbb');
+      await card('appr-7-cccccc');
+      const event = inbound('$m2', 'matrix:@dana:hs', 'yes');
+
+      expect(await handleApprovalTextReply(event)).toBe(false);
+      expect((await getPendingApproval('appr-7-bbbbbb'))?.status).toBe('pending');
+      expect((await getPendingApproval('appr-7-cccccc'))?.status).toBe('pending');
+    });
+  });
 });

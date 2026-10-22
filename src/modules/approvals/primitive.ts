@@ -323,7 +323,7 @@ async function sendApprovalCard(
       title,
       question,
       options: APPROVAL_OPTIONS,
-      fallbackText: `${title}\n\n${question}\n\nReply "approve ${shortId}", "reject ${shortId}" or "reject ${shortId} <reason>".`,
+      fallbackText: `${title}\n\n${question}\n\nReply "yes"/"no" (or just answer in your own words); several items pending? reply to this message or name it. Id: ${shortId}.`,
     }),
     undefined,
     to.instance,
