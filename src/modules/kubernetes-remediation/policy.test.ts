@@ -42,6 +42,18 @@ describe('Kubernetes remediation policy', () => {
     expect(validated.digest).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it('compares Docker Hub short and canonical image references by repository', () => {
+    const plan = (before: string, after: string) => ({
+      ...base(),
+      operation: { type: 'patch-image', containers: [{ name: 'gitea', initContainer: false }], before, after },
+    });
+    const digest = `@sha256:${'a'.repeat(64)}`;
+    expect(validateRemediationPlan(plan('postgres:16', `docker.io/library/postgres${digest}`), now).lane).toBe('A');
+    expect(() =>
+      validateRemediationPlan(plan('docker.io/library/postgres', `ghcr.io/other/postgres${digest}`), now),
+    ).toThrow('image repository may not change');
+  });
+
   it('keeps Vaultwarden always-ask with no automatic recovery', () => {
     const validated = validateRemediationPlan(
       {

@@ -44,6 +44,7 @@ const WORKLOAD_KINDS = ['Deployment', 'StatefulSet', 'DaemonSet'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DIGEST_IMAGE_RE =
   /^(docker\.io|docker\.gitea\.com|cr\.fluentbit\.io|ghcr\.io|quay\.io|registry\.k8s\.io)\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/;
+const TAG_RE = /^\w[\w.-]{0,127}$/;
 const VAULTWARDEN_RE = /^docker\.io\/vaultwarden\/server@sha256:[0-9a-f]{64}$/;
 const WIREGUARD_RE = /^lscr\.io\/linuxserver\/wireguard@sha256:[0-9a-f]{64}$/;
 
@@ -180,13 +181,24 @@ export function classifyTarget(target: TargetRef): RemediationLane {
   throw new Error('target is outside the remediation lanes');
 }
 
-function repository(image: string): string {
-  const withoutDigest = image.split('@', 1)[0];
-  const first = withoutDigest.split('/')[0];
-  const normalized = first.includes('.') ? withoutDigest : `docker.io/${withoutDigest}`;
-  const lastSlash = normalized.lastIndexOf('/');
-  const colon = normalized.lastIndexOf(':');
-  return colon > lastSlash ? normalized.slice(0, colon) : normalized;
+function parseImage(image: string) {
+  const at = image.indexOf('@');
+  const name = at < 0 ? image : image.slice(0, at);
+  const digest = at < 0 ? undefined : image.slice(at + 1);
+  const colon = name.lastIndexOf(':');
+  const tag = colon > name.lastIndexOf('/') ? name.slice(colon + 1) : undefined;
+  const path = tag === undefined ? name : name.slice(0, colon);
+  const first = path.split('/')[0];
+  const explicit = path.includes('/') && (first.includes('.') || first.includes(':') || first === 'localhost');
+  const registry = !explicit || first === 'index.docker.io' ? 'docker.io' : first;
+  const rest = explicit ? path.slice(first.length + 1) : path;
+  const repository = registry === 'docker.io' && !rest.includes('/') ? `library/${rest}` : rest;
+  return { registry, repository, tag, digest };
+}
+
+export function canonicalImage(image: string): string {
+  const { registry, repository, tag, digest } = parseImage(image);
+  return `${registry}/${repository}${tag === undefined ? '' : `:${tag}`}${digest === undefined ? '' : `@${digest}`}`;
 }
 
 function stable(value: unknown): unknown {
@@ -230,8 +242,15 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
         : plan.target.namespace === 'wireguard-home'
           ? WIREGUARD_RE
           : DIGEST_IMAGE_RE;
-    if (!expected.test(plan.operation.after)) throw new Error('new image is not an approved digest reference');
-    if (repository(plan.operation.before) !== repository(plan.operation.after)) {
+    const before = parseImage(plan.operation.before);
+    const after = parseImage(plan.operation.after);
+    if (
+      !expected.test(`${after.registry}/${after.repository}@${after.digest}`) ||
+      (after.tag !== undefined && !TAG_RE.test(after.tag))
+    ) {
+      throw new Error('new image is not an approved digest reference');
+    }
+    if (`${before.registry}/${before.repository}` !== `${after.registry}/${after.repository}`) {
       throw new Error('image repository may not change');
     }
     // The base admission policy rejects a rollback to a mutable tag. Such a

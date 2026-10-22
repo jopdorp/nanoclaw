@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
+import { canonicalImage } from './policy.js';
 import type { ApprovalGrant, ExecutionResult, RemediationPlan, ValidatedPlan } from './types.js';
 
 const APPROVAL_ANNOTATION = 'remediation.nanoclaw.io/approval-id';
@@ -365,7 +366,8 @@ export class GatewayRemediationExecutor {
       const pod = live.spec?.template?.spec;
       for (const { name, initContainer } of plan.operation.containers) {
         const image = (initContainer ? pod?.initContainers : pod?.containers)?.find((c) => c.name === name)?.image;
-        if (image !== plan.operation.before) throw new Error(`container ${name} does not run the before image`);
+        if (!image || canonicalImage(image) !== canonicalImage(plan.operation.before))
+          throw new Error(`container ${name} does not run the before image`);
       }
     }
 
