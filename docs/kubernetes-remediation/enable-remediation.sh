@@ -97,13 +97,71 @@ kubectl delete validatingadmissionpolicybinding,validatingadmissionpolicy nanocl
 printf '%s\n' 'approval-controller RBAC and policies are present'
 
 step '1b/6 bind the per-namespace rights; namespace-binder keeps them on every namespace, new ones too'
-kubectl api-resources --verbs=list -o name \
-  | jq -R 'capture("^(?<r>[^.]+)([.](?<g>.+))?$") | {g: (.g // ""), r}' \
-  | jq -s '{apiVersion: "rbac.authorization.k8s.io/v1", kind: "ClusterRole",
-      metadata: {name: "nanoclaw-remediator-reader-wide"},
-      rules: [group_by(.g)[] | {apiGroups: [.[0].g], verbs: ["get", "list", "watch"],
-        resources: ([.[].r] - ["secrets"] + (if .[0].g == "" then ["pods/log"] else [] end))}]}' \
-  | kubectl apply -f - >/dev/null
+kubectl apply -f - >/dev/null <<'YAML'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nanoclaw-remediator-reader-wide
+rules:
+  - apiGroups: [""]
+    resources:
+      - bindings
+      - componentstatuses
+      - configmaps
+      - endpoints
+      - events
+      - limitranges
+      - namespaces
+      - nodes
+      - persistentvolumeclaims
+      - persistentvolumes
+      - pods
+      - pods/log
+      - podtemplates
+      - replicationcontrollers
+      - resourcequotas
+      - serviceaccounts
+      - services
+    verbs: [get, list, watch]
+  - apiGroups:
+      - acme.cert-manager.io
+      - admissionregistration.k8s.io
+      - apiextensions.k8s.io
+      - apiregistration.k8s.io
+      - apps
+      - aquasecurity.github.io
+      - argoproj.io
+      - authentication.k8s.io
+      - authorization.k8s.io
+      - autoscaling
+      - batch
+      - ceph.rook.io
+      - cert-manager.io
+      - certificates.k8s.io
+      - coordination.k8s.io
+      - discovery.k8s.io
+      - events.k8s.io
+      - flowcontrol.apiserver.k8s.io
+      - gateway.networking.k8s.io
+      - helm.cattle.io
+      - hermes.ai
+      - hub.traefik.io
+      - k3s.cattle.io
+      - longhorn.io
+      - metrics.k8s.io
+      - networking.k8s.io
+      - node.k8s.io
+      - objectbucket.io
+      - policy
+      - rbac.authorization.k8s.io
+      - resource.k8s.io
+      - scheduling.k8s.io
+      - storage.k8s.io
+      - traefik.io
+      - upgrade.cattle.io
+    resources: ["*"]
+    verbs: [get, list, watch]
+YAML
 kubectl apply -f "$K8S_REPO/kubernetes/security/namespace-binder.yaml" >/dev/null
 kubectl rollout status -n security deploy/namespace-binder --timeout=5m >/dev/null
 # Grants replaced by the bindings above.
