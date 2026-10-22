@@ -155,7 +155,13 @@ const condition = (item: Item, type: string) =>
   (Array.isArray(status(item).conditions) ? (status(item).conditions as Item[]) : []).find((c) => c.type === type);
 
 /** One list per check; a check whose list fails is skipped, so its conditions neither fire nor clear. */
-const CHECKS: Record<string, { path: string; findings: (items: Item[], now: number) => Finding[] }> = {
+const CHECKS: Record<
+  string,
+  {
+    path: string;
+    findings: (items: Item[], now: number, client: KubernetesJsonClient) => Finding[] | Promise<Finding[]>;
+  }
+> = {
   pods: {
     path: '/api/v1/pods',
     findings: (pods, now) =>
@@ -249,24 +255,32 @@ const CHECKS: Record<string, { path: string; findings: (items: Item[], now: numb
       }),
   },
   volumes: {
-    path: '/apis/longhorn.io/v1beta2/volumes',
-    findings: (volumes) =>
-      volumes.flatMap((volume) => {
-        const size = Number(record(volume.spec)?.size ?? 0);
-        const used = Number(status(volume).actualSize ?? 0);
-        const pvc = record(status(volume).kubernetesStatus);
-        const claim = `${String(pvc?.namespace ?? '')}/${String(pvc?.pvcName ?? meta(volume).name)}`;
-        return size > 0 && used / size > 0.85
-          ? [
+    path: '/api/v1/nodes',
+    findings: async (nodes, _now, client) => {
+      const summaries = await Promise.all(
+        nodes.map((node) =>
+          client.request(`/api/v1/nodes/${encodeURIComponent(String(meta(node).name))}/proxy/stats/summary`),
+        ),
+      );
+      return summaries.flatMap((summary) =>
+        ((record(summary)?.pods as Item[] | undefined) ?? []).flatMap((pod) =>
+          ((pod.volume as Item[] | undefined) ?? []).flatMap((volume) => {
+            const pvc = record(volume.pvcRef);
+            const [used, capacity] = [Number(volume.usedBytes ?? 0), Number(volume.capacityBytes ?? 0)];
+            if (!pvc || capacity <= 0 || used / capacity <= 0.85) return [];
+            const claim = `${String(pvc.namespace)}/${String(pvc.name)}`;
+            return [
               {
-                id: `health:volumes:full:${String(meta(volume).name)}`,
+                id: `health:volumes:full:${claim}`,
                 severity: 'warning',
-                namespace: text(pvc?.namespace),
-                summary: `Longhorn volume ${String(meta(volume).name)} (${claim}) is ${Math.round((100 * used) / size)}% allocated, snapshots included`,
+                namespace: text(pvc.namespace),
+                summary: `PVC ${claim} is ${Math.round((100 * used) / capacity)}% full`,
               },
-            ]
-          : [];
-      }),
+            ];
+          }),
+        ),
+      );
+    },
   },
   certificates: {
     path: '/apis/cert-manager.io/v1/certificates',
@@ -314,7 +328,7 @@ export async function runHealthWatch(
     for (const [check, { path, findings }] of Object.entries(CHECKS)) {
       let found: Finding[];
       try {
-        found = findings(items(await client.request(path, { signal })), now);
+        found = await findings(items(await client.request(path, { signal })), now, client);
         // eslint-disable-next-line no-catch-all/no-catch-all -- an absent CRD or a failed list skips the check this round
       } catch {
         continue;

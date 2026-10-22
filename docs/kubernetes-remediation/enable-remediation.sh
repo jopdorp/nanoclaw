@@ -113,6 +113,7 @@ rules:
       - limitranges
       - namespaces
       - nodes
+      - nodes/proxy
       - persistentvolumeclaims
       - persistentvolumes
       - pods
