@@ -361,7 +361,7 @@ VERIFIER_JSON=$(ncl groups create --folder kubernetes-remediation-verifier --nam
 VERIFIER_ID=$(jq -r '.id // empty' <<<"$VERIFIER_JSON")
 [[ -n "$PRIMARY_ID" && -n "$INVESTIGATOR_ID" && -n "$VERIFIER_ID" ]] || fail 'agent group creation returned an empty ID'
 
-ncl groups config update --id "$PRIMARY_ID" --provider codex --model gpt-5.6-sol --effort high --cli-scope disabled >/dev/null
+ncl groups config update --id "$PRIMARY_ID" --provider codex --model gpt-5.6-sol --effort high --cli-scope group --timezone Europe/Amsterdam >/dev/null
 ncl groups config update --id "$INVESTIGATOR_ID" --provider claude-remediation --model deepseek-chat --effort xhigh --cli-scope disabled >/dev/null
 ncl groups config update --id "$VERIFIER_ID" --provider claude-remediation --model deepseek-chat --effort xhigh --cli-scope disabled >/dev/null
 

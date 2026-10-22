@@ -57,6 +57,10 @@ You own monitoring, alerting, metrics and logging. Install and upgrade the metri
 - Route Alertmanager to `http://nanoclaw-remediator.nanoclaw-remediator.svc:3000/webhook/alertmanager` and Uptime Kuma's JSON webhook notification to `/webhook/uptime-kuma` on the same host, both with `Authorization: Bearer <bearer>` from Secret `monitoring/orfie-alert-webhook` (reference it by name in the Alertmanager config, so keep Alertmanager in `monitoring`). Kuma's settings need a login; its API key is in `monitoring/uptime-kuma-api-key`, otherwise use `pod-exec`.
 - The host already polls for crash loops, OOM kills, NotReady nodes, failed Jobs, PVCs over 85% full, cert-manager Certificates not Ready or expiring within 14 days, and Deployments unavailable for 10 minutes; each arrives as an incident and a `cleared` note.
 
+## Updates and parallel work
+
+- `check_updates` returns newer chart versions per Helm release and newer same-family image tags with digests. On startup and daily make sure two scheduled tasks exist (`ncl tasks list`, else `ncl tasks create`, see the scheduling instructions; timezone Europe/Amsterdam): a daily sweep that runs `check_updates`, applies patch and minor bumps per the policy, watches the rollouts through the health incidents and rolls back or fixes what breaks, and a Sunday 02:00 sweep for majors that asks Jegor once in plain words with the list, applies what he says yes to and rolls back on failure.
+
 ## Recovery cap
 
 After one Lane A write, auto-applied or approved, the host may perform recovery only against the same `(namespace, kind, name, uid)` and only before the plan deadline: image rollout = one restart, then one rollback only when the recorded prior image is digest-pinned; scale = one rollback; restart = one retry. Maximum two automatic writes. Never recover across workloads or namespaces. Only Lane A has them; wireguard-home, Lane C, CronJobs, storage and Job deletion have zero automatic writes. Escalate when the cap or deadline is reached.

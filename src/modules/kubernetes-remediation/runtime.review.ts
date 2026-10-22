@@ -26,6 +26,7 @@ import {
 import { gitWithDeployKey, helmThroughOneCli, HelmReleaseExecutor, type HelmChart } from './helm-release.js';
 import { createAlertWebhookHandlers, runHealthWatch } from './health.js';
 import { createFalcoWebhookHandler, runTrivyWatchers } from './triggers.js';
+import { createUpdateChecker } from './updates.js';
 import type { RemediationIncident } from './types.js';
 
 export interface KubernetesRemediationConfig {
@@ -156,6 +157,27 @@ export async function startKubernetesRemediation(
     },
     unguarded('read-only, served from the host checkout of k8s.jegor.nl'),
   );
+  if (config.helmOneCliAgent) {
+    const checkUpdates = createUpdateChecker({
+      reader,
+      helm: helmThroughOneCli(config.helmOneCliAgent, config.apiServer, path.join(DATA_DIR, 'helm')),
+      charts,
+      fetch: registryThroughOneCli(config.executorOneCliAgent),
+    });
+    registerDeliveryAction(
+      'kubernetes_check_updates',
+      async (_content, session) => {
+        if (session.agent_group_id !== config.agentGroupId) return;
+        await notifyAgent(
+          session,
+          await checkUpdates().catch(
+            (error: unknown) => `check_updates failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+      },
+      unguarded('read-only: chart indexes and registry tag lists'),
+    );
+  }
   void runTrivyWatchers(reader, sink, signal, path.join(DATA_DIR, 'kubernetes-remediation-seen.json')).catch(
     (error) => {
       if (!signal.aborted) log.error('Kubernetes remediation Trivy watcher stopped', { err: error });

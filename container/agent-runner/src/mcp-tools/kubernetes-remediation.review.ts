@@ -64,4 +64,21 @@ export const readK8sRepo: McpToolDefinition = {
   },
 };
 
-registerTools([proposeKubernetesRemediation, readK8sRepo]);
+export const checkUpdates: McpToolDefinition = {
+  tool: {
+    name: 'check_updates',
+    description:
+      'List newer chart versions for every Helm release and newer same-family tags (with digests) for every running image, as JSON tables. Takes a few minutes; the host replies in a system message.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  async handler() {
+    await writeMessageOut({
+      id: `k8s-check-updates-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'system',
+      content: JSON.stringify({ action: 'kubernetes_check_updates' }),
+    });
+    return { content: [{ type: 'text', text: 'Requested; the host replies with the update tables.' }] };
+  },
+};
+
+registerTools([proposeKubernetesRemediation, readK8sRepo, checkUpdates]);
