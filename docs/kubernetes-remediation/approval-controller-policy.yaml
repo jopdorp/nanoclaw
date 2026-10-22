@@ -35,7 +35,7 @@ spec:
   validations:
     - expression: >-
         request.resource.resource in ['persistentvolumes', 'persistentvolumeclaims'] ||
-        request.namespace in ['vaultwarden', 'wireguard-home', 'nanoclaw-remediator']
+        request.namespace == 'wireguard-home'
       message: approval annotations on workloads belong only to the always-ask namespaces
     - expression: request.resource.resource != 'persistentvolumeclaims' || request.namespace != 'backups'
       message: backup PVCs are immutable

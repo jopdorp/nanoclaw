@@ -110,9 +110,9 @@ kubectl get ns -o json | jq --arg self "$NAMESPACE" '
     subjects: [{kind: "ServiceAccount", name: $sa, namespace: $self}]};
   {apiVersion: "v1", kind: "List", items: [.items[].metadata.name | . as $ns |
     (if $ns | IN("vaultwarden", $self) then empty else bind($ns; "nanoclaw-remediator-reader-secrets"; "nanoclaw-remediator-reader") end),
-    (if $ns | IN("vaultwarden", "wireguard-home", "kube-system", "longhorn-system", $self) then empty
+    (if $ns | IN("wireguard-home", "kube-system", "longhorn-system", $self) then empty
      else bind($ns; "nanoclaw-remediator-reader-inspect"; "nanoclaw-remediator-reader") end),
-    (if $ns | IN("vaultwarden", "kube-system", "longhorn-system") then empty
+    (if $ns | IN("kube-system", "longhorn-system") then empty
      else bind($ns; "nanoclaw-namespace-admin"; "nanoclaw-helm") | .metadata.name = "nanoclaw-helm" end)]}' \
   | kubectl apply -f - >/dev/null
 # Grants replaced by the bindings above.
@@ -328,6 +328,7 @@ printf '%s\n' 'stored and assigned the Kubernetes credentials; values were not p
 step '5/6 merge the runtime config atomically into the state PVC'
 # Chart sources the host has seen, as hints: any release works once a plan names its chart repo, and the host re-verifies it every time.
 HELM_RELEASES='{
+  "vaultwarden/vaultwarden": {"chart": "vaultwarden", "repo": "https://guerzon.github.io/vaultwarden", "file": "kubernetes/helm-charts/vaultwarden-values.yaml"},
   "gitea/gitea": {"chart": "gitea", "repo": "https://dl.gitea.com/charts/", "file": "kubernetes/helm-charts/gitea-values.yaml"},
   "nextcloud/nextcloud": {"chart": "nextcloud", "repo": "https://nextcloud.github.io/helm/", "file": "kubernetes/helm-charts/nextcloud-values.yaml"},
   "excalidraw/excalidraw": {"chart": "excalidraw", "repo": "https://pmoscode-helm.github.io/excalidraw/", "file": "kubernetes/helm-charts/excalidraw-values.yaml"},

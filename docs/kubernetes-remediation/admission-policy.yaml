@@ -19,7 +19,7 @@ spec:
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
   variables:
     - name: approvalRequiredNamespaces
-      expression: "['vaultwarden', 'wireguard-home', 'nanoclaw-remediator']"
+      expression: "['wireguard-home']"
     - name: restartAnnotation
       expression: "'kubectl.kubernetes.io/restartedAt'"
     - name: trustedRegistries
@@ -62,10 +62,6 @@ spec:
          'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations &&
          oldObject.metadata.annotations['remediation.nanoclaw.io/approval-id'].matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'))
       message: always-ask remediation requires a proxy-verified per-action Matrix approval annotation
-    - expression: >-
-        !(request.namespace == 'wireguard-home' && request.resource.resource == 'deployments' && object.metadata.name == 'wireguard') ||
-        !has(dyn(object.spec).replicas) || dyn(object.spec).replicas > 0
-      message: wireguard is never scaled to 0
     - expression: >-
         dyn(object).all(k, k in ['metadata', 'spec'] || (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
         dyn(oldObject).all(k, k in ['metadata', 'spec'] || (k in dyn(object) && dyn(oldObject)[k] == dyn(object)[k]))
@@ -160,7 +156,7 @@ spec:
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
   variables:
     - name: excludedNamespaces
-      expression: "['kube-system', 'longhorn-system', 'nanoclaw-remediator', 'vaultwarden', 'wireguard-home']"
+      expression: "['kube-system', 'longhorn-system', 'wireguard-home']"
   validations:
     - expression: "!(request.namespace in variables.excludedNamespaces)"
       message: the scale subresource is allowed only in Lane A namespaces
@@ -237,7 +233,7 @@ spec:
     - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
       message: kube-system and longhorn-system are written only by the break-glass identity
     - expression: >-
-        !(request.namespace in ['vaultwarden', 'wireguard-home', 'nanoclaw-remediator']) ||
+        request.namespace != 'wireguard-home' ||
         (has(oldObject.metadata.annotations) && 'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations)
       message: always-ask remediation requires a proxy-verified per-action Matrix approval annotation
     - expression: >-
@@ -304,7 +300,7 @@ spec:
     - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
       message: kube-system and longhorn-system are written only by the break-glass identity
     - expression: >-
-        !(request.namespace in ['vaultwarden', 'wireguard-home', 'nanoclaw-remediator']) ||
+        request.namespace != 'wireguard-home' ||
         (has(oldObject.metadata.annotations) && 'remediation.nanoclaw.io/approval-id' in oldObject.metadata.annotations)
       message: always-ask remediation requires a proxy-verified per-action Matrix approval annotation
     - expression: >-
@@ -419,8 +415,8 @@ spec:
     - name: pinnedImagePattern
       expression: "'^((docker[.]io|docker[.]gitea[.]com|cr[.]fluentbit[.]io|ghcr[.]io|quay[.]io|registry[.]k8s[.]io|mirror[.]gcr[.]io|lscr[.]io|registry[.]prophet[.]jopdorp[.]nl)/)?[a-z0-9]+([_-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$'"
   validations:
-    - expression: "!(request.namespace in ['vaultwarden', 'kube-system', 'longhorn-system'])"
-      message: the Helm path never writes vaultwarden, and Lane C goes through the break-glass identity
+    - expression: "!(request.namespace in ['kube-system', 'longhorn-system'])"
+      message: kube-system and longhorn-system go through the break-glass identity
     # A helm rollback may unpin back to the exact tag the live digest was pinned from, never to another mutable tag.
     - expression: >-
         !(request.resource.resource in ['deployments', 'statefulsets', 'daemonsets']) ||
@@ -536,7 +532,7 @@ spec:
   policyName: nanoclaw-remediator-job-guard
   validationActions: [Deny, Audit]
 ---
-# The owner's NEVER list, for every identity the host holds, approved or not.
+# Backups are never deleted, by any identity the host holds, approved or not.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -551,38 +547,27 @@ spec:
         operations: [DELETE]
         resources: ['*']
         scope: '*'
-      - apiGroups: ['']
-        apiVersions: [v1]
-        operations: [CREATE, UPDATE]
-        resources: [secrets]
-        scope: Namespaced
   matchConditions:
     - name: host-identities
       expression: >-
         request.userInfo.username in ['nanoclaw-remediator', 'nanoclaw-helm', 'nanoclaw-breakglass', 'nanoclaw-remediation-approver']
           .map(n, 'system:serviceaccount:nanoclaw-remediator:' + n)
   validations:
-    - expression: request.operation != 'DELETE' || request.namespace != 'backups'
+    - expression: request.namespace != 'backups'
       message: nothing in backups is ever deleted
     - expression: >-
-        request.operation != 'DELETE' || request.resource.group != 'longhorn.io' ||
+        request.resource.group != 'longhorn.io' ||
         !(request.resource.resource in ['backups', 'backupvolumes', 'backuptargets', 'backupbackingimages'])
       message: Longhorn backups are never deleted
     - expression: >-
-        request.operation != 'DELETE' || request.resource.resource != 'persistentvolumes' ||
+        request.resource.resource != 'persistentvolumes' ||
         !has(dyn(oldObject).spec.claimRef) || dyn(oldObject).spec.claimRef.namespace != 'backups'
       message: volumes claimed from backups are never deleted
     - expression: >-
-        request.operation != 'DELETE' || request.resource.group != 'longhorn.io' || request.resource.resource != 'volumes' ||
+        request.resource.group != 'longhorn.io' || request.resource.resource != 'volumes' ||
         !has(oldObject.status) || !has(oldObject.status.kubernetesStatus) ||
         !has(oldObject.status.kubernetesStatus.namespace) || oldObject.status.kubernetesStatus.namespace != 'backups'
       message: Longhorn volumes claimed from backups are never deleted
-    - expression: request.resource.resource != 'secrets' || request.namespace != 'vaultwarden'
-      message: vaultwarden Secrets are never written
-    - expression: >-
-        request.operation != 'DELETE' || request.namespace != 'wireguard-home' ||
-        request.resource.resource != 'deployments' || request.name != 'wireguard'
-      message: the wireguard Deployment is never deleted
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

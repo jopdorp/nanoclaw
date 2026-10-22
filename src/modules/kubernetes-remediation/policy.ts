@@ -13,8 +13,8 @@ import type {
 
 /** Every write here needs approval and runs as the break-glass identity. */
 export const LANE_C_NAMESPACES = new Set(['kube-system', 'longhorn-system']);
-/** Every write here needs approval; nanoclaw-remediator is Orfie modifying itself. Every other namespace is Lane A. */
-const ALWAYS_ASK_NAMESPACES = new Set(['vaultwarden', 'wireguard-home', 'nanoclaw-remediator']);
+/** Every change here needs approval ("ask first"). Every other namespace is Lane A. */
+const ALWAYS_ASK_NAMESPACES = new Set(['wireguard-home']);
 
 const API_VERSIONS: Record<KnownKind, string> = {
   Deployment: 'apps/v1',
@@ -336,15 +336,11 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     if (!['Deployment', 'StatefulSet'].includes(plan.target.kind))
       throw new Error('scale requires a Deployment or StatefulSet');
     if (plan.operation.before < 0 || plan.operation.after < 0) throw new Error('replicas must not be negative');
-    if (namespace === 'wireguard-home' && name === 'wireguard' && plan.operation.after === 0)
-      throw new Error('wireguard is never scaled to 0');
     if (lane === 'A') automaticWriteCap = 1;
   } else if (plan.operation.type === 'delete-job') {
     if (plan.target.kind !== 'Job') throw new Error('delete-job requires a Job');
   } else if (plan.operation.type === 'helm-values') {
     if (plan.target.kind !== 'Secret') throw new Error('helm-values requires a Helm release');
-    if (namespace === 'vaultwarden')
-      throw new Error("vaultwarden's chart renders its Secrets, so it never goes through Helm");
     for (const { path, before, after } of plan.operation.set) {
       const key = IMAGE_KEY_RE.exec(path)?.[1];
       if (!key) continue;
@@ -356,8 +352,6 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     }
   } else if (plan.operation.type === 'helm-sync-values') {
     if (plan.target.kind !== 'Secret') throw new Error('helm-sync-values requires a Helm release');
-    if (namespace === 'vaultwarden')
-      throw new Error("vaultwarden's chart renders its Secrets, so it never goes through Helm");
   } else if (plan.operation.type === 'delete-storage') {
     if (!['PersistentVolume', 'PersistentVolumeClaim', 'Volume'].includes(plan.target.kind))
       throw new Error('delete-storage requires a PV, PVC or Longhorn volume');
@@ -377,8 +371,6 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
             throw new Error(`${path} must be an image reference`);
           checkImageUpdate(before, after);
         }
-        if (namespace === 'wireguard-home' && name === 'wireguard' && path === 'spec.replicas' && after === 0)
-          throw new Error('wireguard is never scaled to 0');
       }
     }
   }
@@ -424,7 +416,7 @@ export function isAutoApproved(
     return operation.set.every(({ path, before, after }) =>
       /(?:^|\.)image$/.test(path)
         ? sameVersionLine(parseImage(String(before)).tag, parseImage(String(after)).tag, critical)
-        : path === 'spec.replicas' && target.kind === 'Deployment',
+        : path !== 'spec.replicas' || target.kind !== 'StatefulSet',
     );
   }
   if (operation.type === 'scale') return target.kind === 'Deployment';

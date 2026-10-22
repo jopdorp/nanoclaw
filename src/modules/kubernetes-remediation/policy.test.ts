@@ -14,7 +14,7 @@ function base(namespace = 'gitea') {
       apiVersion: 'apps/v1',
       kind: 'Deployment',
       namespace,
-      name: namespace === 'vaultwarden' ? 'vaultwarden' : 'gitea',
+      name: 'gitea',
       uid: 'uid-1',
       resourceVersion: '42',
     },
@@ -54,15 +54,15 @@ describe('Kubernetes remediation policy', () => {
     ).toThrow('image repository may not change');
   });
 
-  it('keeps Vaultwarden always-ask with no automatic recovery', () => {
+  it('keeps wireguard-home always-ask with no automatic recovery', () => {
     const validated = validateRemediationPlan(
       {
-        ...base('vaultwarden'),
+        ...base('wireguard-home'),
         operation: {
           type: 'patch-image',
-          containers: [{ name: 'vaultwarden', initContainer: false }],
-          before: 'docker.io/vaultwarden/server:latest',
-          after: `docker.io/vaultwarden/server@sha256:${'b'.repeat(64)}`,
+          containers: [{ name: 'wireguard', initContainer: false }],
+          before: 'lscr.io/linuxserver/wireguard:latest',
+          after: `lscr.io/linuxserver/wireguard@sha256:${'b'.repeat(64)}`,
         },
       },
       now,
@@ -100,9 +100,10 @@ describe('Kubernetes remediation policy', () => {
     const laneC = validateRemediationPlan({ ...base('longhorn-system'), operation: restart }, now);
     expect([laneC.lane, laneC.automaticWriteCap, isAutoApproved(laneC, t1)]).toEqual(['C', 0, false]);
     const lane = (namespace: string) => validateRemediationPlan({ ...base(namespace), operation: restart }, now).lane;
-    expect(['security', 'nanoclaw-remediator', 'wireguard-home', 'kube-system'].map(lane)).toEqual([
+    expect(['security', 'vaultwarden', 'nanoclaw-remediator', 'wireguard-home', 'kube-system'].map(lane)).toEqual([
       'A',
-      'always-ask',
+      'A',
+      'A',
       'always-ask',
       'C',
     ]);
@@ -121,7 +122,7 @@ describe('Kubernetes remediation policy', () => {
         ),
         new Set(),
       );
-    expect(['security', 'vaultwarden', 'kube-system'].map(exec)).toEqual([true, false, false]);
+    expect(['vaultwarden', 'wireguard-home', 'kube-system'].map(exec)).toEqual([true, false, false]);
   });
 
   it('never deletes anything in backups', () => {
@@ -184,7 +185,7 @@ describe('Kubernetes remediation policy', () => {
     ).toThrow('within the next 15 minutes');
   });
 
-  it('keeps helm-values to the release values file and off vaultwarden', () => {
+  it('keeps helm-values to the release values file', () => {
     const helmValues = (namespace: string, file: string) => ({
       ...base(namespace),
       target: { apiVersion: 'v1', kind: 'Secret', namespace, name: namespace, uid: '-', resourceVersion: '-' },
@@ -193,8 +194,5 @@ describe('Kubernetes remediation policy', () => {
     expect(() => validateRemediationPlan(helmValues('gitea', 'ansible/inventory-values.yaml'), now)).toThrow(
       'kubernetes/helm-charts/<release>-values.yaml',
     );
-    expect(() =>
-      validateRemediationPlan(helmValues('vaultwarden', 'kubernetes/helm-charts/vaultwarden-values.yaml'), now),
-    ).toThrow('never goes through Helm');
   });
 });

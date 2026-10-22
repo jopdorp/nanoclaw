@@ -188,7 +188,7 @@ metadata:
     kubernetes.io/service-account.name: nanoclaw-helm
 ---
 # Everything in one namespace. enable-remediation.sh binds it for nanoclaw-helm in every
-# namespace except vaultwarden, kube-system and longhorn-system, and for nanoclaw-breakglass
+# namespace except kube-system and longhorn-system, and for nanoclaw-breakglass
 # below; admission-policy.yaml holds both to the owner's NEVER list.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

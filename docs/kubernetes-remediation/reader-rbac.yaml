@@ -3,10 +3,10 @@
 # - ClusterRole nanoclaw-remediator-reader-wide: get/list/watch on every listable
 #   resource but Secrets, plus pod logs, bound cluster-wide below;
 # - a nanoclaw-remediator-reader-secrets RoleBinding in every namespace except
-#   vaultwarden and nanoclaw-remediator, which holds the host identities' tokens;
+#   vaultwarden, and nanoclaw-remediator, whose host tokens would read vaultwarden's;
 # - a nanoclaw-remediator-reader-inspect RoleBinding in every namespace except
-#   vaultwarden, wireguard-home, kube-system, longhorn-system and nanoclaw-remediator,
-#   where exec needs approval and runs as a pod-exec plan.
+#   wireguard-home, kube-system and longhorn-system, where changes need approval and
+#   exec runs as a pod-exec plan, and nanoclaw-remediator.
 apiVersion: v1
 kind: ServiceAccount
 metadata: { name: nanoclaw-remediator-reader, namespace: nanoclaw-remediator }

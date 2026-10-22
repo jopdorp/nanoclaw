@@ -9,7 +9,7 @@ import {
 } from './gateway-client.js';
 import { validateRemediationPlan } from './policy.js';
 
-function plan(namespace: 'vaultwarden' | 'kube-system' | 'gitea') {
+function plan(namespace: 'wireguard-home' | 'kube-system' | 'gitea') {
   return {
     schemaVersion: 1,
     id: randomUUID(),
@@ -18,19 +18,19 @@ function plan(namespace: 'vaultwarden' | 'kube-system' | 'gitea') {
       apiVersion: 'apps/v1',
       kind: 'Deployment',
       namespace,
-      name: namespace === 'vaultwarden' ? 'vaultwarden' : namespace === 'gitea' ? 'gitea' : 'coredns',
+      name: namespace === 'wireguard-home' ? 'wireguard' : namespace === 'gitea' ? 'gitea' : 'coredns',
       uid: 'uid-1',
       resourceVersion: '42',
     },
     reason: 'review fixture',
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
     operation:
-      namespace === 'vaultwarden'
+      namespace === 'wireguard-home'
         ? {
             type: 'patch-image',
-            containers: [{ name: 'vaultwarden', initContainer: false }],
-            before: 'docker.io/vaultwarden/server:latest',
-            after: `docker.io/vaultwarden/server@sha256:${'a'.repeat(64)}`,
+            containers: [{ name: 'wireguard', initContainer: false }],
+            before: 'lscr.io/linuxserver/wireguard:latest',
+            after: `lscr.io/linuxserver/wireguard@sha256:${'a'.repeat(64)}`,
           }
         : namespace === 'gitea'
           ? { type: 'scale', before: 1, after: 1 }
@@ -75,13 +75,13 @@ describe('gateway remediation executor', () => {
   });
 
   it('uses only the annotator identity for the approval annotation and clears it', async () => {
-    const validated = validateRemediationPlan(plan('vaultwarden'));
+    const validated = validateRemediationPlan(plan('wireguard-home'));
     const executorCalls: Array<{ path: string; options?: Record<string, unknown> }> = [];
     const annotatorCalls: Array<{ path: string; options?: Record<string, unknown> }> = [];
     const executor: KubernetesJsonClient = {
       request: vi.fn(async (path, options) => {
         executorCalls.push({ path, options });
-        const containers = [{ name: 'vaultwarden', image: 'docker.io/vaultwarden/server:latest' }];
+        const containers = [{ name: 'wireguard', image: 'lscr.io/linuxserver/wireguard:latest' }];
         return options
           ? {}
           : { metadata: { uid: 'uid-1', resourceVersion: '42' }, spec: { template: { spec: { containers } } } };
