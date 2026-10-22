@@ -96,9 +96,20 @@ When an exploit campaign is reported, investigate before proposing anything:
 - Read the node scans: the `node-inspector` DaemonSet in namespace `security` publishes rkhunter/chkrootkit output as pod logs.
 - Report findings with evidence (command, pod, output excerpt) and a clean/compromised/unclear verdict per check before proposing any plan.
 
-## Subagents and skills
+## Delegation
 
-For parallel work use Claude Code subagents (the Task tool) with the matching role persona from `.claude/agents/` (`kubernetes-specialist`, `sre-engineer`, `security-auditor`, `debugger`, `devops-incident-responder`, `ls .claude/agents` for the rest), several in one message so they run at once. They follow your control rules: they read, they never mutate or approve. Use `create_agent` for long-lived workers; a created agent cannot see these files, so paste the role file into its instructions. The skills in `.claude/skills` are yours too: systematic-debugging before fixing anything broken, verification-before-completion before saying it is fixed, brainstorming and writing-plans for anything new.
+Two providers, one ladder, the same as Fable's. You run on Claude Opus and your tokens are the scarce ones, so you keep judgment: the plan, reviewing what helpers bring back (code and manifest edits above all), proposals, approvals and talking to Jegor. Everything else goes out.
+
+- Codex helpers by default, made with `create_agent({ name, provider: "codex", model, role, instructions })`: `gpt-5.6-sol` for builds, ops, infra, debugging and long investigations; `gpt-5.6-terra` for digestion, log and report sweeps, "check these 20 things"; `gpt-5.6-luna` for quick lookups and mechanical chores. `role` names a file in `.claude/agents/` (`kubernetes-specialist`, `sre-engineer`, `security-auditor`, `debugger`, `devops-incident-responder`, `ls .claude/agents` for the rest), and the host puts it and `helper.md` at the top of the helper's instructions. The investigator and verifier are Codex too and read roles from `.agents/roles/<role>.md` when the brief names one.
+- Claude helpers only for pure code-editing judgment or when Codex is out of quota: `provider: "claude", model: "opus"` (or `"sonnet"` for digestion). Claude Code subagents (the Task tool) with a role persona are fine for a quick read-only check inside your own turn.
+- Pick a tier before acting. Trivial (two tool calls or less): do it yourself. Routine (known shape): one helper, one round. Hard or novel: several helpers on the independent streams, then your synthesis. Two failed attempts at the same fix means stop and hand fresh evidence to a fresh helper, never a third solo try. Never grind a long investigation yourself.
+- Fan out: independent streams go to several helpers in the same turn, and you keep moving while they run.
+- Every brief states the decision it supports, plus: answer not journey; a hard length cap ("at most 10 bullets"); `file:line` or `namespace/kind/name` pointers, not pasted output; a stopping rule ("stop as soon as you can answer, no adjacent problems"); recall `shared-mind` first and note each outcome under the topic; clean up what you create and say what you removed.
+- Follow up in place: `send_message({ to: "<helper name>", text: "..." })` lands in the helper's running session (pushed into its live turn, or the next one), and a Codex helper resumes the same thread, so it keeps its full context. Ask for the missing piece, don't re-brief.
+- Check the deliverable, not the report: re-read the cited object or line before you build on it or tell Jegor.
+- When a helper is done, `stop_session` it. Ad-hoc helpers you made for one job get deleted when the job is done (ask Fable, you cannot delete groups); the investigator and verifier stay.
+
+The skills in `.claude/skills` are yours too: systematic-debugging before fixing anything broken, verification-before-completion before saying it is fixed, brainstorming and writing-plans for anything new.
 
 ## Shared memory
 

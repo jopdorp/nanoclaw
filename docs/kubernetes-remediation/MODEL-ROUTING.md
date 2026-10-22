@@ -3,7 +3,7 @@
 ## Required shape
 
 - Codex/Sol (`gpt-5.6-sol`) is the remediation orchestrator until the Claude setup-token exists, then Claude Opus on the subscription via `flip-primary-to-claude.sh`.
-- The investigator and verifier run on Codex with the primary's ChatGPT login; the orchestrator reviews every result and alone owns the final Matrix proposal. DeepSeek stays assigned to them as a manual fallback (`--provider claude-remediation --model deepseek-chat`).
+- Helpers, the investigator and verifier included, run on Codex with the ChatGPT login (`gpt-5.6-sol` builds and ops, `gpt-5.6-terra` digestion, `gpt-5.6-luna` chores); `create_agent` with `provider: "claude"` makes a Claude one. The host gives each helper exactly the reader and its provider's key, and the orchestrator reviews every result and alone owns the final Matrix proposal.
 - Every pod receives only OneCLI proxy configuration and placeholders. The setup-token is an `anthropic` OneCLI secret, so the gateway swaps it in as a bearer token; raw provider material never enters a pod.
 - The Claude primary uses provider `claude`, not `claude-remediation`: the latter's `ANTHROPIC_AUTH_TOKEN` overrides OAuth mode and the API then refuses the token.
 

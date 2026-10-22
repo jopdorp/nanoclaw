@@ -375,14 +375,15 @@ VERIFIER_ID=$(jq -r '.id // empty' <<<"$VERIFIER_JSON")
 [[ -n "$PRIMARY_ID" && -n "$INVESTIGATOR_ID" && -n "$VERIFIER_ID" ]] || fail 'agent group creation returned an empty ID'
 
 ncl groups config update --id "$PRIMARY_ID" --provider codex --model gpt-5.6-sol --effort high --cli-scope group --timezone Europe/Amsterdam >/dev/null
-ncl groups config update --id "$INVESTIGATOR_ID" --provider claude-remediation --model deepseek-chat --effort xhigh --cli-scope disabled >/dev/null
-ncl groups config update --id "$VERIFIER_ID" --provider claude-remediation --model deepseek-chat --effort xhigh --cli-scope disabled >/dev/null
+ncl groups config update --id "$INVESTIGATOR_ID" --provider codex --model gpt-5.6-sol --effort medium --cli-scope disabled >/dev/null
+ncl groups config update --id "$VERIFIER_ID" --provider codex --model gpt-5.6-sol --effort medium --cli-scope disabled >/dev/null
 
 cat "$DOCS/agent-group/CLAUDE.md" "$DOCS/agent-group/approvals.md" >"$TMP_DIR/orfie.md"
 write_group_file kubernetes-remediator instructions.prepend.md "$TMP_DIR/orfie.md"
 write_group_file kubernetes-remediator kubeconfig.gateway.yaml "$DOCS/kubeconfig.gateway.yaml"
-sed '1,/^---$/d' "$DOCS/agent-group/.claude/agents/remediation-investigator.md" >"$TMP_DIR/investigator.md"
-sed '1,/^---$/d' "$DOCS/agent-group/.claude/agents/remediation-verifier.md" >"$TMP_DIR/verifier.md"
+write_group_file kubernetes-remediator helper.md "$DOCS/agent-group/helper.md"
+{ cat "$DOCS/agent-group/helper.md"; sed '1,/^---$/d' "$DOCS/agent-group/.claude/agents/remediation-investigator.md"; } >"$TMP_DIR/investigator.md"
+{ cat "$DOCS/agent-group/helper.md"; sed '1,/^---$/d' "$DOCS/agent-group/.claude/agents/remediation-verifier.md"; } >"$TMP_DIR/verifier.md"
 write_group_file kubernetes-remediation-investigator instructions.prepend.md "$TMP_DIR/investigator.md"
 write_group_file kubernetes-remediation-verifier instructions.prepend.md "$TMP_DIR/verifier.md"
 
