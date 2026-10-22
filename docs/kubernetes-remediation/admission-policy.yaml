@@ -504,8 +504,10 @@ spec:
     - expression: >-
         request.namespace != 'security' ||
         (variables.pod.containers[0].image == 'gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd80edc663df6def362cd22e79bcdf00ac53f' &&
-         variables.volumes.all(v, has(v.secret) && has(v.secret.items) && v.secret.items.all(i, i.key == '.dockerconfigjson')))
-      message: the build Job is the pinned kaniko image with only the registry credentials
+         variables.volumes.all(v, has(v.secret) && has(v.secret.items) && v.secret.items.all(i, i.key == '.dockerconfigjson')) &&
+         !has(variables.pod.containers[0].env) &&
+         (!has(variables.pod.containers[0].envFrom) || variables.pod.containers[0].envFrom.all(e, has(e.secretRef) && e.secretRef.name == 'gitea-repo-read')))
+      message: the build Job is the pinned kaniko image with only the registry and repo-read credentials
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

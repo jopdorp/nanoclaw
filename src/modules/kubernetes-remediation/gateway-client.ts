@@ -273,6 +273,7 @@ function kanikoJob(plan: BuildImagePlan, pushSecret: string): Record<string, unk
                 `--destination=${image}`,
                 '--digest-file=/dev/termination-log',
               ],
+              envFrom: [{ secretRef: { name: 'gitea-repo-read' } }],
               volumeMounts: [{ name: 'docker', mountPath: '/kaniko/.docker' }],
             },
           ],
