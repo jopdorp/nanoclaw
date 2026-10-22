@@ -72,6 +72,7 @@ export interface HelmReleaseOptions {
   helm: (args: string[]) => Promise<string>;
   git: (args: string[]) => Promise<string>;
   remote: string;
+  notify: (message: string) => Promise<void>;
 }
 
 interface Workload {
@@ -773,7 +774,7 @@ export class HelmReleaseExecutor {
     );
   }
 
-  /** A release a killed helm left pending, as a host restart mid-operation does, back to its last good state. */
+  /** Repairs a release a killed helm left pending, as a host restart mid-operation does. */
   private async unstick(release: string, ns: string): Promise<string> {
     const status = await this.status(release, ns);
     if (!status?.startsWith('pending-') && status !== 'uninstalling') return '';
@@ -782,11 +783,40 @@ export class HelmReleaseExecutor {
       status: string;
     }>;
     const good = history.filter((h) => h.status === 'deployed' || h.status === 'superseded').at(-1);
-    if (status === 'pending-install' || status === 'uninstalling' || !good) {
+    if (status === 'pending-install' || status === 'uninstalling') {
       await this.options.helm(['uninstall', release, '-n', ns, '--keep-history', '--wait', '--timeout', '10m']);
       return `found ${ns}/${release} stuck in ${status} and uninstalled it`;
     }
-    return `found ${ns}/${release} stuck in ${status}; ${await this.rollback(release, ns, good.revision)}`;
+    const pending = history.filter((h) => h.status === status).at(-1);
+    const matches = (revision: number) => this.revisionMatchesLive(release, ns, revision).catch(() => false);
+    // The upgrade may already have migrated its database, so replay its revision instead of downgrading it.
+    if (pending && (await matches(pending.revision)))
+      return `found ${ns}/${release} stuck in ${status}; ${await this.rollback(release, ns, pending.revision)}`;
+    if (good && (await matches(good.revision)))
+      return `found ${ns}/${release} stuck in ${status}; ${await this.rollback(release, ns, good.revision)}`;
+    const message = `${ns}/${release} is stuck in ${status}, but live workload images match neither pending revision ${pending?.revision ?? 'unknown'} nor the previous deployed revision ${good?.revision ?? 'unknown'}; refusing automatic repair`;
+    await this.options.notify(message);
+    throw new Error(message);
+  }
+
+  private async revisionMatchesLive(release: string, ns: string, revision: number): Promise<boolean> {
+    const rendered = objects(
+      await this.options.helm(['get', 'manifest', release, '-n', ns, '--revision', String(revision)]),
+    ).filter((object) => ['Deployment', 'StatefulSet', 'DaemonSet'].includes(String(object.kind)));
+    const expected = manifestImages(rendered);
+    const live = new Map<string, string>();
+    for (const object of rendered) {
+      const { name = '', namespace = ns } = (object.metadata as { name?: string; namespace?: string }) ?? {};
+      const workload = (await this.options.client.request(
+        `/apis/apps/v1/namespaces/${encodeURIComponent(namespace)}/${String(object.kind).toLowerCase()}s/${encodeURIComponent(name)}`,
+      )) as Values;
+      for (const [key, image] of manifestImages([workload])) live.set(key, image);
+    }
+    return (
+      expected.size > 0 &&
+      expected.size === live.size &&
+      [...expected].every(([key, image]) => pinnedImage(live.get(key)) === pinnedImage(image))
+    );
   }
 
   private async applyNow(plan: HelmValuesPlan, recovered: boolean): Promise<ExecutionResult> {

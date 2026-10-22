@@ -56,6 +56,7 @@ function fixture(before: string, workload: unknown = {}, live = 'image:\n  tag: 
     helm,
     git: gitWithDeployKey(checkout, dir),
     remote,
+    notify: async () => undefined,
   });
   const { plan } = validateRemediationPlan({
     schemaVersion: 1,
@@ -119,6 +120,32 @@ it('a helm result that differs from the recorded patch rolls back and pushes not
     'rollback',
   ]);
   expect(commits()).toBe('1');
+});
+
+const deployment = (tag: string) => ({
+  apiVersion: 'apps/v1',
+  kind: 'Deployment',
+  metadata: { name: 'gitea' },
+  spec: { template: { spec: { containers: [{ name: 'gitea', image: `docker.gitea.com/gitea:${tag}` }] } } },
+});
+
+it('repairs a pending upgrade forward when its workload images are live', async () => {
+  const { executor, helm, plan } = fixture('1.27.0', deployment('1.27.0'));
+  const normal = helm.getMockImplementation()!;
+  helm.mockImplementation(async (args) =>
+    args[0] === 'status'
+      ? JSON.stringify({ info: { status: 'pending-upgrade' } })
+      : args[0] === 'history'
+        ? JSON.stringify([
+            { revision: 40, status: 'deployed' },
+            { revision: 41, status: 'pending-upgrade' },
+          ])
+        : args[1] === 'manifest' && args.includes('--revision')
+          ? JSON.stringify(deployment(args.at(-1) === '41' ? '1.27.0' : '1.26.0'))
+          : normal(args),
+  );
+  await executor.apply(plan);
+  expect(helm).toHaveBeenCalledWith(['rollback', 'gitea', '41', '-n', 'gitea', '--wait', '--timeout', '10m']);
 });
 
 it('a commitOnly plan pushes the values without a helm upgrade', async () => {
