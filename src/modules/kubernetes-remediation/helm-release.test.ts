@@ -9,7 +9,12 @@ import { editValues, gitWithDeployKey, HelmReleaseExecutor } from './helm-releas
 import { validateRemediationPlan } from './policy.js';
 import type { HelmValuesPlan } from './types.js';
 
-function fixture(before: string, workload: unknown = {}, live = 'image:\n  tag: "1.27.0"\n') {
+function fixture(
+  before: string,
+  workload: unknown = {},
+  live = 'image:\n  tag: "1.27.0"\n',
+  repo = 'image:\n  tag: "1.27.0"\n',
+) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'helm-release-'));
   const remote = path.join(dir, 'remote.git');
   const seed = path.join(dir, 'seed');
@@ -18,7 +23,7 @@ function fixture(before: string, workload: unknown = {}, live = 'image:\n  tag: 
   git(dir, 'init', '-q', '--bare', '-b', 'master', remote);
   git(dir, 'init', '-q', '-b', 'master', seed);
   fs.mkdirSync(path.join(seed, 'kubernetes/helm-charts'), { recursive: true });
-  fs.writeFileSync(path.join(seed, 'kubernetes/helm-charts/gitea-values.yaml'), 'image:\n  tag: "1.27.0"\n');
+  fs.writeFileSync(path.join(seed, 'kubernetes/helm-charts/gitea-values.yaml'), repo);
   git(seed, 'add', '.');
   git(seed, 'commit', '-q', '-m', 'seed');
   git(seed, 'push', '-q', remote, 'HEAD:master');
@@ -79,7 +84,22 @@ function fixture(before: string, workload: unknown = {}, live = 'image:\n  tag: 
     },
   });
   const commits = () => git(remote, 'rev-list', '--count', 'master').trim();
-  return { dir, executor, helm, plan: plan as HelmValuesPlan, commits };
+  const pendingUpgrade = (pending: string, deployed = pending) => {
+    const normal = helm.getMockImplementation()!;
+    helm.mockImplementation(async (args) =>
+      args[0] === 'status'
+        ? JSON.stringify({ info: { status: 'pending-upgrade' } })
+        : args[0] === 'history'
+          ? JSON.stringify([
+              { revision: 40, status: 'deployed' },
+              { revision: 41, status: 'pending-upgrade' },
+            ])
+          : args[1] === 'manifest' && args.includes('--revision')
+            ? JSON.stringify(deployment(args.at(-1) === '41' ? pending : deployed))
+            : normal(args),
+    );
+  };
+  return { dir, executor, helm, plan: plan as HelmValuesPlan, commits, pendingUpgrade };
 }
 
 it('a values file that drifted from before gets no helm upgrade and no commit', async () => {
@@ -130,22 +150,32 @@ const deployment = (tag: string) => ({
 });
 
 it('repairs a pending upgrade forward when its workload images are live', async () => {
-  const { executor, helm, plan } = fixture('1.27.0', deployment('1.27.0'));
-  const normal = helm.getMockImplementation()!;
-  helm.mockImplementation(async (args) =>
-    args[0] === 'status'
-      ? JSON.stringify({ info: { status: 'pending-upgrade' } })
-      : args[0] === 'history'
-        ? JSON.stringify([
-            { revision: 40, status: 'deployed' },
-            { revision: 41, status: 'pending-upgrade' },
-          ])
-        : args[1] === 'manifest' && args.includes('--revision')
-          ? JSON.stringify(deployment(args.at(-1) === '41' ? '1.27.0' : '1.26.0'))
-          : normal(args),
-  );
+  const { executor, helm, plan, pendingUpgrade } = fixture('1.27.0', deployment('1.27.0'));
+  pendingUpgrade('1.27.0', '1.26.0');
   await executor.apply(plan);
   expect(helm).toHaveBeenCalledWith(['rollback', 'gitea', '41', '-n', 'gitea', '--wait', '--timeout', '10m']);
+});
+
+it('repairs a pending release before values validation', async () => {
+  const { executor, helm, plan, pendingUpgrade } = fixture('1.27.0', deployment('1.28.0'), 'image:\n  tag: "1.28.0"\n');
+  pendingUpgrade('1.28.0');
+  await expect(executor.bind(plan)).rejects.toThrow('repo values drift');
+  expect(helm.mock.calls.findIndex(([a]) => a[0] === 'rollback')).toBeLessThan(
+    helm.mock.calls.findIndex(([a]) => a[1] === 'values'),
+  );
+});
+
+it('syncs non-secret values while preserving and reporting secret keys', async () => {
+  const repo = 'image:\n  tag: "1.27.0"\ncollabora:\n  collabora:\n    password: repo-placeholder\n';
+  const live = 'image:\n  tag: "1.28.0"\ncollabora:\n  collabora:\n    password: live-secret\n';
+  const { executor, plan } = fixture('1.27.0', {}, live, repo);
+  const result = await executor.syncValues({
+    ...plan,
+    operation: { type: 'helm-sync-values', file: plan.operation.file },
+  });
+  expect(await executor.readRepo(plan.operation.file)).toContain('tag: 1.28.0');
+  expect(await executor.readRepo(plan.operation.file)).toContain('password: repo-placeholder');
+  expect(result.message).toContain('skipped secret-looking keys (collabora.collabora.password)');
 });
 
 it('a commitOnly plan pushes the values without a helm upgrade', async () => {
@@ -156,7 +186,7 @@ it('a commitOnly plan pushes the values without a helm upgrade', async () => {
   expect(commits()).toBe('2');
 });
 
-it('helm-install needs its values file in the repo and never runs helm without it', async () => {
+it('helm-install needs its values file in the repo and does not install without it', async () => {
   const { executor, helm, plan } = fixture('1.27.0');
   const install = {
     ...plan,
@@ -170,7 +200,7 @@ it('helm-install needs its values file in the repo and never runs helm without i
     },
   };
   await expect(executor.install(install)).rejects.toThrow('write it with repo-write first');
-  expect(helm).not.toHaveBeenCalled();
+  expect(helm.mock.calls.map(([args]) => args[0])).not.toContain('install');
 });
 
 it('an upgrade that only restamps the version label on a StatefulSet binds as record-only', async () => {

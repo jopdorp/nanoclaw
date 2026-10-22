@@ -302,7 +302,10 @@ export class HelmReleaseExecutor {
   constructor(private readonly options: HelmReleaseOptions) {}
 
   bind(plan: HelmValuesPlan): Promise<HelmBinding> {
-    return this.serial(() => this.bindNow(plan));
+    return this.serial(async () => {
+      await this.unstick(plan.target.name, plan.target.namespace ?? '');
+      return this.bindNow(plan);
+    });
   }
 
   apply(plan: HelmValuesPlan): Promise<ExecutionResult> {
@@ -313,7 +316,10 @@ export class HelmReleaseExecutor {
   }
 
   syncValues(plan: HelmSyncPlan): Promise<ExecutionResult> {
-    return this.serial(() => this.syncNow(plan));
+    return this.serial(async () => {
+      const recovered = await this.unstick(plan.target.name, plan.target.namespace ?? '');
+      return noted(recovered, await this.syncNow(plan));
+    });
   }
 
   bindManifest(plan: ManifestEditPlan): Promise<{ plan: ManifestEditPlan; unchanged: boolean }> {
@@ -392,10 +398,10 @@ export class HelmReleaseExecutor {
       const { name: release, namespace } = plan.target;
       const ns = namespace ?? '';
       const { chart, repo, version, file } = plan.operation;
+      const recovered = await this.unstick(release, ns);
       await this.sync();
       if (!fs.existsSync(path.join(this.options.checkout, file)))
         throw new Error(`${file} is not in k8s.jegor.nl; write it with repo-write first`);
-      const recovered = await this.unstick(release, ns);
       const status = await this.status(release, ns);
       if (status && status !== 'uninstalled' && status !== 'failed')
         throw new Error(`${ns}/${release} is already installed; change it with helm-values`);
@@ -1000,22 +1006,24 @@ export class HelmReleaseExecutor {
     const { name: release, namespace } = plan.target;
     const live = parseValues(await this.options.helm(['get', 'values', release, '-n', namespace ?? '', '-o', 'yaml']));
     const secrets = secretKeys(live);
-    if (secrets.length) {
-      return {
-        applied: false,
-        message: `live values of ${namespace}/${release} hold secret-looking keys (${secrets.join(', ')}); nothing written to the public values repo.`,
-        automaticWrites: 0,
-      };
-    }
     await this.sync();
     const relative = plan.operation.file;
     const file = path.join(this.options.checkout, relative);
-    if (fs.existsSync(file) && !valuesDiff(live, parseValues(this.read(relative))).length) {
-      return { applied: true, message: `${relative} already matches live.`, automaticWrites: 0 };
+    const synced = parseDocument(stringify(live));
+    const current = fs.existsSync(file) ? parseDocument(this.read(relative)) : undefined;
+    for (const secret of secrets) {
+      const keys = valuesKeys(secret);
+      const kept = current?.getIn(keys, true);
+      if (kept === undefined) synced.deleteIn(keys);
+      else synced.setIn(keys, synced.createNode(isNode(kept) ? kept.toJSON() : kept));
     }
+    const values = parseValues(String(synced));
+    const skipped = secrets.length ? `; skipped secret-looking keys (${secrets.join(', ')})` : '';
+    if (fs.existsSync(file) && !valuesDiff(values, parseValues(this.read(relative))).length)
+      return { applied: true, message: `${relative} already matches live${skipped}.`, automaticWrites: 0 };
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, stringify(live));
-    return this.commit(relative, `Sync ${release} values from live`, 'wrote the live values');
+    fs.writeFileSync(file, String(synced));
+    return this.commit(relative, `Sync ${release} values from live`, `wrote the live values${skipped}`);
   }
 
   private async latestRelease(plan: HelmValuesPlan): Promise<{ uid: string; resourceVersion: string }> {
