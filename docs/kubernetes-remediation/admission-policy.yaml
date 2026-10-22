@@ -330,7 +330,7 @@ spec:
         variables.newImages.all(i, i in variables.oldImages || i.matches(variables.pinnedImagePattern) ||
           variables.oldImages.exists(o, o.size() == i.size() + 72 && o.startsWith(i + '@sha256:') && o.matches('@sha256:[0-9a-f]{64}$')))
       message: a new or changed image from the Helm path must come from a trusted registry pinned by sha256 digest
-    - expression: request.resource.resource != 'secrets' || object.type != 'kubernetes.io/service-account-token'
+    - expression: request.resource.resource != 'secrets' || !has(dyn(object).type) || dyn(object).type != 'kubernetes.io/service-account-token'
       message: the Helm path may not create ServiceAccount token Secrets
 ---
 apiVersion: admissionregistration.k8s.io/v1
