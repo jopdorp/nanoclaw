@@ -95,7 +95,15 @@ export function createUpdateChecker(options: {
   };
 
   const helmRows = async () => {
-    const releases = JSON.parse(await options.helm(['list', '-A', '-o', 'json'])) as Array<{
+    const namespaces =
+      ((await options.reader.request('/api/v1/namespaces')) as { items?: Array<{ metadata: { name: string } }> }).items
+        ?.map((item) => item.metadata.name)
+        .filter((namespace) => !['nanoclaw-remediator', 'orfie-ci'].includes(namespace)) ?? [];
+    const releases = (
+      await pool(namespaces, 4, async (namespace) =>
+        JSON.parse(await options.helm(['list', '-n', namespace, '-o', 'json'])),
+      )
+    ).flat() as Array<{
       name: string;
       namespace: string;
       chart: string;

@@ -448,7 +448,7 @@ spec:
     - name: breakglass-service-account
       expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-breakglass'
   validations:
-    - expression: request.namespace == '' || request.namespace in ['kube-system', 'longhorn-system']
+    - expression: "!has(request.namespace) || request.namespace in ['kube-system', 'longhorn-system']"
       message: the break-glass identity writes only in kube-system and longhorn-system
     # escalate and bind let it update the named chart RBAC; freezing rules and subjects keeps that from granting anything new.
     - expression: >-
@@ -517,7 +517,7 @@ spec:
   policyName: nanoclaw-remediator-job-guard
   validationActions: [Deny, Audit]
 ---
-# Backups are never deleted, by any identity the host holds, approved or not.
+# Backups are never deleted, approved or not.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -533,10 +533,19 @@ spec:
         resources: ['*']
         scope: '*'
   matchConditions:
-    - name: host-identities
+    - name: non-admin
       expression: >-
-        request.userInfo.username in ['nanoclaw-remediator', 'nanoclaw-helm', 'nanoclaw-breakglass', 'nanoclaw-remediation-approver']
-          .map(n, 'system:serviceaccount:nanoclaw-remediator:' + n)
+        request.userInfo.username != 'system:admin' &&
+        !('system:masters' in request.userInfo.groups)
+    - name: non-system-controller
+      expression: >-
+        !request.userInfo.username.startsWith('system:') ||
+        (request.userInfo.username.startsWith('system:serviceaccount:') &&
+         !request.userInfo.username.startsWith('system:serviceaccount:kube-system:'))
+    - name: non-longhorn-controller
+      expression: >-
+        request.resource.group != 'longhorn.io' ||
+        !request.userInfo.username.startsWith('system:serviceaccount:longhorn-system:')
   validations:
     - expression: "!has(request.namespace) || request.namespace != 'backups'"
       message: nothing in backups is ever deleted
@@ -584,15 +593,23 @@ spec:
   matchConditions:
     - name: own-namespace
       expression: has(request.namespace) && request.namespace in ['nanoclaw-remediator', 'orfie-ci']
-    - name: host-identities
+    - name: non-admin
       expression: >-
-        request.userInfo.username in ['nanoclaw-remediator', 'nanoclaw-helm', 'nanoclaw-breakglass', 'nanoclaw-remediation-approver', 'nanoclaw-remediator-reader']
-          .map(n, 'system:serviceaccount:nanoclaw-remediator:' + n)
+        request.userInfo.username != 'system:admin' &&
+        !('system:masters' in request.userInfo.groups)
+    - name: non-system-controller
+      expression: >-
+        !request.userInfo.username.startsWith('system:') ||
+        (request.userInfo.username.startsWith('system:serviceaccount:') &&
+         !request.userInfo.username.startsWith('system:serviceaccount:kube-system:'))
   validations:
     - expression: >-
-        request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator' &&
-        request.namespace == 'nanoclaw-remediator' && request.resource.group == 'batch' && request.resource.resource == 'jobs' &&
-        !has(request.subResource) && request.operation in ['CREATE', 'DELETE']
+        (request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator' &&
+         request.namespace == 'nanoclaw-remediator' && request.resource.group == 'batch' && request.resource.resource == 'jobs' &&
+         !has(request.subResource) && request.operation in ['CREATE', 'DELETE']) ||
+        (request.userInfo.username == 'system:serviceaccount:orfie-ci:orfie-ci-deploy' &&
+         request.namespace == 'nanoclaw-remediator' && request.resource.group == 'apps' && request.resource.resource == 'deployments' &&
+         request.name == 'nanoclaw-remediator-orchestrator' && !has(request.subResource) && request.operation == 'UPDATE')
       message: Orfie's own namespaces change only through its CI or by hand
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -619,25 +636,51 @@ spec:
         operations: [CREATE, UPDATE, DELETE]
         resources: [clusterroles, clusterrolebindings, roles, rolebindings]
         scope: '*'
+      - apiGroups: [admissionregistration.k8s.io]
+        apiVersions: ['*']
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [mutatingwebhookconfigurations, validatingwebhookconfigurations]
+        scope: Cluster
   matchConditions:
-    - name: host-identities
+    - name: non-admin
       expression: >-
-        request.userInfo.username in ['nanoclaw-remediator', 'nanoclaw-helm', 'nanoclaw-breakglass', 'nanoclaw-remediation-approver', 'nanoclaw-remediator-reader']
-          .map(n, 'system:serviceaccount:nanoclaw-remediator:' + n)
+        request.userInfo.username != 'system:admin' &&
+        !('system:masters' in request.userInfo.groups)
+    - name: non-system-controller
+      expression: >-
+        !request.userInfo.username.startsWith('system:') ||
+        (request.userInfo.username.startsWith('system:serviceaccount:') &&
+         !request.userInfo.username.startsWith('system:serviceaccount:kube-system:'))
   variables:
     - name: obj
       expression: "request.operation == 'DELETE' ? dyn(oldObject) : dyn(object)"
     - name: protectedName
       expression: "'^(nanoclaw|orfie)-'"
+    - name: binderAllowed
+      expression: >-
+        request.userInfo.username == 'system:serviceaccount:security:namespace-binder' &&
+        request.resource.resource == 'rolebindings' && request.operation in ['CREATE', 'UPDATE'] &&
+        has(request.namespace) && !(request.namespace in ['nanoclaw-remediator', 'orfie-ci']) &&
+        variables.obj.metadata.name in ['nanoclaw-remediator-reader-secrets', 'nanoclaw-remediator-reader-inspect', 'nanoclaw-helm'] &&
+        variables.obj.roleRef.apiGroup == 'rbac.authorization.k8s.io' && variables.obj.roleRef.kind == 'ClusterRole' &&
+        variables.obj.roleRef.name == (variables.obj.metadata.name == 'nanoclaw-helm' ? 'nanoclaw-namespace-admin' : variables.obj.metadata.name) &&
+        variables.obj.subjects.size() == 1 && variables.obj.subjects[0].kind == 'ServiceAccount' &&
+        variables.obj.subjects[0].namespace == 'nanoclaw-remediator' &&
+        variables.obj.subjects[0].name == (variables.obj.metadata.name == 'nanoclaw-helm' ? 'nanoclaw-helm' : 'nanoclaw-remediator-reader')
   validations:
     # The approval controller's per-plan storage-delete binding, pinned by nanoclaw-remediation-approver-binding.
     - expression: >-
-        (request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediation-approver' &&
+        (request.resource.group == 'admissionregistration.k8s.io' &&
+         request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-helm' &&
+         !variables.obj.metadata.name.matches(variables.protectedName)) ||
+        variables.binderAllowed ||
+        (request.resource.group == 'rbac.authorization.k8s.io' && request.resource.resource in ['rolebindings', 'clusterrolebindings'] &&
+         request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediation-approver' &&
          variables.obj.metadata.name.matches('^nanoclaw-remediation-[0-9a-f-]{36}$')) ||
-        (!variables.obj.metadata.name.matches(variables.protectedName) &&
+        (request.resource.group == 'rbac.authorization.k8s.io' && !variables.obj.metadata.name.matches(variables.protectedName) &&
          (request.resource.resource in ['clusterroles', 'roles'] ||
           !(variables.obj.roleRef.name in ['cluster-admin', 'admin'] || variables.obj.roleRef.name.matches(variables.protectedName))))
-      message: Orfie's RBAC changes only by hand, and no binding may grant cluster-admin, admin or an Orfie role
+      message: Orfie's RBAC and webhooks change only by hand, and no binding may grant cluster-admin, admin or an Orfie role
     - expression: >-
         request.operation == 'DELETE' || !(request.resource.resource in ['clusterroles', 'roles']) ||
         (request.operation == 'UPDATE' &&
@@ -656,7 +699,7 @@ spec:
   policyName: nanoclaw-rbac-guard
   validationActions: [Deny, Audit]
 ---
-# Only the approval controller sets the per-action approval annotation, and every host write in wireguard-home needs one.
+# Only the approval controller sets the per-action approval annotation, and every write in wireguard-home needs one.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -672,10 +715,17 @@ spec:
         resources: ['*']
         scope: '*'
   matchConditions:
-    - name: host-identities-but-the-approval-controller
+    - name: non-admin
       expression: >-
-        request.userInfo.username in ['nanoclaw-remediator', 'nanoclaw-helm', 'nanoclaw-breakglass', 'nanoclaw-remediator-reader']
-          .map(n, 'system:serviceaccount:nanoclaw-remediator:' + n)
+        request.userInfo.username != 'system:admin' &&
+        !('system:masters' in request.userInfo.groups)
+    - name: non-system-controller
+      expression: >-
+        !request.userInfo.username.startsWith('system:') ||
+        (request.userInfo.username.startsWith('system:serviceaccount:') &&
+         !request.userInfo.username.startsWith('system:serviceaccount:kube-system:'))
+    - name: not-the-approval-controller
+      expression: request.userInfo.username != 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediation-approver'
   variables:
     - name: key
       expression: "'remediation.nanoclaw.io/approval-id'"
@@ -686,7 +736,10 @@ spec:
   validations:
     - expression: request.operation == 'DELETE' || variables.newApproval == variables.oldApproval
       message: only the approval controller sets the approval annotation
-    - expression: "!has(request.namespace) || request.namespace != 'wireguard-home' || variables.oldApproval.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')"
+    - expression: >-
+        !has(request.namespace) || request.namespace != 'wireguard-home' ||
+        (request.resource.resource == 'secrets' && request.name.startsWith('sh.helm.release.v1.')) ||
+        variables.oldApproval.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
       message: wireguard-home changes need a per-action Matrix approval annotation
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -722,6 +775,15 @@ spec:
   matchConditions:
     - name: vaultwarden
       expression: has(request.namespace) && request.namespace == 'vaultwarden'
+    - name: non-admin
+      expression: >-
+        request.userInfo.username != 'system:admin' &&
+        !('system:masters' in request.userInfo.groups)
+    - name: non-system-controller
+      expression: >-
+        !request.userInfo.username.startsWith('system:') ||
+        (request.userInfo.username.startsWith('system:serviceaccount:') &&
+         !request.userInfo.username.startsWith('system:serviceaccount:kube-system:'))
   variables:
     - name: pod
       expression: >-
@@ -741,6 +803,38 @@ metadata:
   name: nanoclaw-vaultwarden-image-guard
 spec:
   policyName: nanoclaw-vaultwarden-image-guard
+  validationActions: [Deny, Audit]
+
+---
+# Host credentials never mint bearer tokens for other service accounts.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-tokenrequest-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [serviceaccounts/token]
+        scope: Namespaced
+  matchConditions:
+    - name: host-identity
+      expression: >-
+        request.userInfo.username in ['nanoclaw-remediator', 'nanoclaw-helm', 'nanoclaw-breakglass', 'nanoclaw-remediation-approver']
+          .map(n, 'system:serviceaccount:nanoclaw-remediator:' + n)
+  validations:
+    - expression: 'false'
+      message: host identities may not mint service account tokens
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-tokenrequest-guard
+spec:
+  policyName: nanoclaw-tokenrequest-guard
   validationActions: [Deny, Audit]
 
 # PSA inventory, read-only inspection on 2026-10-21:

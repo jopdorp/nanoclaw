@@ -222,10 +222,6 @@ rules:
   - apiGroups: ['']
     resources: [namespaces]
     verbs: [get, list, watch, create, update, patch]
-  # helm list -A, for check_updates.
-  - apiGroups: ['']
-    resources: [secrets]
-    verbs: [list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
