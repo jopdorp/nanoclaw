@@ -337,6 +337,9 @@ items:
       - apiGroups: [apps]
         resources: [deployments/scale, statefulsets/scale]
         verbs: [get, patch]
+      - apiGroups: [batch]
+        resources: [jobs]
+        verbs: [get, delete]
   - &lane-a-binding
     apiVersion: rbac.authorization.k8s.io/v1
     kind: RoleBinding

@@ -241,6 +241,38 @@ metadata:
 spec:
   policyName: nanoclaw-remediator-storage-delete-guard
   validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-remediator-job-delete-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [batch]
+        apiVersions: [v1]
+        operations: [DELETE]
+        resources: [jobs]
+        scope: Namespaced
+  matchConditions:
+    - name: remediator-service-account
+      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
+  validations:
+    - expression: >-
+        has(oldObject.status.conditions) &&
+        oldObject.status.conditions.exists(c, c.type in ['Complete', 'Failed'] && c.status == 'True') &&
+        (!has(oldObject.status.active) || oldObject.status.active == 0)
+      message: only a finished Job with no active pods may be deleted
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-remediator-job-delete-guard
+spec:
+  policyName: nanoclaw-remediator-job-delete-guard
+  validationActions: [Deny, Audit]
 
 # PSA inventory, read-only inspection on 2026-10-21:
 # - restricted enforce is set only on nanoclaw-remediator in home-k3s-rbac.yaml.
