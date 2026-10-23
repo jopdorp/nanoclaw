@@ -113,8 +113,8 @@ function describe({ plan }: ValidatedPlan, full: boolean): string {
       return full ? `restart at ${op.restartedAt}` : `restart ${where}`;
     case 'helm-values':
       return full
-        ? `helm release ${target.name}, ${op.file}: ${edits(op.set, '->')}`
-        : `helm ${where}: ${edits(op.set)}`;
+        ? `helm release ${target.name}${op.chart?.version ? ` chart ${op.chart.version}` : ''}, ${op.file}: ${edits(op.set, '->')}`
+        : `helm ${where}${op.chart?.version ? ` chart ${op.chart.version}` : ''}: ${edits(op.set)}`;
     case 'helm-sync-values':
       return `sync helm values of ${where} from live into ${op.file}`;
     case 'helm-install':

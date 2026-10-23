@@ -23,6 +23,23 @@ function base(namespace = 'gitea') {
   };
 }
 
+function chartBump(version: string) {
+  const target = { ...base().target, apiVersion: 'v1', kind: 'Secret' };
+  const operation = {
+    type: 'helm-values',
+    file: 'kubernetes/helm-charts/gitea-values.yaml',
+    chart: { version },
+    set: [],
+  };
+  const plan = validateRemediationPlan({ ...base(), target, operation }, now);
+  return isAutoApproved(plan, new Set(), {
+    chart: { before: '1.2.3', after: version },
+    images: {},
+    statefulRepositories: [],
+    hasStatefulSet: false,
+  });
+}
+
 describe('Kubernetes remediation policy', () => {
   it('only accepts backup-controller attachment tickets', () => {
     const target = { ...base('longhorn-system').target, apiVersion: 'longhorn.io/v1beta2', kind: 'VolumeAttachment' };
@@ -128,6 +145,10 @@ describe('Kubernetes remediation policy', () => {
         new Set(),
       );
     expect(['vaultwarden', 'wireguard-home', 'kube-system'].map(exec)).toEqual([true, false, false]);
+  });
+
+  it('auto-approves minor chart bumps and holds majors', () => {
+    expect([chartBump('1.3.0'), chartBump('2.0.0')]).toEqual([true, false]);
   });
 
   it('never deletes anything in backups', () => {

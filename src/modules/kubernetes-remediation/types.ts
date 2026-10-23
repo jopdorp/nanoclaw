@@ -101,8 +101,8 @@ export interface HelmValuesPlan extends PlanBase {
   operation: {
     type: 'helm-values';
     file: string;
-    /** The chart's repository, `https://...` or `oci://...`; optional once the host has verified and cached it. */
-    chart?: { repo: string };
+    /** A requested exact version and/or repository; the repository is optional once the host has cached it. */
+    chart?: { repo?: string; version?: string };
     set: ValuesEdit[];
   };
 }
@@ -139,6 +139,8 @@ export interface RepoWritePlan extends PlanBase {
 /** What the host learned while binding a helm-values plan to its release and values file. */
 export interface HelmBinding {
   plan: HelmValuesPlan;
+  /** The installed and requested chart versions, when this is a chart bump. */
+  chart?: { before: string; after: string };
   /** Every values change the upgrade would apply, file after the edits against live. */
   diff: string[];
   /** Full image references before and after, keyed by the edited path. */

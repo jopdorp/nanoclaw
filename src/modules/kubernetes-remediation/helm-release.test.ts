@@ -208,6 +208,16 @@ it('a commitOnly plan pushes the values without a helm upgrade', async () => {
   expect(commits()).toBe('2');
 });
 
+it('passes a requested chart version to helm upgrade', async () => {
+  const { executor, helm, plan } = fixture('1.27.0');
+  const normal = helm.getMockImplementation()!;
+  helm.mockImplementation(async (args) => (args[0] === 'show' ? 'name: gitea\nversion: 12.7.0\n' : normal(args)));
+  await executor.apply({ ...plan, operation: { ...plan.operation, chart: { version: '12.7.0' }, set: [] } });
+  expect(helm).toHaveBeenCalledWith(
+    expect.arrayContaining(['upgrade', 'gitea', '--repo', 'https://dl.gitea.com/charts/', '--version', '12.7.0']),
+  );
+});
+
 it('helm-install needs its values file in the repo and does not install without it', async () => {
   const { executor, helm, plan } = fixture('1.27.0');
   const install = {

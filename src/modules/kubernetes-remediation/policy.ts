@@ -50,7 +50,8 @@ const REPO_MANIFEST_RE = /^kubernetes\/(?:[\w-][\w.-]*\/)*[\w-][\w.-]*\.(?:ya?ml
 const REPO_FILE_RE = /^(?:(?:kubernetes|\.gitea)\/[\w.-]+(?:\/[\w.-]+)*|(?:renovate|\.renovaterc)\.json)$/;
 const VALUES_FILE_RE = /^kubernetes\/helm-charts\/[\w-][\w.-]*\.ya?ml$/;
 const CHART_RE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
-const CHART_VERSION_RE = /^v?\d+\.\d+\.\d+[\w.+-]*$/;
+const CHART_VERSION_RE =
+  /^v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[\dA-Za-z-]+(?:\.[\dA-Za-z-]+)*)?(?:\+[\dA-Za-z-]+(?:\.[\dA-Za-z-]+)*)?$/;
 // Values under such keys may be credentials, but a key that names or points at a Secret holds none.
 export const SECRET_KEY_RE = /password|passwd|token|secret|apikey|api_key|credential|private_?key/i;
 const SECRET_REFERENCE_RE = /(?:name|ref|file|path)$|^existingsecret/i;
@@ -289,15 +290,29 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
   if (type === 'helm-values') {
     exactKeys(operation, ['type', 'file', 'chart', 'set'], 'plan.operation');
     const file = valuesFile();
-    let chart: { repo: string } | undefined;
+    let chart: { repo?: string; version?: string } | undefined;
     if (operation.chart !== undefined) {
       const input = record(operation.chart, 'plan.operation.chart');
-      exactKeys(input, ['repo'], 'plan.operation.chart');
-      const repo = string(input.repo, 'plan.operation.chart.repo', 512);
-      if (!CHART_REPO_RE.test(repo)) throw new Error('plan.operation.chart.repo must be an https:// or oci:// URL');
-      chart = { repo };
+      exactKeys(input, ['repo', 'version'], 'plan.operation.chart');
+      const repo = input.repo === undefined ? undefined : string(input.repo, 'plan.operation.chart.repo', 512);
+      const version =
+        input.version === undefined ? undefined : string(input.version, 'plan.operation.chart.version', 64);
+      if (!repo && !version) throw new Error('plan.operation.chart needs repo and/or version');
+      if (repo && !CHART_REPO_RE.test(repo))
+        throw new Error('plan.operation.chart.repo must be an https:// or oci:// URL');
+      if (version && !CHART_VERSION_RE.test(version))
+        throw new Error('plan.operation.chart.version must be an exact chart version');
+      chart = { ...(repo ? { repo } : {}), ...(version ? { version } : {}) };
     }
-    return { ...base, operation: { type, file, ...(chart ? { chart } : {}), set: editsFrom(operation.set) } };
+    return {
+      ...base,
+      operation: {
+        type,
+        file,
+        ...(chart ? { chart } : {}),
+        set: editsFrom(operation.set, !!chart?.version),
+      },
+    };
   }
   if (type === 'manifest-edit' || type === 'manifest-sync') {
     exactKeys(
@@ -339,9 +354,9 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
   );
 }
 
-function editsFrom(value: unknown): ValuesEdit[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 8) {
-    throw new Error('plan.operation.set must contain 1 through 8 edits');
+function editsFrom(value: unknown, empty = false): ValuesEdit[] {
+  if (!Array.isArray(value) || (!empty && value.length === 0) || value.length > 8) {
+    throw new Error(`plan.operation.set must contain ${empty ? '0' : '1'} through 8 edits`);
   }
   const set = value.map((entry, index) => {
     const edit = record(entry, `plan.operation.set[${index}]`);
@@ -592,6 +607,12 @@ function sameVersionLine(before: string | undefined, after: string | undefined, 
   return from[0] === to[0] && (!t1 || from[1] === to[1]);
 }
 
+function automaticChartBump(before: string, after: string): boolean {
+  const version = (value: string) => /^v?(\d+)\.(\d+)\.(\d+)/.exec(value)?.slice(1).map(Number);
+  const [from, to] = [version(before), version(after)];
+  return !!from && !!to && from[0] === to[0] && (to[1] > from[1] || (to[1] === from[1] && to[2] > from[2]));
+}
+
 /** The owner's standing yes: Traefik's own configuration applies without asking, in kube-system through break-glass. */
 function traefikConfig({ apiVersion, kind, name, namespace }: Omit<TargetRef, 'uid' | 'resourceVersion'>): boolean {
   return (
@@ -640,7 +661,7 @@ export function standingGrant({ plan }: ValidatedPlan, grants: StandingGrant[]):
 export function isAutoApproved(
   { lane, plan }: ValidatedPlan,
   t1: ReadonlySet<string>,
-  helm?: Pick<HelmBinding, 'images' | 'statefulRepositories' | 'hasStatefulSet'>,
+  helm?: Pick<HelmBinding, 'chart' | 'images' | 'statefulRepositories' | 'hasStatefulSet'>,
 ): boolean {
   const { target, operation } = plan;
   if (operation.type === 'helm-sync-values' || operation.type === 'manifest-sync') return true;
@@ -682,6 +703,7 @@ export function isAutoApproved(
       sameVersionLine(parseImage(operation.before).tag, parseImage(operation.after).tag, critical)
     );
   if (operation.type !== 'helm-values' || !helm) return false;
+  if (helm.chart) return automaticChartBump(helm.chart.before, helm.chart.after);
   // Which workload a replica key sizes is chart-specific, so a release with a StatefulSet asks.
   const edits = operation.set.every(({ path }) =>
     REPLICA_KEY_RE.test(path) ? !critical && !helm.hasStatefulSet : IMAGE_KEY_RE.test(path),

@@ -710,9 +710,10 @@ export class HelmReleaseExecutor {
   private async bindNow(plan: HelmValuesPlan): Promise<HelmBinding> {
     const { name: release, namespace } = plan.target;
     const ns = namespace ?? '';
-    const { chart, metadata } = await this.resolveChart(plan);
     const anchor = await this.latestRelease(plan);
     await this.sync();
+    this.refuseApplierOwned(plan);
+    const { chart, metadata } = await this.resolveChart(plan);
     const text = await this.unchangedFromLive(plan);
     const live = parseValues(text);
     const edited = editValues(text, plan.operation.set);
@@ -722,6 +723,9 @@ export class HelmReleaseExecutor {
     const stateful = installed.filter((object) => object.kind === 'StatefulSet') as Array<{ spec?: Workload['spec'] }>;
     return {
       plan: { ...plan, target: { ...plan.target, ...anchor } },
+      ...(metadata.version === metadata.runningVersion
+        ? {}
+        : { chart: { before: metadata.runningVersion, after: metadata.version } }),
       diff: valuesDiff(live, parseValues(edited)),
       images: Object.fromEntries(
         [...after]
@@ -862,8 +866,9 @@ export class HelmReleaseExecutor {
     if (!recovered && (anchor.uid !== plan.target.uid || anchor.resourceVersion !== plan.target.resourceVersion)) {
       throw new Error('Helm release changed after proposal');
     }
-    const { chart, metadata } = await this.resolveChart(plan);
     await this.sync();
+    this.refuseApplierOwned(plan);
+    const { chart, metadata } = await this.resolveChart(plan);
     const file = path.join(this.options.checkout, plan.operation.file);
     fs.writeFileSync(file, editValues(await this.unchangedFromLive(plan), plan.operation.set));
     if (plan.commitOnly) return this.commit(plan.operation.file, `Orfie: ${plan.reason.split('\n', 1)[0]}`, COMMITTED);
@@ -1011,14 +1016,33 @@ export class HelmReleaseExecutor {
     const repo = plan.operation.chart?.repo ?? this.options.charts[key]?.repo;
     if (!repo) throw new Error(`${key}: the host knows no source for chart ${metadata.chart}; add chart: { repo }`);
     const chart = { chart: metadata.chart, repo, file: plan.operation.file };
+    const version = plan.operation.chart?.version ?? metadata.version;
     const shown = parseValues(
-      await this.options.helm(['show', 'chart', ...this.chartRef(chart), '--version', metadata.version]),
+      await this.options.helm(['show', 'chart', ...this.chartRef(chart), '--version', version]),
     );
-    if (shown.name !== metadata.chart || shown.version !== metadata.version) {
-      throw new Error(`${repo} does not serve ${metadata.chart} ${metadata.version}`);
+    if (shown.name !== metadata.chart || shown.version !== version) {
+      throw new Error(`${repo} does not serve ${metadata.chart} ${version}`);
     }
     if (!isDeepStrictEqual(this.options.charts[key], chart)) this.options.remember(key, chart);
-    return { chart, metadata: { version: metadata.version, revision: metadata.revision } };
+    return { chart, metadata: { version, runningVersion: metadata.version, revision: metadata.revision } };
+  }
+
+  private refuseApplierOwned(plan: HelmValuesPlan): void {
+    if (!plan.operation.chart?.version) return;
+    const relative = 'kubernetes/releases.yaml';
+    if (!fs.existsSync(path.join(this.options.checkout, relative))) return;
+    const actions = parseValues(this.read(relative)).actions;
+    if (
+      Array.isArray(actions) &&
+      actions.some(
+        (entry) =>
+          entry &&
+          typeof entry === 'object' &&
+          (entry as Values).release === plan.target.name &&
+          (entry as Values).namespace === plan.target.namespace,
+      )
+    )
+      throw new Error('applier-owned: change kubernetes/releases.yaml');
   }
 
   /** The values file, which must hold exactly the release's live user-supplied values. */
