@@ -25,10 +25,17 @@
 import { describe, it, expect } from 'vitest';
 
 import { getRegisteredChannelNames } from './channel-registry.js';
+import { roomIdFromMatrixTarget } from './matrix.js';
 import './index.js'; // the real barrel — triggers every channel's self-registration
 
 describe('matrix channel registration', () => {
   it('registers matrix via the channel barrel', () => {
     expect(getRegisteredChannelNames()).toContain('matrix');
+  });
+
+  it('routes room IDs directly and user IDs through DM resolution', () => {
+    expect(roomIdFromMatrixTarget('!room:server')).toBe('!room:server');
+    expect(roomIdFromMatrixTarget('matrix:!room:server')).toBe('!room:server');
+    expect(roomIdFromMatrixTarget('matrix:@user:server')).toBeUndefined();
   });
 });

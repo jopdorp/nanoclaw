@@ -25,7 +25,12 @@ import {
   getMessagingGroupByPlatform,
   getMessagingGroupForOwnDestination,
 } from './db/messaging-groups.js';
-import { clearDeliveryAttempt, recordDeliveryAttempt } from './db/coordination.js';
+import {
+  clearDeliveryAttempt,
+  getDeliveryAttempt,
+  recordDeliveryAttempt,
+  type DeliveryAttemptRow,
+} from './db/coordination.js';
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { mapConcurrent } from './concurrency.js';
@@ -41,6 +46,8 @@ import type { OutboundMessage } from './mailbox/index.js';
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 3;
+const DELIVERY_BACKOFF_BASE_MS = 1000;
+const DELIVERY_BACKOFF_MAX_MS = 300_000;
 /**
  * Sessions drained in parallel per poll tick. A visit is one mailbox round
  * trip (read the queue) plus the channel sends; serially, a tick scaled as
@@ -61,14 +68,19 @@ const DELIVERY_CONCURRENCY = 8;
  * give-up decision for this tick (the message just retries next poll), and a
  * failed clear leaves a stale row the next lifecycle of the same id clears.
  */
-async function recordAttemptRow(messageId: string, sessionId: string, err: unknown): Promise<number | null> {
+async function recordAttemptRow(
+  messageId: string,
+  sessionId: string,
+  err: unknown,
+  nextAttemptAt: string | null,
+): Promise<number | null> {
   /* eslint-disable no-catch-all/no-catch-all -- attempt bookkeeping must never break delivery */
   try {
     return await recordDeliveryAttempt({
       messageId,
       sessionId,
       now: new Date().toISOString(),
-      nextAttemptAt: null,
+      nextAttemptAt,
       error: err instanceof Error ? err.message : String(err),
     });
   } catch (recordErr) {
@@ -80,6 +92,44 @@ async function recordAttemptRow(messageId: string, sessionId: string, err: unkno
     return null;
   }
   /* eslint-enable no-catch-all/no-catch-all */
+}
+
+async function readAttemptRow(messageId: string): Promise<DeliveryAttemptRow | undefined> {
+  /* eslint-disable no-catch-all/no-catch-all -- retry bookkeeping must never block delivery */
+  try {
+    return await getDeliveryAttempt(messageId);
+  } catch (err) {
+    log.warn('Failed to read delivery attempt row', { messageId, err });
+    return undefined;
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
+}
+
+interface RetryPlan {
+  delayMs: number;
+  rateLimited: boolean;
+}
+
+function matrixRetryPlan(channelType: string | null, err: unknown, attempt: number): RetryPlan | null {
+  if (channelType !== 'matrix') return null;
+  const exponential = Math.min(DELIVERY_BACKOFF_MAX_MS, DELIVERY_BACKOFF_BASE_MS * 2 ** (attempt - 1));
+  if (!err || typeof err !== 'object') return { delayMs: exponential, rateLimited: false };
+
+  const matrixError = err as {
+    httpStatus?: number;
+    errcode?: string;
+    httpHeaders?: { get(name: string): string | null };
+    data?: { retry_after_ms?: unknown };
+  };
+  const rateLimited = matrixError.httpStatus === 429 || matrixError.errcode === 'M_LIMIT_EXCEEDED';
+  if (!rateLimited) return { delayMs: exponential, rateLimited: false };
+
+  const retryAfter = matrixError.httpHeaders?.get('Retry-After');
+  const seconds = retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : 0;
+  const parsedDate = retryAfter && !seconds ? Date.parse(retryAfter) : NaN;
+  const date = Number.isNaN(parsedDate) ? 0 : parsedDate - Date.now();
+  const body = typeof matrixError.data?.retry_after_ms === 'number' ? matrixError.data.retry_after_ms : 0;
+  return { delayMs: Math.max(exponential, seconds, date, body), rateLimited: true };
 }
 
 async function clearAttemptRow(messageId: string): Promise<void> {
@@ -295,6 +345,8 @@ async function drainSession(session: Session): Promise<void> {
   }
 
   for (const msg of pending) {
+    const previousAttempt = await readAttemptRow(msg.id);
+    if (previousAttempt?.next_attempt_at && previousAttempt.next_attempt_at > new Date().toISOString()) break;
     try {
       const platformMsgId = await deliverMessage(msg, session);
       await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
@@ -330,8 +382,10 @@ async function drainSession(session: Session): Promise<void> {
         }
       }
     } catch (err) {
-      const attempts = await recordAttemptRow(msg.id, session.id, err);
-      if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
+      const retry = matrixRetryPlan(msg.channelType, err, (previousAttempt?.attempts ?? 0) + 1);
+      const nextAttemptAt = retry ? new Date(Date.now() + retry.delayMs).toISOString() : null;
+      const attempts = await recordAttemptRow(msg.id, session.id, err, nextAttemptAt);
+      if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS && !retry?.rateLimited) {
         log.error('Message delivery failed permanently, giving up', {
           messageId: msg.id,
           sessionId: session.id,
@@ -355,9 +409,11 @@ async function drainSession(session: Session): Promise<void> {
           // null: the bookkeeping write itself failed; count unknown this tick.
           attempt: attempts,
           maxAttempts: MAX_DELIVERY_ATTEMPTS,
+          retryInMs: retry?.delayMs,
           err,
         });
       }
+      if (retry) break;
     }
   }
 }

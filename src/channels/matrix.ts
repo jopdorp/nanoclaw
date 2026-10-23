@@ -46,6 +46,11 @@ const ENV_KEYS = [
   'MATRIX_INVITE_AUTOJOIN_ALLOWLIST',
 ] as const;
 
+export function roomIdFromMatrixTarget(threadId: string): string | undefined {
+  const target = threadId.startsWith('matrix:') ? threadId.slice('matrix:'.length) : threadId;
+  return target.startsWith('!') ? target : undefined;
+}
+
 /**
  * Wrap the Matrix adapter so DM conversations are identified by user handle
  * across the whole system, not by ephemeral room IDs.
@@ -80,6 +85,8 @@ function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): 
   }
 
   async function resolveThreadId(threadId: string): Promise<string> {
+    const roomId = roomIdFromMatrixTarget(threadId);
+    if (roomId) return adapter.encodeThreadId({ roomID: roomId });
     if (!isUserHandle(threadId)) return threadId;
 
     const userHandle = threadId.startsWith('matrix:') ? threadId.slice('matrix:'.length) : threadId;
