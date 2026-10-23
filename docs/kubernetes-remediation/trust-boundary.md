@@ -1,6 +1,6 @@
 # Remediation trust boundary
 
-The agent container has a credential-free kubeconfig and the OneCLI identity matching its agent-group ID. OneCLI holds the `nanoclaw-remediator` TokenRequest token and injects it only at `192.168.1.11:6443`; four agent-scoped block rules deny `POST`, `PUT`, `PATCH`, and `DELETE`. Editing the kubeconfig cannot move the token to another host. The agent can read and can emit only a typed proposal system action.
+The agent container has a credential-free kubeconfig and the OneCLI identity matching its agent-group ID. OneCLI holds the `nanoclaw-remediator` TokenRequest token and injects it only at `kubernetes.default.svc:443`; four agent-scoped block rules deny `POST`, `PUT`, `PATCH`, and `DELETE`. Editing the kubeconfig cannot move the token to another host. The agent can read and can emit only a typed proposal system action.
 
 The same gateway boundary holds the user's Claude subscription and Codex/ChatGPT credentials. Claude receives only `ANTHROPIC_AUTH_TOKEN=gateway-managed`; Codex receives only its sentinel auth stub. They run as separate agent groups through one in-cluster OneCLI Service, so no cross-provider model routing occurs inside a Claude SDK session. This path stays disabled until `MODEL-ROUTING.md`'s two interactive-login probes pass.
 

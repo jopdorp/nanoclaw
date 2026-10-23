@@ -132,7 +132,7 @@ spec:
             - { name: INTERNAL_API_URL, value: http://127.0.0.1:10254 }
             - { name: GATEWAY_API_URL, value: http://onecli.nanoclaw-remediator.svc:10255 }
             # Upstream TLS uses bundled web roots, not SSL_CERT_FILE; k3s's CA is self-signed. Scoped to the API host.
-            - { name: GATEWAY_SKIP_VERIFY_HOSTS, value: '192.168.1.11' }
+            - { name: GATEWAY_SKIP_VERIFY_HOSTS, value: kubernetes.default.svc }
           envFrom:
             - secretRef: { name: onecli-runtime }
           ports:

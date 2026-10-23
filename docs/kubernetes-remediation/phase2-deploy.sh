@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export KUBECONFIG=~/.kube/mini-pc.fresh
+export KUBECONFIG=~/.kube/mini-pc.public
 
 ROOT=/home/jopdorp/development/nanoclaw-v2
 DOCS="$ROOT/docs/kubernetes-remediation"
@@ -156,8 +156,8 @@ cd "$ROOT"
 
 step '1/6 install Matrix adapter, rebuild immutable images, and redeploy'
 test "$(kubectl config current-context)" = default || fail 'KUBECONFIG is not on context default'
-test "$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')" = https://192.168.1.11:6443 \
-  || fail 'KUBECONFIG does not point at HOME (https://192.168.1.11:6443)'
+test "$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')" = https://k8s.jegor.nl:6447 \
+  || fail 'KUBECONFIG does not point at the HOME public API (https://k8s.jegor.nl:6447)'
 
 if [[ "${ONLY_REDEPLOY:-}" != 1 ]] && kubectl exec -n "$NAMESPACE" "deploy/$ORCHESTRATOR" -- \
   test -e /opt/nanoclaw/data/kubernetes-remediation.json 2>/dev/null; then

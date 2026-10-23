@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export KUBECONFIG=/home/jopdorp/.kube/mini-pc.fresh
+export KUBECONFIG=/home/jopdorp/.kube/mini-pc.public
 
 ROOT=/home/jopdorp/development/nanoclaw-v2
 DOCS="$ROOT/docs/kubernetes-remediation"
@@ -12,8 +12,8 @@ ORCHESTRATOR_GROUP=ag-4be55056-f0a3-4991-a83e-a347b75de07d
 INVESTIGATOR_GROUP=ag-491b4ac2-4451-47dc-8d4e-6872dbe66ac5
 VERIFIER_GROUP=ag-e95b148c-8c90-4247-b6d1-0b75db805138
 APPROVER='matrix:@jopdorp:matrix.org'
-API_SERVER=https://192.168.1.11:6443
-API_HOST=192.168.1.11
+API_SERVER=https://kubernetes.default.svc:443
+API_HOST=kubernetes.default.svc
 GITEA_NAMESPACE=gitea
 GITEA_USER=orfie-repo-read
 GITEA_REPOSITORY=k8s.jegor.nl
@@ -60,8 +60,8 @@ trap cleanup EXIT
 command -v kubectl >/dev/null || fail 'kubectl is required'
 command -v jq >/dev/null || fail 'jq is required'
 test "$(kubectl config current-context)" = default || fail 'HOME kubeconfig context is not default'
-test "$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')" = "$API_SERVER" \
-  || fail "kubeconfig does not point at HOME ($API_SERVER)"
+test "$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')" = https://k8s.jegor.nl:6447 \
+  || fail 'kubeconfig does not point at the HOME public API (https://k8s.jegor.nl:6447)'
 
 step 'precheck: prove the latest Investigator turn used working gateway routing'
 AGENT_GROUPS=$(ncl groups list --json --limit 100000)
@@ -525,6 +525,6 @@ printf 'confirmed %s no longer logs "Kubernetes remediation disabled"\n' "${NEW_
 cat <<'EOF'
 
 Trigger exactly one safe proposal with:
-kubectl --kubeconfig=/home/jopdorp/.kube/mini-pc.fresh exec -n nanoclaw-remediator deploy/nanoclaw-remediator-orchestrator -c orchestrator -- sh -c 'curl -fsS -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $(cat /run/nanoclaw/falco/bearer)" -H "Content-Type: application/json" --data '\''{"time":"2026-10-21T00:00:00Z","rule":"NanoClaw safe smoke test","priority":"Notice","output_fields":{"k8s.ns.name":"gitea","k8s.pod.name":"nanoclaw-nonexistent-smoke-test"}}'\'' http://127.0.0.1:3000/webhook/kubernetes-falco'
+kubectl --kubeconfig=/home/jopdorp/.kube/mini-pc.public exec -n nanoclaw-remediator deploy/nanoclaw-remediator-orchestrator -c orchestrator -- sh -c 'curl -fsS -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $(cat /run/nanoclaw/falco/bearer)" -H "Content-Type: application/json" --data '\''{"time":"2026-10-21T00:00:00Z","rule":"NanoClaw safe smoke test","priority":"Notice","output_fields":{"k8s.ns.name":"gitea","k8s.pod.name":"nanoclaw-nonexistent-smoke-test"}}'\'' http://127.0.0.1:3000/webhook/kubernetes-falco'
 Low-risk plans apply on their own and are reported to matrix:@jopdorp:matrix.org; the rest wait for approval in Matrix.
 EOF

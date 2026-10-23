@@ -1,5 +1,5 @@
 # Declarative review input; this is not consumed until both enable-*-review patches are applied.
-apiServer: https://192.168.1.11:6443
+apiServer: https://kubernetes.default.svc:443
 model:
   provider: codex
   orchestrator:

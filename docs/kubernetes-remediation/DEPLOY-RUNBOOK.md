@@ -6,9 +6,9 @@ Nothing in this bundle has been applied. Commands target HOME only. Stop at ever
 
 ```bash
 cd /home/jopdorp/development/nanoclaw-v2
-export KUBECONFIG=/home/jopdorp/.kube/mini-pc.fresh
+export KUBECONFIG=/home/jopdorp/.kube/mini-pc.public
 test "$(kubectl config current-context)" = default
-test "$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')" = https://192.168.1.11:6443
+test "$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')" = https://k8s.jegor.nl:6447
 git apply --check docs/kubernetes-remediation/enable-provider-review.patch
 git apply --check docs/kubernetes-remediation/enable-remediation-review.patch
 test -f .claude/skills/add-k8s-driver/SKILL.md
