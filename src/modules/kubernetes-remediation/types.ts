@@ -12,6 +12,7 @@ export type KnownKind =
   | 'PersistentVolumeClaim'
   | 'Secret'
   | 'Pod'
+  | 'Node'
   /** A Longhorn volume, longhorn.io/v1beta2. */
   | 'Volume'
   | 'VolumeAttachment'
@@ -67,6 +68,16 @@ export interface CronJobRunPlan extends PlanBase {
 
 export interface PodExecPlan extends PlanBase {
   operation: { type: 'pod-exec'; container: string; command: string[] };
+}
+
+/** Node targets bind `uid` only; kubelet heartbeats keep moving their resourceVersion. */
+export interface NodePlan extends PlanBase {
+  operation: { type: 'node-cordon' | 'node-uncordon' | 'node-reboot' | 'tang-start' | 'tang-stop' };
+}
+
+/** Runs `command` as root on the Batocera laptop over ssh; the target is {kind: "Host", name: its address}. */
+export interface BatoceraExecPlan extends PlanBase {
+  operation: { type: 'batocera-exec'; command: string };
 }
 
 export interface BuildImagePlan extends PlanBase {
@@ -167,6 +178,8 @@ export type RemediationPlan =
   | HelmUninstallPlan
   | RepoWritePlan
   | PodExecPlan
+  | NodePlan
+  | BatoceraExecPlan
   | BuildImagePlan
   | ManifestEditPlan
   | ManifestSyncPlan;

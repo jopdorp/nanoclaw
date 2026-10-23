@@ -4,6 +4,7 @@ import { parseAllDocuments } from 'yaml';
 import type {
   HelmBinding,
   KnownKind,
+  NodePlan,
   RemediationLane,
   RemediationPlan,
   TargetRef,
@@ -28,12 +29,14 @@ const API_VERSIONS: Record<KnownKind, string> = {
   PersistentVolumeClaim: 'v1',
   Secret: 'v1',
   Pod: 'v1',
+  Node: 'v1',
   Volume: 'longhorn.io/v1beta2',
   VolumeAttachment: 'longhorn.io/v1beta2',
   Snapshot: 'longhorn.io/v1beta2',
 };
 const WORKLOAD_KINDS = ['Deployment', 'StatefulSet', 'DaemonSet'];
 const IMAGE_KINDS = [...WORKLOAD_KINDS, 'CronJob'];
+const NODE_OPS = ['node-cordon', 'node-uncordon', 'node-reboot', 'tang-start', 'tang-stop'];
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DIGEST_IMAGE_RE =
@@ -110,8 +113,8 @@ function targetFrom(value: unknown, manifest: boolean): TargetRef {
   } else {
     if (!Object.hasOwn(API_VERSIONS, kind)) throw new Error('target.kind is unsupported');
     if (apiVersion !== API_VERSIONS[kind as KnownKind]) throw new Error('target.apiVersion does not match target.kind');
-    if ((kind === 'PersistentVolume') !== (namespace === null))
-      throw new Error('only PersistentVolume targets may omit namespace');
+    if (['PersistentVolume', 'Node'].includes(kind) !== (namespace === null))
+      throw new Error('only PersistentVolume and Node targets omit namespace');
   }
   return {
     apiVersion,
@@ -147,7 +150,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     schemaVersion: 1 as const,
     id,
     incidentIds,
-    target: targetFrom(input.target, ['manifest-edit', 'manifest-sync', 'repo-write'].includes(type)),
+    target: targetFrom(input.target, ['manifest-edit', 'manifest-sync', 'repo-write', 'batocera-exec'].includes(type)),
     reason: string(input.reason, 'plan.reason', 2000),
     expiresAt: string(input.expiresAt, 'plan.expiresAt', 64),
     ...(input.commitOnly ? { commitOnly: true as const } : {}),
@@ -335,6 +338,14 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     const container = string(operation.container, 'plan.operation.container', 63);
     return { ...base, operation: { type, container, command } };
   }
+  if (NODE_OPS.includes(type)) {
+    exactKeys(operation, ['type'], 'plan.operation');
+    return { ...base, operation: { type: type as NodePlan['operation']['type'] } };
+  }
+  if (type === 'batocera-exec') {
+    exactKeys(operation, ['type', 'command'], 'plan.operation');
+    return { ...base, operation: { type, command: string(operation.command, 'plan.operation.command', 16384) } };
+  }
   if (type === 'build-image') {
     exactKeys(operation, ['type', 'dockerfile', 'context', 'image'], 'plan.operation');
     const dockerfile = string(operation.dockerfile, 'plan.operation.dockerfile', 256);
@@ -350,7 +361,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     return { ...base, operation: { type, dockerfile, context, image } };
   }
   throw new Error(
-    'plan.operation.type is unsupported; use patch-image, restart, scale, run-cronjob, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, remove-attachment-ticket, write-secret, pod-exec, manifest-edit, manifest-sync, repo-write or build-image',
+    `plan.operation.type is unsupported; use patch-image, restart, scale, run-cronjob, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, remove-attachment-ticket, write-secret, pod-exec, ${NODE_OPS.join(', ')}, batocera-exec, manifest-edit, manifest-sync, repo-write or build-image`,
   );
 }
 
@@ -569,6 +580,11 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
       throw new Error('remove-attachment-ticket targets a Longhorn VolumeAttachment in longhorn-system');
   } else if (plan.operation.type === 'pod-exec') {
     if (plan.target.kind !== 'Pod') throw new Error('pod-exec requires a Pod');
+  } else if (NODE_OPS.includes(plan.operation.type)) {
+    if (plan.target.kind !== 'Node') throw new Error(`${plan.operation.type} requires a Node`);
+  } else if (plan.operation.type === 'batocera-exec') {
+    if (plan.target.kind !== 'Host' || namespace !== null || !/^\w[\w.-]*$/.test(name))
+      throw new Error('batocera-exec targets {apiVersion: "v1", kind: "Host", namespace: null, name: <its address>}');
   } else if (plan.operation.type === 'build-image') {
     if (plan.target.kind !== 'Job' || namespace !== 'security' || !DNS_LABEL_RE.test(name))
       throw new Error('build-image targets the build Job to create in security, named as a DNS label');
@@ -683,9 +699,9 @@ export function isAutoApproved(
   const critical =
     target.kind === 'StatefulSet' || t1.has(target.namespace ?? '') || t1.has(`${target.namespace}/${target.name}`);
   if (
-    ['restart', 'delete-job', 'pod-exec', 'build-image', 'helm-install', 'repo-write', 'write-secret'].includes(
-      operation.type,
-    )
+    ['restart', 'delete-job', 'pod-exec', 'build-image', 'helm-install', 'repo-write', 'write-secret', 'batocera-exec']
+      .concat(NODE_OPS)
+      .includes(operation.type)
   )
     return true;
   if (operation.type === 'manifest-edit') {

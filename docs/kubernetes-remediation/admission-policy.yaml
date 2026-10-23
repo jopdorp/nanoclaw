@@ -459,7 +459,7 @@ spec:
   policyName: nanoclaw-breakglass-guard
   validationActions: [Deny, Audit]
 ---
-# The writer creates CronJob runs outside its own namespaces, plus the pinned pod-exec runner and build-image Job.
+# The writer creates CronJob runs outside its own namespaces, plus the pinned pod-exec runner, build-image and node Jobs.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -499,8 +499,15 @@ spec:
         (variables.pod.containers[0].image == 'ghcr.io/osscontainertools/kaniko:v1.28.6@sha256:2fa20b0a4b40c7db72b479d57e55c2cf79f2178533b2d3bcbd129d6bd3c087ed' &&
          variables.volumes.all(v, has(v.secret) && has(v.secret.items) && v.secret.items.all(i, i.key == '.dockerconfigjson')) &&
          !has(variables.pod.containers[0].env) &&
-         (!has(variables.pod.containers[0].envFrom) || variables.pod.containers[0].envFrom.all(e, has(e.secretRef) && e.secretRef.name == 'gitea-repo-read')))
-      message: the build Job is the pinned kaniko image with only the registry and repo-read credentials
+         (!has(variables.pod.containers[0].envFrom) || variables.pod.containers[0].envFrom.all(e, has(e.secretRef) && e.secretRef.name == 'gitea-repo-read'))) ||
+        (variables.pod.containers[0].image == 'docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e' &&
+         variables.volumes.size() == 0 && variables.pod.?automountServiceAccountToken == optional.of(false) &&
+         variables.pod.containers[0].?command == optional.of(['nsenter', '-t', '1', '-m', '-u', '-i', '-n', '-p', '--', 'sh', '-c']) &&
+         variables.pod.containers[0].?args.orValue([]) in [
+           ['systemd-run --on-active=15 systemctl reboot'],
+           ['systemctl start tangd.socket && systemd-run --on-active=30min systemctl stop tangd.socket && ss -ltn sport = :7500'],
+           ['systemctl stop tangd.socket; ss -ltn sport = :7500']])
+      message: the build Job is the pinned kaniko image with only the registry and repo-read credentials, a node Job one of the pinned host scripts
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -508,6 +515,36 @@ metadata:
   name: nanoclaw-remediator-job-guard
 spec:
   policyName: nanoclaw-remediator-job-guard
+  validationActions: [Deny, Audit]
+---
+# The writer cordons and uncordons nodes and changes nothing else on them.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-remediator-node-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [nodes]
+  matchConditions:
+    - name: remediator-service-account
+      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
+  validations:
+    - expression: >-
+        object.metadata.?labels == oldObject.metadata.?labels && object.metadata.?annotations == oldObject.metadata.?annotations &&
+        object.spec.?taints == oldObject.spec.?taints && object.spec.?providerID == oldObject.spec.?providerID
+      message: only spec.unschedulable may change
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-remediator-node-guard
+spec:
+  policyName: nanoclaw-remediator-node-guard
   validationActions: [Deny, Audit]
 ---
 # Backup data is never deleted, approved or not.

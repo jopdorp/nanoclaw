@@ -13,7 +13,9 @@ spec:
         scope: Namespaced
   matchConditions:
     - name: remediator-build-job
-      expression: request.namespace == 'security' && request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
+      expression: >-
+        request.namespace == 'security' && request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator' &&
+        !object.spec.template.spec.?hostPID.orValue(false)
   variables:
     - name: container
       expression: object.spec.template.spec.containers[0]

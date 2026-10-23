@@ -139,6 +139,14 @@ function describe({ plan }: ValidatedPlan, full: boolean): string {
         : `exec in ${where}: ${op.command.join(' ')}`;
     case 'build-image':
       return `build ${op.image} from ${op.dockerfile}`;
+    case 'node-cordon':
+    case 'node-uncordon':
+    case 'node-reboot':
+    case 'tang-start':
+    case 'tang-stop':
+      return `${op.type} ${target.name}`;
+    case 'batocera-exec':
+      return `batocera ${target.name}: ${op.command}`;
     case 'remove-attachment-ticket':
       return `remove attachment ticket ${op.ticket} from ${target.kind} ${target.name}`;
     default:

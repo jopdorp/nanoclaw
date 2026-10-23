@@ -7,6 +7,7 @@ import type { RegistryFetch } from './registry.js';
 import type {
   ApprovalGrant,
   AttachmentTicketRemovePlan,
+  BatoceraExecPlan,
   BuildImagePlan,
   CronJobRunPlan,
   ExecutionResult,
@@ -16,6 +17,7 @@ import type {
   HelmValuesPlan,
   ManifestEditPlan,
   ManifestSyncPlan,
+  NodePlan,
   PodExecPlan,
   RemediationPlan,
   RepoWritePlan,
@@ -31,6 +33,17 @@ export const KUBECTL_IMAGE =
   'registry.k8s.io/kubectl:v1.35.9@sha256:436cbaa8a019152063d638f412cf9d73ec29e56061529d28cbc231c6ab1b37a4';
 export const KANIKO_IMAGE =
   'ghcr.io/osscontainertools/kaniko:v1.28.6@sha256:2fa20b0a4b40c7db72b479d57e55c2cf79f2178533b2d3bcbd129d6bd3c087ed';
+const BUSYBOX_IMAGE =
+  'docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e';
+const HOST_SCRIPTS = {
+  // Delayed so the Job reports its exit before the node goes down.
+  'node-reboot': 'systemd-run --on-active=15 systemctl reboot',
+  // tangd.socket stays disabled on purpose, so a started one stops itself even if tang-stop never comes.
+  'tang-start':
+    'systemctl start tangd.socket && systemd-run --on-active=30min systemctl stop tangd.socket && ss -ltn sport = :7500',
+  'tang-stop': 'systemctl stop tangd.socket; ss -ltn sport = :7500',
+};
+const BATOCERA_SSH = '/run/nanoclaw/batocera';
 const OUTPUT_LIMIT = 2048;
 const TEMPORARY_BINDING_RE = /^nanoclaw-remediation-[0-9a-f-]{36}$/;
 
@@ -244,6 +257,37 @@ function runnerJob(plan: PodExecPlan, serviceAccount: string): Record<string, un
             },
           ],
           volumes: [{ name: 'tmp', emptyDir: {} }],
+        },
+      },
+    },
+  };
+}
+
+function nodeJob(plan: NodePlan, script: string): Record<string, unknown> {
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: { name: `orfie-node-${plan.id.slice(0, 8)}`, namespace: 'security' },
+    spec: {
+      backoffLimit: 0,
+      activeDeadlineSeconds: 120,
+      ttlSecondsAfterFinished: 600,
+      template: {
+        spec: {
+          restartPolicy: 'Never',
+          nodeName: plan.target.name,
+          hostPID: true,
+          automountServiceAccountToken: false,
+          tolerations: [{ operator: 'Exists' }],
+          containers: [
+            {
+              name: 'host',
+              image: BUSYBOX_IMAGE,
+              command: ['nsenter', '-t', '1', '-m', '-u', '-i', '-n', '-p', '--', 'sh', '-c'],
+              args: [script],
+              securityContext: { privileged: true },
+            },
+          ],
         },
       },
     },
@@ -560,6 +604,14 @@ export class GatewayRemediationExecutor {
         return this.podExec(plan as PodExecPlan, lane === 'C' ? 'nanoclaw-breakglass' : 'nanoclaw-remediator');
       case 'build-image':
         return this.buildImage(plan as BuildImagePlan);
+      case 'node-cordon':
+      case 'node-uncordon':
+      case 'node-reboot':
+      case 'tang-start':
+      case 'tang-stop':
+        return this.node(plan as NodePlan);
+      case 'batocera-exec':
+        return this.batoceraExec(plan as BatoceraExecPlan);
       case 'run-cronjob':
         return this.runCronJob(plan as CronJobRunPlan, executor);
       case 'delete-snapshot':
@@ -770,6 +822,59 @@ export class GatewayRemediationExecutor {
     return {
       applied: exitCode === 0,
       message: `exec in ${plan.target.namespace}/${plan.target.name} exited ${exitCode ?? 'without finishing'}:\n${output}`,
+      automaticWrites: 0,
+    };
+  }
+
+  private async node(plan: NodePlan): Promise<ExecutionResult> {
+    const { type } = plan.operation;
+    const path = `/api/v1/nodes/${encodeURIComponent(plan.target.name)}`;
+    if (((await this.writer.request(path)) as LiveObject).metadata?.uid !== plan.target.uid)
+      throw new Error('target node changed after proposal');
+    if (type === 'node-cordon' || type === 'node-uncordon') {
+      await this.writer.request(path, {
+        method: 'PATCH',
+        body: { spec: { unschedulable: type === 'node-cordon' || null } },
+        contentType: 'application/merge-patch+json',
+      });
+      return { applied: true, message: `${type} ${plan.target.name} done`, automaticWrites: 0 };
+    }
+    const { exitCode, output } = await this.runJob(nodeJob(plan, HOST_SCRIPTS[type]), 2 * 60_000);
+    const owed =
+      type === 'tang-start'
+        ? '; you owe a tang-stop as soon as the node it unlocks is Ready, it stops itself in 30 minutes'
+        : '';
+    return {
+      applied: exitCode === 0,
+      message: `${type} on ${plan.target.name} exited ${exitCode ?? 'without finishing'}${owed}:\n${output}`,
+      automaticWrites: 0,
+    };
+  }
+
+  private async batoceraExec(plan: BatoceraExecPlan): Promise<ExecutionResult> {
+    // Pinned by alias, so the host key still verifies when DHCP moves the laptop.
+    const options = [
+      'IdentitiesOnly=yes',
+      'BatchMode=yes',
+      'StrictHostKeyChecking=yes',
+      'ConnectTimeout=10',
+      `UserKnownHostsFile=${BATOCERA_SSH}/known_hosts`,
+      'HostKeyAlias=batocera',
+    ];
+    const { stdout, stderr, code } = await run(
+      'ssh',
+      [
+        '-i',
+        `${BATOCERA_SSH}/id_ed25519`,
+        ...options.flatMap((o) => ['-o', o]),
+        `root@${plan.target.name}`,
+        plan.operation.command,
+      ],
+      { signal: AbortSignal.timeout(10 * 60_000) },
+    );
+    return {
+      applied: code === 0,
+      message: `batocera-exec on ${plan.target.name} exited ${code}:\n${`${stdout}${stderr}`.slice(-OUTPUT_LIMIT)}`,
       automaticWrites: 0,
     };
   }

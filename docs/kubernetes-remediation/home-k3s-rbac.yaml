@@ -102,6 +102,9 @@ rules:
   - apiGroups: ['']
     resources: [pods, persistentvolumeclaims]
     verbs: [get, list]
+  - apiGroups: ['']
+    resources: [nodes]
+    verbs: [get, patch]
   # The pod-exec runner Job runs kubectl in-cluster under this account.
   - apiGroups: ['']
     resources: [pods/exec]
