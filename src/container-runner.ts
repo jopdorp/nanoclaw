@@ -22,6 +22,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   INSTALL_SLUG,
+  LOCAL_AI_HOST,
   TIMEZONE,
 } from './config.js';
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
@@ -1296,6 +1297,13 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     ...(contribution.env ?? {}),
     ...(gateway.env ?? {}),
   };
+  // Local-model sessions talk straight to the LAN box and nothing else (nanoclaw-session-local-egress),
+  // so they get no gateway proxy.
+  const local = resolveProviderName(session.agent_provider, containerConfig.provider) === 'ollama';
+  if (local) {
+    for (const key of Object.keys(contributedEnv)) if (/^(https?|all)_proxy$/i.test(key)) delete contributedEnv[key];
+    env.LOCAL_AI_HOST = LOCAL_AI_HOST;
+  }
 
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
@@ -1349,7 +1357,12 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
 
   return {
     key: { installSlug: INSTALL_SLUG, agentGroupId: agentGroup.id, sessionId: session.id },
-    labels: { ...gateway.labels, 'nanoclaw-container-name': containerName, [GROUP_FOLDER_LABEL]: agentGroup.folder },
+    labels: {
+      ...gateway.labels,
+      'nanoclaw-container-name': containerName,
+      [GROUP_FOLDER_LABEL]: agentGroup.folder,
+      ...(local ? { 'nanoclaw-egress': 'local' } : {}),
+    },
     // The gateway's auxiliary containers ride beside the agent; capability-
     // gated in the spawn path before composition ever runs.
     containers: [agent, ...(gateway.containers ?? [])],

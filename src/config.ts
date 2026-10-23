@@ -21,6 +21,7 @@ const envConfig = readEnvFile([
   'WEBHOOK_PORT',
   'NANOCLAW_ABSOLUTE_CEILING_MS',
   'NANOCLAW_CLAIM_STUCK_MS',
+  'LOCAL_AI_HOST',
 ]);
 
 /**
@@ -106,6 +107,8 @@ export const CONTAINER_PIDS_LIMIT = process.env.CONTAINER_PIDS_LIMIT ?? envConfi
 // Egress lockdown — force all agent traffic through the selected gateway on a
 // no-internet Docker network. Off by default; consumed by src/egress-lockdown.ts.
 export const EGRESS_LOCKDOWN = (process.env.NANOCLAW_EGRESS_LOCKDOWN || envConfig.NANOCLAW_EGRESS_LOCKDOWN) === 'true';
+// The LAN box serving Ollama (:11434) and ComfyUI (:8188) to `ollama` provider groups.
+export const LOCAL_AI_HOST = process.env.LOCAL_AI_HOST || envConfig.LOCAL_AI_HOST || '';
 export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
 

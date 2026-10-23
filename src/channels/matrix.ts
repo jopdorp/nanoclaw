@@ -119,6 +119,8 @@ export function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdap
       const room = client?.getRoom(roomID);
       if (!room) return origChannelIdFromThreadId(threadId);
       if (room.getJoinedMemberCount() > 2) return origChannelIdFromThreadId(threadId);
+      // A persona's own room is its own chat, not the DM.
+      if (room.currentState.getStateEvents('nanoclaw.chat', '')) return origChannelIdFromThreadId(threadId);
 
       const botId = (adapter as any).userID;
       const otherMember = room.getJoinedMembers().find((m: { userId: string }) => m.userId !== botId);

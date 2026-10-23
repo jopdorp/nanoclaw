@@ -144,6 +144,7 @@ spec:
             - name: NANOCLAW_KUBERNETES_MOUNTS
               value: '{"persistentVolumeMounts":[{"hostRoot":"/opt/nanoclaw/data","claimName":"nanoclaw-state","claimSubPath":"data"},{"hostRoot":"/opt/nanoclaw/groups","claimName":"nanoclaw-state","claimSubPath":"groups"}],"bakedSurfaces":[{"hostRoot":"/opt/nanoclaw/container/agent-runner/src","containerRoot":"/app/src"},{"hostRoot":"/opt/nanoclaw/container/skills","containerRoot":"/app/skills"}]}'
             - { name: NANOCLAW_GATEWAY_PROVIDER, value: onecli }
+            - { name: LOCAL_AI_HOST, value: 192.168.1.77 }
             - { name: ONECLI_URL, value: http://onecli.nanoclaw-remediator.svc:10254 }
             - { name: ONECLI_GATEWAY_URL, value: http://onecli.nanoclaw-remediator.svc:10255 }
             - { name: ONECLI_GATEWAY_CONTAINER, value: onecli }
@@ -226,6 +227,8 @@ spec:
   podSelector:
     matchLabels:
       nanoclaw-role: agent
+    matchExpressions:
+      - { key: nanoclaw-egress, operator: DoesNotExist }
   policyTypes: [Ingress, Egress]
   ingress: []
   egress:
@@ -245,3 +248,23 @@ spec:
               app: onecli
       ports:
         - { protocol: TCP, port: 10255 }
+---
+# Local-model sessions (nanoclaw-egress=local) reach only Ollama and ComfyUI on the LAN box.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nanoclaw-session-local-egress
+  namespace: nanoclaw-remediator
+spec:
+  podSelector:
+    matchLabels:
+      nanoclaw-role: agent
+      nanoclaw-egress: local
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - ipBlock: { cidr: 192.168.1.77/32 }
+      ports:
+        - { protocol: TCP, port: 11434 }
+        - { protocol: TCP, port: 8188 }

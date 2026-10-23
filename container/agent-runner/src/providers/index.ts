@@ -5,3 +5,4 @@
 import './claude.js';
 import './claude-remediation.review.js';
 import './codex.js';
+import './ollama.js';
