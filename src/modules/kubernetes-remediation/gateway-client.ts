@@ -30,7 +30,7 @@ const APPROVAL_ANNOTATION = 'remediation.nanoclaw.io/approval-id';
 export const KUBECTL_IMAGE =
   'registry.k8s.io/kubectl:v1.35.9@sha256:436cbaa8a019152063d638f412cf9d73ec29e56061529d28cbc231c6ab1b37a4';
 export const KANIKO_IMAGE =
-  'gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd80edc663df6def362cd22e79bcdf00ac53f';
+  'ghcr.io/osscontainertools/kaniko:v1.28.6@sha256:2fa20b0a4b40c7db72b479d57e55c2cf79f2178533b2d3bcbd129d6bd3c087ed';
 const OUTPUT_LIMIT = 2048;
 const TEMPORARY_BINDING_RE = /^nanoclaw-remediation-[0-9a-f-]{36}$/;
 

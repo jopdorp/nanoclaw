@@ -496,7 +496,7 @@ spec:
       message: the pod-exec runner is the pinned kubectl image under the writer or break-glass account
     - expression: >-
         request.namespace != 'security' ||
-        (variables.pod.containers[0].image == 'gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd80edc663df6def362cd22e79bcdf00ac53f' &&
+        (variables.pod.containers[0].image == 'ghcr.io/osscontainertools/kaniko:v1.28.6@sha256:2fa20b0a4b40c7db72b479d57e55c2cf79f2178533b2d3bcbd129d6bd3c087ed' &&
          variables.volumes.all(v, has(v.secret) && has(v.secret.items) && v.secret.items.all(i, i.key == '.dockerconfigjson')) &&
          !has(variables.pod.containers[0].env) &&
          (!has(variables.pod.containers[0].envFrom) || variables.pod.containers[0].envFrom.all(e, has(e.secretRef) && e.secretRef.name == 'gitea-repo-read')))
