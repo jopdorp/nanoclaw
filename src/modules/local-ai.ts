@@ -51,6 +51,7 @@ export async function openLocalRoom(parentId: string, child: AgentGroup): Promis
     body: JSON.stringify({
       name: child.name,
       preset: 'trusted_private_chat',
+      initial_state: [{ type: 'nanoclaw.chat', state_key: '', content: {} }],
       invite: admins.filter((a) => a.user_id.startsWith('matrix:')).map((a) => a.user_id.slice('matrix:'.length)),
     }),
   });
