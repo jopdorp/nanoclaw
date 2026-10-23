@@ -459,7 +459,7 @@ spec:
   policyName: nanoclaw-breakglass-guard
   validationActions: [Deny, Audit]
 ---
-# The writer creates only the pod-exec runner and the build-image Job, exactly as the host builds them.
+# The writer creates CronJob runs outside its own namespaces, plus the pinned pod-exec runner and build-image Job.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -483,8 +483,11 @@ spec:
     - name: volumes
       expression: "has(variables.pod.volumes) ? variables.pod.volumes : []"
   validations:
-    - expression: "!has(variables.pod.initContainers) && variables.pod.containers.size() == 1"
-      message: a remediation Job runs exactly one container
+    - expression: >-
+        (has(object.metadata.labels) && 'nanoclaw.dev/run-of' in object.metadata.labels &&
+         !(request.namespace in ['nanoclaw-remediator', 'orfie-ci', 'security'])) ||
+        (!has(variables.pod.initContainers) && variables.pod.containers.size() == 1)
+      message: only labeled CronJob runs outside protected namespaces may use their full pod template
     - expression: >-
         request.namespace != 'nanoclaw-remediator' ||
         (variables.pod.containers[0].image == 'registry.k8s.io/kubectl:v1.35.9@sha256:436cbaa8a019152063d638f412cf9d73ec29e56061529d28cbc231c6ab1b37a4' &&

@@ -8,6 +8,7 @@ import type {
   ApprovalGrant,
   AttachmentTicketRemovePlan,
   BuildImagePlan,
+  CronJobRunPlan,
   ExecutionResult,
   HelmInstallPlan,
   HelmSyncPlan,
@@ -377,9 +378,14 @@ interface PodTemplateHolder {
   template?: { spec?: Partial<Record<'containers' | 'initContainers', Array<{ name?: string; image?: string }>>> };
 }
 
+interface JobTemplate {
+  metadata?: { annotations?: Record<string, string>; labels?: Record<string, string> };
+  spec?: PodTemplateHolder & { activeDeadlineSeconds?: number; [key: string]: unknown };
+}
+
 interface LiveObject {
   metadata?: { uid?: string; resourceVersion?: string };
-  spec?: PodTemplateHolder & { jobTemplate?: { spec?: PodTemplateHolder }; claimRef?: { namespace?: string } };
+  spec?: PodTemplateHolder & { jobTemplate?: JobTemplate; claimRef?: { namespace?: string } };
   status?: {
     active?: number;
     conditions?: Array<{ type?: string; status?: string }>;
@@ -554,6 +560,8 @@ export class GatewayRemediationExecutor {
         return this.podExec(plan as PodExecPlan, lane === 'C' ? 'nanoclaw-breakglass' : 'nanoclaw-remediator');
       case 'build-image':
         return this.buildImage(plan as BuildImagePlan);
+      case 'run-cronjob':
+        return this.runCronJob(plan as CronJobRunPlan, executor);
       case 'delete-snapshot':
         return this.deleteSnapshot(plan as SnapshotDeletePlan, executor);
       case 'remove-attachment-ticket':
@@ -707,6 +715,48 @@ export class GatewayRemediationExecutor {
       if (note) return { ...result, message: `${result.message} ${note}` };
     }
     return result;
+  }
+
+  private async runCronJob(plan: CronJobRunPlan, client: KubernetesJsonClient): Promise<ExecutionResult> {
+    const path = workloadPath(plan);
+    const live = (await client.request(path)) as LiveObject;
+    if (live.metadata?.uid !== plan.target.uid || live.metadata?.resourceVersion !== plan.target.resourceVersion)
+      throw new Error('target UID or resourceVersion changed after proposal');
+    if (!live.spec?.jobTemplate?.spec) throw new Error('CronJob has no job template');
+    const suffix = `-manual-${Date.now()}`;
+    const name =
+      plan.operation.jobName ?? `${plan.target.name.slice(0, 63 - suffix.length).replace(/-+$/, '')}${suffix}`;
+    const namespace = plan.target.namespace ?? '';
+    const labels = { ...live.spec.jobTemplate.metadata?.labels, 'nanoclaw.dev/run-of': plan.target.name };
+    const annotations = {
+      ...live.spec.jobTemplate.metadata?.annotations,
+      'cronjob.kubernetes.io/instantiate': 'manual',
+    };
+    const jobs = `/apis/batch/v1/namespaces/${encodeURIComponent(namespace)}/jobs`;
+    await client.request(jobs, {
+      method: 'POST',
+      body: {
+        apiVersion: 'batch/v1',
+        kind: 'Job',
+        metadata: { name, namespace, labels, annotations },
+        spec: live.spec.jobTemplate.spec,
+      },
+    });
+    const seconds = live.spec.jobTemplate.spec.activeDeadlineSeconds;
+    const deadline = Date.now() + (seconds === undefined ? 120_000 : seconds * 1000);
+    let started = false;
+    do {
+      const pods = (await client.request(
+        `/api/v1/namespaces/${encodeURIComponent(namespace)}/pods?labelSelector=${encodeURIComponent(`job-name=${name}`)}`,
+      )) as { items?: Array<{ status?: { startTime?: string } }> };
+      started = Boolean(pods.items?.some((pod) => pod.status?.startTime));
+      if (!started && Date.now() < deadline) await sleep(Math.min(3_000, deadline - Date.now()));
+    } while (!started && Date.now() < deadline);
+    return {
+      applied: true,
+      message: `Created Job ${namespace}/${name}; pod ${started ? 'started' : 'has not started yet'}.`,
+      automaticWrites: 0,
+    };
   }
 
   /** Runs the plan's argv in its pod from an in-cluster Job, as the writer or, in Lane C, the break-glass account. */

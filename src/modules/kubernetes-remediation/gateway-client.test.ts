@@ -73,6 +73,42 @@ function attachmentTicketFixture(state = 'Completed') {
   return { executor, grant, request, ticket, validated };
 }
 
+function cronJobRunFixture() {
+  const jobTemplate = {
+    metadata: { labels: { existing: 'yes' } },
+    spec: { template: { spec: { containers: [{ name: 'backup', image: 'alpine' }] } } },
+  };
+  const target = {
+    ...plan('gitea').target,
+    apiVersion: 'batch/v1',
+    kind: 'CronJob',
+    namespace: 'backups',
+    name: 'backup',
+  };
+  const validated = validateRemediationPlan({ ...plan('gitea'), target, operation: { type: 'run-cronjob' } });
+  const request = vi.fn(async (path: string, options?: unknown) =>
+    options
+      ? {}
+      : path.includes('/pods?')
+        ? { items: [{ status: { startTime: 'now' } }] }
+        : { metadata: { uid: 'uid-1', resourceVersion: '42' }, spec: { jobTemplate } },
+  );
+  const client = { request, watch: vi.fn() };
+  const grant = {
+    approvalRowId: '',
+    approverUserId: 'auto:low-risk',
+    planId: validated.plan.id,
+    planDigest: validated.digest,
+  };
+  return {
+    executor: new GatewayRemediationExecutor(client, client, { ready: vi.fn() }),
+    grant,
+    jobTemplate,
+    request,
+    validated,
+  };
+}
+
 describe('gateway remediation executor', () => {
   it('removes exactly a completed Backup attachment ticket through break-glass', async () => {
     const { executor, grant, request, ticket, validated } = attachmentTicketFixture();
@@ -258,6 +294,16 @@ describe('gateway remediation executor', () => {
     });
     expect(annotator.request).not.toHaveBeenCalled();
     expect(observer.ready).not.toHaveBeenCalled();
+  });
+
+  it('copies a CronJob job template into a labeled Job', async () => {
+    const { executor, grant, jobTemplate, request, validated } = cronJobRunFixture();
+    await executor.execute(validated, grant);
+    const body = request.mock.calls.find(([, options]) => options)?.[1] as { body: Record<string, unknown> };
+    expect(body.body).toMatchObject({
+      metadata: { labels: { existing: 'yes', 'nanoclaw.dev/run-of': 'backup' } },
+      spec: jobTemplate.spec,
+    });
   });
 
   it('applies an approved Lane C plan only through the break-glass identity', async () => {

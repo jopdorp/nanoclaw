@@ -60,6 +60,7 @@ const BUILD_IMAGE_RE =
 const DNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?$/;
 const RELEASE_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,51}[a-z0-9])?$/;
 const API_VERSION_RE = /^(?:[a-z0-9.-]+\/)?v\d+(?:(?:alpha|beta)\d+)?$/;
+const JOB_NAME_RE = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
@@ -204,6 +205,13 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     exactKeys(operation, ['type'], 'plan.operation');
     return { ...base, operation: { type } };
   }
+  if (type === 'run-cronjob') {
+    exactKeys(operation, ['type', 'jobName'], 'plan.operation');
+    const jobName =
+      operation.jobName === undefined ? undefined : string(operation.jobName, 'plan.operation.jobName', 63);
+    if (jobName && !JOB_NAME_RE.test(jobName)) throw new Error('plan.operation.jobName must be a Kubernetes Job name');
+    return { ...base, operation: { type, ...(jobName ? { jobName } : {}) } };
+  }
   if (type === 'delete-storage') {
     exactKeys(operation, ['type', 'reclaimConfirmed'], 'plan.operation');
     if (operation.reclaimConfirmed !== true) throw new Error('storage deletion requires reclaimConfirmed=true');
@@ -327,7 +335,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     return { ...base, operation: { type, dockerfile, context, image } };
   }
   throw new Error(
-    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, remove-attachment-ticket, write-secret, pod-exec, manifest-edit, manifest-sync, repo-write or build-image',
+    'plan.operation.type is unsupported; use patch-image, restart, scale, run-cronjob, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, remove-attachment-ticket, write-secret, pod-exec, manifest-edit, manifest-sync, repo-write or build-image',
   );
 }
 
@@ -498,6 +506,8 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     if (lane === 'A') automaticWriteCap = 1;
   } else if (plan.operation.type === 'delete-job') {
     if (plan.target.kind !== 'Job') throw new Error('delete-job requires a Job');
+  } else if (plan.operation.type === 'run-cronjob') {
+    if (plan.target.kind !== 'CronJob') throw new Error('run-cronjob requires a CronJob');
   } else if (plan.operation.type === 'helm-values') {
     if (plan.target.kind !== 'Secret') throw new Error('helm-values requires a Helm release');
     // Charts pin in different shapes: tag@sha256, a sibling digest or sha key, or repository@sha256. The host

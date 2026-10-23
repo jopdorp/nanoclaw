@@ -61,6 +61,10 @@ export interface JobDeletePlan extends PlanBase {
   operation: { type: 'delete-job' };
 }
 
+export interface CronJobRunPlan extends PlanBase {
+  operation: { type: 'run-cronjob'; jobName?: string };
+}
+
 export interface PodExecPlan extends PlanBase {
   operation: { type: 'pod-exec'; container: string; command: string[] };
 }
@@ -150,6 +154,7 @@ export type RemediationPlan =
   | RestartPlan
   | ScalePlan
   | JobDeletePlan
+  | CronJobRunPlan
   | StorageDeletePlan
   | SnapshotDeletePlan
   | AttachmentTicketRemovePlan
