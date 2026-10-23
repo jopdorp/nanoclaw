@@ -98,7 +98,7 @@ rules:
     verbs: [get, patch]
   - apiGroups: [batch]
     resources: [jobs]
-    verbs: [get, delete]
+    verbs: [create, get, list, watch]
   - apiGroups: ['']
     resources: [pods, persistentvolumeclaims]
     verbs: [get, list]
