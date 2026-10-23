@@ -10,6 +10,7 @@ import path from 'path';
 const host = process.env.LOCAL_AI_HOST;
 const comfy = `http://${host}:8188`;
 const ollama = `http://${host}:11434`;
+const QUICK_BESIDE_BYTES = 4.5e9;
 
 async function json(url: string, body?: unknown): Promise<any> {
   const res = await fetch(url, body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) });
@@ -28,9 +29,11 @@ export async function render(kind: string, prompt: string, lyrics = ''): Promise
     for (const key of ['seed', 'noise_seed'])
       if (typeof node.inputs?.[key] === 'number') node.inputs[key] = Math.floor(Math.random() * 2 ** 32);
 
-  if (kind === 'quick') return run(graph);
-  for (const m of (await json(`${ollama}/api/ps`)).models ?? [])
-    await json(`${ollama}/api/generate`, { model: m.name, keep_alive: 0 });
+  const loaded: { name: string; size_vram: number }[] = (await json(`${ollama}/api/ps`)).models ?? [];
+  // SD 1.5 needs ~3 GB, so it runs beside the 4B chat model but not beside anything bigger.
+  const fits = kind === 'quick' && loaded.every((m) => m.size_vram < QUICK_BESIDE_BYTES);
+  if (fits) return run(graph);
+  for (const m of loaded) await json(`${ollama}/api/generate`, { model: m.name, keep_alive: 0 });
   try {
     return await run(graph);
   } finally {

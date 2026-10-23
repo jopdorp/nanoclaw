@@ -1,10 +1,11 @@
 /**
- * Ollama provider: a small chat loop against the LAN Ollama box (LOCAL_AI_HOST),
- * for models too small for a full agent harness. The prompt is a line of tool
- * rules, the group's standing persona and the destination map, and the tools are a few tiny ones:
- * media generation and creating/deleting its own copies. /image, /video and
- * /music skip the model. History lives in the session dir; once a prompt passes
- * COMPACT_AT tokens the oldest turns fold into a rolling summary.
+ * Ollama provider: a small chat loop against the LAN Ollama box (LOCAL_AI_HOST)
+ * for small local models that drown in a full agent harness. The prompt is a
+ * line of tool rules, the group's standing persona and the destination map; the
+ * tools are media generation and creating/deleting its own copies. /image,
+ * /video and /music skip the model. History lives in the session dir; past
+ * three quarters of the model's num_ctx the oldest turns fold into a rolling
+ * summary.
  */
 import fs from 'fs';
 
@@ -58,7 +59,6 @@ const RULES =
   'Reply in plain text. Use a tool only when asked for what it makes: a picture, a video, a song, a new persona or a copy of you, or deleting one. Otherwise just answer.';
 const STATE_FILE = '/workspace/ollama-state.json';
 const PERSONA_FILE = '/workspace/agent/instructions.prepend.md';
-const COMPACT_AT = 24_000;
 const KEEP = 8;
 
 interface Message {
@@ -117,8 +117,20 @@ export class OllamaProvider implements AgentProvider {
     state.summary = message.content;
   }
 
+  // Each persona's Ollama model carries its own num_ctx; compact at three quarters of it.
+  private async compactAt(): Promise<number> {
+    const res = await fetch(`http://${process.env.LOCAL_AI_HOST}:11434/api/show`, {
+      method: 'POST',
+      body: JSON.stringify({ model: this.options.model }),
+    });
+    const numCtx = Number(
+      /num_ctx\s+(\d+)/.exec(((await res.json()) as { parameters?: string }).parameters ?? '')?.[1],
+    );
+    return (numCtx || 8192) * 0.75;
+  }
+
   private async *turn(state: State, system: string, prompt: string): AsyncGenerator<ProviderEvent> {
-    if (state.promptTokens > COMPACT_AT) await this.compact(state);
+    if (state.promptTokens > (await this.compactAt())) await this.compact(state);
     // Plain text is wrapped for whoever wrote last, so a reply never depends on the model's markup.
     const from = [...prompt.matchAll(/<message[^>]*\bfrom="([^"]+)"/g)].pop()?.[1];
     const wrap = (text: string) =>
