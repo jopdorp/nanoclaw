@@ -83,6 +83,11 @@ interface Workload {
   };
 }
 
+interface HelmRevision {
+  revision: number;
+  status: string;
+}
+
 /** A digest pins the image whatever tag the chart renders next to it. */
 function pinnedImage(image = ''): string {
   return canonicalImage(image).replace(/:[^/:@]+@/, '@');
@@ -398,6 +403,12 @@ export class HelmReleaseExecutor {
       const { name: release, namespace } = plan.target;
       const ns = namespace ?? '';
       const { chart, repo, version, file } = plan.operation;
+      const statusBefore = await this.status(release, ns);
+      const historyBefore = await this.history(release, ns);
+      const existed = statusBefore !== undefined || historyBefore.length > 0;
+      const rollbackRevision = historyBefore
+        .filter(({ status }) => status === 'deployed' || status === 'superseded')
+        .at(-1)?.revision;
       const recovered = await this.unstick(release, ns);
       await this.sync();
       if (!fs.existsSync(path.join(this.options.checkout, file)))
@@ -428,8 +439,19 @@ export class HelmReleaseExecutor {
           '--timeout',
           '10m',
         ]);
-        // eslint-disable-next-line no-catch-all/no-catch-all -- every install failure uninstalls
+        // eslint-disable-next-line no-catch-all/no-catch-all -- every install failure restores or removes its release
       } catch (error) {
+        if (existed) {
+          const restored = rollbackRevision
+            ? await this.rollback(release, ns, rollbackRevision)
+            : 'no previous deployed revision; left in place';
+          if (!rollbackRevision) await this.options.notify(`${ns}/${release} install failed; ${restored}`);
+          return noted(recovered, {
+            applied: false,
+            message: `helm install failed (${reason(error)}); ${restored}.`,
+            automaticWrites: 0,
+          });
+        }
         const removed = await this.options.helm(['uninstall', release, '-n', ns, '--wait', '--timeout', '10m']).then(
           () => 'uninstalled again',
           (e: unknown) => `uninstall failed: ${reason(e)}`,
@@ -780,14 +802,21 @@ export class HelmReleaseExecutor {
     );
   }
 
+  private async history(release: string, ns: string): Promise<HelmRevision[]> {
+    return this.options.helm(['history', release, '-n', ns, '-o', 'json']).then(
+      (out) => {
+        const history: unknown = JSON.parse(out);
+        return Array.isArray(history) ? (history as HelmRevision[]) : [];
+      },
+      () => [],
+    );
+  }
+
   /** Repairs a release a killed helm left pending, as a host restart mid-operation does. */
   private async unstick(release: string, ns: string): Promise<string> {
     const status = await this.status(release, ns);
     if (!status?.startsWith('pending-') && status !== 'uninstalling') return '';
-    const history = JSON.parse(await this.options.helm(['history', release, '-n', ns, '-o', 'json'])) as Array<{
-      revision: number;
-      status: string;
-    }>;
+    const history = await this.history(release, ns);
     const good = history.filter((h) => h.status === 'deployed' || h.status === 'superseded').at(-1);
     if (status === 'pending-install' || status === 'uninstalling') {
       await this.options.helm(['uninstall', release, '-n', ns, '--keep-history', '--wait', '--timeout', '10m']);
@@ -1094,7 +1123,9 @@ export class HelmReleaseExecutor {
       return `rolled back to revision ${revision}`;
       // eslint-disable-next-line no-catch-all/no-catch-all -- a failed rollback is reported, not thrown over the upgrade error
     } catch (error) {
-      return `rollback to revision ${revision} failed: ${reason(error)}`;
+      const message = `rollback to revision ${revision} failed: ${reason(error)}`;
+      await this.options.notify(`${ns}/${release} ${message}; left in place`);
+      return message;
     } finally {
       await annotate(null);
     }

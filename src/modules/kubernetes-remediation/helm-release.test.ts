@@ -7,7 +7,20 @@ import { expect, it, vi } from 'vitest';
 
 import { editValues, gitWithDeployKey, HelmReleaseExecutor } from './helm-release.js';
 import { validateRemediationPlan } from './policy.js';
-import type { HelmValuesPlan } from './types.js';
+import type { HelmInstallPlan, HelmValuesPlan } from './types.js';
+
+function installPlan(plan: HelmValuesPlan): HelmInstallPlan {
+  return {
+    ...plan,
+    operation: {
+      type: 'helm-install',
+      chart: 'gitea',
+      repo: 'https://dl.gitea.com/charts/',
+      version: '12.6.0',
+      file: plan.operation.file,
+    },
+  };
+}
 
 function fixture(
   before: string,
@@ -210,6 +223,20 @@ it('helm-install needs its values file in the repo and does not install without 
   };
   await expect(executor.install(install)).rejects.toThrow('write it with repo-write first');
   expect(helm.mock.calls.map(([args]) => args[0])).not.toContain('install');
+});
+
+it('a failed helm-install rolls an existing release back instead of uninstalling it', async () => {
+  const { executor, helm, plan } = fixture('1.27.0');
+  const normal = helm.getMockImplementation()!;
+  helm.mockImplementation(async (args) => {
+    if (args[0] === 'history') return JSON.stringify([{ revision: 9, status: 'deployed' }]);
+    if (args[0] === 'status') return JSON.stringify({ info: { status: 'failed' } });
+    if (args[0] === 'install') throw new Error('upgrade failed');
+    return normal(args);
+  });
+  await executor.install(installPlan(plan));
+  expect(helm.mock.calls.map(([args]) => args[0])).toContain('rollback');
+  expect(helm.mock.calls.map(([args]) => args[0])).not.toContain('uninstall');
 });
 
 it('an upgrade that only restamps the version label on a StatefulSet binds as record-only', async () => {
