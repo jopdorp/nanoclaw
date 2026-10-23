@@ -26,3 +26,4 @@ import './agent-to-agent/index.js';
 import './self-mod/index.js';
 import './community-portal/index.js';
 import './kubernetes-remediation/index.review.js';
+import './model-switch.js';

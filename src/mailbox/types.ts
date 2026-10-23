@@ -89,6 +89,14 @@ export interface MailboxTimelineMessage {
   content: string;
 }
 
+export interface InboundMessageOrigin {
+  kind: string;
+  platformId: string | null;
+  channelType: string | null;
+  threadId: string | null;
+  content: string;
+}
+
 /** Host-visible inbound mailbox behavior. Storage layout and lifecycle are implementation-private. */
 export interface InboundMailbox {
   setRouting(routing: SessionRouting): void;
@@ -98,6 +106,7 @@ export interface InboundMailbox {
   markMessageFailed(messageId: string): void;
   retryWithBackoff(messageId: string, backoffSec: number): void;
   getMessageForRetry(messageId: string, status: 'pending' | 'processing'): MessageRetry | undefined;
+  getInboundMessage(messageId: string): InboundMessageOrigin | undefined;
   applyProcessingAcks(acks: ProcessingAck[]): void;
   getDeliveredIds(): Set<string>;
   markDelivered(messageOutId: string, platformMessageId: string | null): void;

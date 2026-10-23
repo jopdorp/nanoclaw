@@ -8,6 +8,7 @@
 import './core.js';
 import './interactive.js';
 import './agents.js';
+import './model.js';
 import './self-mod.js';
 import './kubernetes-remediation.review.js';
 import './resolve-approval.review.js';

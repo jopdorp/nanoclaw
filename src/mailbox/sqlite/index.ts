@@ -210,6 +210,12 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
         }
       );
     },
+    getInboundMessage: (messageId) =>
+      db
+        .prepare(
+          'SELECT kind, platform_id AS platformId, channel_type AS channelType, thread_id AS threadId, content FROM messages_in WHERE id = ?',
+        )
+        .get(messageId) as ReturnType<InboundMailbox['getInboundMessage']>,
     applyProcessingAcks: (acks) => applyProcessingAcks(db, acks),
     getDeliveredIds: () => getDeliveredIds(db),
     markDelivered: (messageOutId, platformMessageId) => markDelivered(db, messageOutId, platformMessageId),
