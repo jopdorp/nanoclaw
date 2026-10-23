@@ -27,6 +27,7 @@ const MIME_TO_EXT: Record<string, string> = {
   'audio/mpeg': 'mp3',
   'audio/wav': 'wav',
   'audio/mp4': 'm4a',
+  'audio/flac': 'flac',
   'video/mp4': 'mp4',
   'video/webm': 'webm',
   'video/quicktime': 'mov',
@@ -55,6 +56,11 @@ export function extForMime(mime: unknown): string {
   if (typeof mime !== 'string' || !mime) return '';
   const clean = mime.split(';')[0].trim().toLowerCase();
   return MIME_TO_EXT[clean] ?? '';
+}
+
+export function mimeForName(name: string): string | undefined {
+  const ext = name.split('.').pop()?.toLowerCase();
+  return Object.keys(MIME_TO_EXT).find((mime) => MIME_TO_EXT[mime] === ext);
 }
 
 export function deriveAttachmentName(att: Record<string, unknown>): string {

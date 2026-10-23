@@ -21,6 +21,7 @@ import {
   type ConcurrencyStrategy,
   type Message as ChatMessage,
 } from 'chat';
+import { mimeForName } from '../attachment-naming.js';
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
@@ -970,6 +971,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const fileUploads = message.files?.map((f: { data: Buffer; filename: string }) => ({
           data: f.data,
           filename: f.filename,
+          mimeType: mimeForName(f.filename),
         }));
         // Split if over the adapter's max length. Files ride on the first
         // chunk so the head of the reply still carries them.
@@ -993,6 +995,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const fileUploads = message.files.map((f: { data: Buffer; filename: string }) => ({
           data: f.data,
           filename: f.filename,
+          mimeType: mimeForName(f.filename),
         }));
         const result = await adapter.postMessage(tid, { markdown: '', files: fileUploads });
         return result?.id;
