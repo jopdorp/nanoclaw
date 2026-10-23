@@ -222,6 +222,21 @@ rules:
   - apiGroups: ['']
     resources: [namespaces]
     verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [aquasecurity.github.io]
+    resources: [clustercompliancereports, clusterconfigauditreports, clusterinfraassessmentreports, clusterrbacassessmentreports, clustersbomreports, clustervulnerabilityreports]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [cert-manager.io]
+    resources: [clusterissuers]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [hub.traefik.io]
+    resources: [accesscontrolpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gatewayclasses]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingressclasses]
+    verbs: [get, list, watch, create, update, patch, delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
