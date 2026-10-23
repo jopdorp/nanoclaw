@@ -22,10 +22,11 @@
  * typed call, so the build/typecheck leg (`pnpm run build`) guards it against upstream
  * drift, not this test. Every Chat SDK channel follows this same shape.
  */
-import { describe, it, expect } from 'vitest';
+import { createMatrixAdapter } from '@beeper/chat-adapter-matrix';
+import { describe, it, expect, vi } from 'vitest';
 
 import { getRegisteredChannelNames } from './channel-registry.js';
-import { roomIdFromMatrixTarget } from './matrix.js';
+import { roomIdFromMatrixTarget, wrapWithDmResolution } from './matrix.js';
 import './index.js'; // the real barrel — triggers every channel's self-registration
 
 describe('matrix channel registration', () => {
@@ -36,6 +37,16 @@ describe('matrix channel registration', () => {
   it('routes room IDs directly and user IDs through DM resolution', () => {
     expect(roomIdFromMatrixTarget('!room:server')).toBe('!room:server');
     expect(roomIdFromMatrixTarget('matrix:!room:server')).toBe('!room:server');
-    expect(roomIdFromMatrixTarget('matrix:@user:server')).toBeUndefined();
+    expect(roomIdFromMatrixTarget('matrix:%21room%3Aserver')).toBe('!room:server');
+    expect(roomIdFromMatrixTarget('matrix:@jopdorp:matrix.org')).toBeUndefined();
+  });
+
+  it('resolves DM targets before reactions', async () => {
+    const adapter = createMatrixAdapter({ baseURL: 'x', auth: { type: 'accessToken', accessToken: 'x' } });
+    vi.spyOn(adapter, 'openDM').mockResolvedValue('matrix:%21dm%3Aserver');
+    const addReaction = vi.spyOn(adapter, 'addReaction').mockResolvedValue();
+    wrapWithDmResolution(adapter);
+    await adapter.addReaction('matrix:@jopdorp:matrix.org', '$event', '✅');
+    expect(addReaction).toHaveBeenCalledWith('matrix:%21dm%3Aserver', '$event', '✅');
   });
 });

@@ -46,8 +46,13 @@ const ENV_KEYS = [
   'MATRIX_INVITE_AUTOJOIN_ALLOWLIST',
 ] as const;
 
-export function roomIdFromMatrixTarget(threadId: string): string | undefined {
+function decodeMatrixTarget(threadId: string): string {
   const target = threadId.startsWith('matrix:') ? threadId.slice('matrix:'.length) : threadId;
+  return decodeURIComponent(target);
+}
+
+export function roomIdFromMatrixTarget(threadId: string): string | undefined {
+  const target = decodeMatrixTarget(threadId);
   return target.startsWith('!') ? target : undefined;
 }
 
@@ -67,8 +72,9 @@ export function roomIdFromMatrixTarget(threadId: string): string | undefined {
  *
  * Both resolutions are cached for the process lifetime.
  */
-function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): typeof adapter {
+export function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): typeof adapter {
   const origPostMessage = adapter.postMessage.bind(adapter);
+  const origAddReaction = adapter.addReaction.bind(adapter);
   const origStartTyping = adapter.startTyping.bind(adapter);
   const origChannelIdFromThreadId = adapter.channelIdFromThreadId.bind(adapter);
 
@@ -76,12 +82,7 @@ function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): 
   const roomToUserCache = new Map<string, string>();
 
   function isUserHandle(threadId: string): boolean {
-    try {
-      const { roomID } = adapter.decodeThreadId(threadId);
-      return !roomID.startsWith('!');
-    } catch {
-      return true;
-    }
+    return decodeMatrixTarget(threadId).startsWith('@');
   }
 
   async function resolveThreadId(threadId: string): Promise<string> {
@@ -89,7 +90,7 @@ function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): 
     if (roomId) return adapter.encodeThreadId({ roomID: roomId });
     if (!isUserHandle(threadId)) return threadId;
 
-    const userHandle = threadId.startsWith('matrix:') ? threadId.slice('matrix:'.length) : threadId;
+    const userHandle = decodeMatrixTarget(threadId);
     log.info('Matrix: resolving DM room for user handle', { userHandle });
     const resolved = await adapter.openDM(userHandle);
 
@@ -155,6 +156,9 @@ function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): 
     const resolvedTid = await resolveThreadId(threadId);
     return origPostMessage(resolvedTid, ...args);
   };
+
+  adapter.addReaction = async (threadId, messageId, emoji) =>
+    origAddReaction(await resolveThreadId(threadId), messageId, emoji);
 
   adapter.startTyping = async (threadId: string) => {
     const resolvedTid = await resolveThreadId(threadId);
