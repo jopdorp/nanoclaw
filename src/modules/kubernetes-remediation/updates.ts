@@ -99,17 +99,21 @@ export function createUpdateChecker(options: {
       ((await options.reader.request('/api/v1/namespaces')) as { items?: Array<{ metadata: { name: string } }> }).items
         ?.map((item) => item.metadata.name)
         .filter((namespace) => !['nanoclaw-remediator', 'orfie-ci'].includes(namespace)) ?? [];
-    const releases = (
-      await pool(namespaces, 4, async (namespace) =>
-        JSON.parse(await options.helm(['list', '-n', namespace, '-o', 'json'])),
-      )
-    ).flat() as Array<{
+    const listed = await pool(namespaces, 4, async (namespace) => {
+      try {
+        return { releases: JSON.parse(await options.helm(['list', '-n', namespace, '-o', 'json'])) };
+      } catch (error) {
+        if (!/forbidden/i.test(String(error))) throw error;
+        return { releases: [], note: `skipped ${namespace}: Helm release listing forbidden` };
+      }
+    });
+    const releases = listed.flatMap(({ releases }) => releases) as Array<{
       name: string;
       namespace: string;
       chart: string;
       app_version?: string;
     }>;
-    return pool(releases, 4, async ({ name, namespace, chart: ref, app_version }) => {
+    const rows = await pool(releases, 4, async ({ name, namespace, chart: ref, app_version }) => {
       const [, chart = ref, installed = ''] = /^(.+?)-(v?\d+\.\d+\.\d+(?:[-+].*)?)$/.exec(ref) ?? [];
       const repo = options.charts[`${namespace}/${name}`]?.repo;
       const versions = repo ? await chartVersions(repo, chart).catch(() => undefined) : undefined;
@@ -131,6 +135,7 @@ export function createUpdateChecker(options: {
         top ? bump(installed, top) : null,
       ];
     });
+    return { rows, notes: listed.flatMap(({ note }) => (note ? [note] : [])) };
   };
 
   const imageRows = async () => {
@@ -191,7 +196,8 @@ export function createUpdateChecker(options: {
           'latestAppVersion',
           'bump',
         ],
-        rows: helm,
+        rows: helm.rows,
+        notes: helm.notes,
       },
       images: {
         columns: [
