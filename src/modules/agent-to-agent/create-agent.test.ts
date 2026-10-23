@@ -36,6 +36,7 @@ const {
   mockNotifyWrite,
   mockEnsureTemplateLocal,
   mockCreateAgentFromTemplate,
+  mockOpenLocalRoom,
   liveApprovals,
   approvalHandlers,
 } = vi.hoisted(() => ({
@@ -47,6 +48,7 @@ const {
   mockNotifyWrite: vi.fn(),
   mockEnsureTemplateLocal: vi.fn(),
   mockCreateAgentFromTemplate: vi.fn(),
+  mockOpenLocalRoom: vi.fn(),
   liveApprovals: new Map<string, import('../../types.js').PendingApproval>(),
   approvalHandlers: new Map<string, (ctx: Record<string, unknown>) => Promise<void>>(),
 }));
@@ -63,6 +65,7 @@ vi.mock('../../db/container-configs.js', () => ({
   updateContainerConfigScalars: vi.fn(),
   ensureContainerConfig: () => {},
 }));
+vi.mock('../local-ai.js', () => ({ openLocalRoom: (...a: unknown[]) => mockOpenLocalRoom(...a) }));
 vi.mock('../../db/agent-groups.js', () => ({
   getAgentGroup: (id: string) => ({ id, name: id.toUpperCase(), folder: id, agent_provider: null, created_at: '' }),
   getAgentGroupByFolder: () => undefined,
@@ -179,6 +182,14 @@ describe('create_agent — guard-based authorization (wrapped delivery action)',
 
     const providers = mockInitGroupFilesystem.mock.calls.map((c) => (c[1] as { provider: string }).provider);
     expect(providers).toEqual(['codex', 'claude']);
+  });
+
+  it('a local persona copies itself onto its own model whatever provider it asks for', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global', provider: 'ollama', model: 'local/llm' });
+    await runCreateAgent({ name: 'Nova', instructions: 'pirate', provider: 'codex', model: 'gpt-5.6-sol' });
+
+    expect(mockInitGroupFilesystem.mock.calls[0][1]).toMatchObject({ provider: 'ollama' });
+    expect(mockOpenLocalRoom).toHaveBeenCalledTimes(1);
   });
 
   it('group scope (default): requires approval, does NOT create directly', async () => {

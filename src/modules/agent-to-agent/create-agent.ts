@@ -21,7 +21,7 @@ import path from 'path';
 
 import { GROUPS_DIR } from '../../config.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
-import { updateContainerConfigScalars } from '../../db/container-configs.js';
+import { getContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
 import { groupFolderExistsOnDisk } from '../../group-folder.js';
@@ -38,6 +38,7 @@ import '../../cli/resources/groups.js';
 import { killContainer } from '../../container-runner.js';
 import { getSessionsByAgentGroup } from '../../db/sessions.js';
 import { createDestination, getDestinationByName, getDestinations, normalizeName } from './db/agent-destinations.js';
+import { openLocalRoom } from '../local-ai.js';
 import { writeDestinations } from './write-destinations.js';
 
 async function notifyAgent(session: Session, text: string): Promise<void> {
@@ -154,10 +155,17 @@ export async function createAgent(
     return;
   }
 
+  // A local persona's copies run on its own model whatever the request says, so a copy never has more than its parent.
+  const parent = await getContainerConfig(sourceGroup.id);
+  if (parent?.provider === 'ollama' && template)
+    return notify(`Cannot create agent "${name}": a local persona cannot use templates.`);
   // No provider named means a Codex helper, so helpers draw the Codex plan; `provider` opts out.
-  const child = content.provider
-    ? { provider: String(content.provider), model: str(content.model) }
-    : { provider: 'codex', model: str(content.model) ?? 'gpt-5.6-sol', effort: 'medium' };
+  const child =
+    parent?.provider === 'ollama'
+      ? { provider: 'ollama', model: parent.model ?? undefined, effort: parent.effort ?? undefined }
+      : content.provider
+        ? { provider: String(content.provider), model: str(content.model) }
+        : { provider: 'codex', model: str(content.model) ?? 'gpt-5.6-sol', effort: 'medium' };
 
   // The creator's helper.md and the chosen .claude/agents role lead the child's persona.
   const role = str(content.role);
@@ -288,8 +296,14 @@ async function performCreateAgent(
   await createAgentGroup(newGroup);
   // Passing the provider pins the child's scaffold and stamps its config row in one step.
   await initGroupFilesystem(newGroup, { instructions: instructions ?? undefined, provider: child.provider });
-  await updateContainerConfigScalars(agentGroupId, { model: child.model, effort: child.effort });
+  const local = child.provider === 'ollama';
+  await updateContainerConfigScalars(agentGroupId, {
+    model: child.model,
+    effort: child.effort,
+    cli_scope: local ? 'disabled' : undefined,
+  });
   await wireNewAgent(sourceGroup.id, localName, agentGroupId, session);
+  if (local) await openLocalRoom(sourceGroup.id, newGroup);
 
   if (!options?.suppressCreatedNotify) {
     await notify(
