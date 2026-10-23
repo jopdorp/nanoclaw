@@ -6,6 +6,7 @@ import { canonicalImage } from './policy.js';
 import type { RegistryFetch } from './registry.js';
 import type {
   ApprovalGrant,
+  AttachmentTicketRemovePlan,
   BuildImagePlan,
   ExecutionResult,
   HelmInstallPlan,
@@ -555,6 +556,8 @@ export class GatewayRemediationExecutor {
         return this.buildImage(plan as BuildImagePlan);
       case 'delete-snapshot':
         return this.deleteSnapshot(plan as SnapshotDeletePlan, executor);
+      case 'remove-attachment-ticket':
+        return this.removeAttachmentTicket(plan as AttachmentTicketRemovePlan, executor);
     }
 
     const path =
@@ -747,6 +750,43 @@ export class GatewayRemediationExecutor {
       message: `Deleted Longhorn snapshot ${name} of volume ${plan.operation.volume}.`,
       automaticWrites: 0,
     };
+  }
+
+  private async removeAttachmentTicket(
+    plan: AttachmentTicketRemovePlan,
+    client: KubernetesJsonClient,
+  ): Promise<ExecutionResult> {
+    const base = '/apis/longhorn.io/v1beta2/namespaces/longhorn-system';
+    const { uid, resourceVersion, name } = plan.target;
+    const { ticket } = plan.operation;
+    const path = `${base}/volumeattachments/${encodeURIComponent(name)}`;
+    const live = (await client.request(path)) as LiveObject & {
+      spec?: { attachmentTickets?: Record<string, { id?: string; type?: string }> };
+    };
+    if (live.metadata?.uid !== uid || live.metadata?.resourceVersion !== resourceVersion)
+      throw new Error('target UID or resourceVersion changed after proposal');
+    const attachment = live.spec?.attachmentTickets?.[ticket];
+    if (attachment?.id !== ticket || attachment.type !== 'backup-controller')
+      throw new Error(`attachment ticket ${ticket} is absent or is not owned by the backup controller`);
+    const backupName = ticket.slice('backup-controller-'.length);
+    const backup = (await client.request(`${base}/backups/${encodeURIComponent(backupName)}`)) as {
+      metadata?: { labels?: Record<string, string> };
+      status?: { state?: string };
+    };
+    if (backup.status?.state !== 'Completed' || backup.metadata?.labels?.['backup-volume'] !== name)
+      throw new Error(`Backup ${backupName} is not completed for volume ${name}`);
+    const key = ticket.replaceAll('~', '~0').replaceAll('/', '~1');
+    await client.request(path, {
+      method: 'PATCH',
+      contentType: 'application/json-patch+json',
+      body: [
+        { op: 'test', path: '/metadata/uid', value: uid },
+        { op: 'test', path: '/metadata/resourceVersion', value: resourceVersion },
+        { op: 'test', path: `/spec/attachmentTickets/${key}/id`, value: ticket },
+        { op: 'remove', path: `/spec/attachmentTickets/${key}` },
+      ],
+    });
+    return { applied: true, message: `Removed completed backup attachment ticket ${ticket}.`, automaticWrites: 0 };
   }
 
   private async buildImage(plan: BuildImagePlan): Promise<ExecutionResult> {

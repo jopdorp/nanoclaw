@@ -200,8 +200,8 @@ export async function startKubernetesRemediation(
     t1: new Set(config.t1),
   });
   if (helm) {
-    const remind = () => {
-      const stale = helm.staleDrift();
+    const remind = async () => {
+      const stale = await helm.staleDrift();
       if (stale)
         void notifyApprover(
           config.matrixApproverUserId,
@@ -210,8 +210,8 @@ export async function startKubernetesRemediation(
     };
     // The first reminder waits for the Matrix adapter to come up.
     const first = setTimeout(() => {
-      remind();
-      const daily = setInterval(remind, DAY).unref();
+      void remind();
+      const daily = setInterval(() => void remind(), DAY).unref();
       signal.addEventListener('abort', () => clearInterval(daily));
     }, 60_000).unref();
     signal.addEventListener('abort', () => clearTimeout(first));

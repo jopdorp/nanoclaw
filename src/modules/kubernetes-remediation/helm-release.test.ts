@@ -142,6 +142,15 @@ it('a helm result that differs from the recorded patch rolls back and pushes not
   expect(commits()).toBe('1');
 });
 
+it('resolves recorded Helm drift once live matches again', async () => {
+  const { dir, executor } = fixture('1.27.0', { spec: { replicas: 1 } });
+  const file = path.join(dir, 'memory/open-items/helm-drift-gitea--gitea.md');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `- 2026-10-22T00:00:00.000Z plan ${randomUUID()} Deployment/gitea replicas 1\n`);
+  expect(await executor.staleDrift()).toBe('');
+  expect(fs.readFileSync(file, 'utf8')).toContain('by live state check');
+});
+
 const deployment = (tag: string) => ({
   apiVersion: 'apps/v1',
   kind: 'Deployment',

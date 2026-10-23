@@ -14,6 +14,7 @@ export type KnownKind =
   | 'Pod'
   /** A Longhorn volume, longhorn.io/v1beta2. */
   | 'Volume'
+  | 'VolumeAttachment'
   | 'Snapshot';
 
 export interface TargetRef {
@@ -76,6 +77,10 @@ export interface StorageDeletePlan extends PlanBase {
 /** A Longhorn snapshot of `volume`; never one a backup references. */
 export interface SnapshotDeletePlan extends PlanBase {
   operation: { type: 'delete-snapshot'; volume: string };
+}
+
+export interface AttachmentTicketRemovePlan extends PlanBase {
+  operation: { type: 'remove-attachment-ticket'; ticket: string };
 }
 
 /** Creates or replaces the target Secret on the cluster only; its values are never echoed. */
@@ -147,6 +152,7 @@ export type RemediationPlan =
   | JobDeletePlan
   | StorageDeletePlan
   | SnapshotDeletePlan
+  | AttachmentTicketRemovePlan
   | SecretWritePlan
   | HelmValuesPlan
   | HelmSyncPlan

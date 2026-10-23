@@ -24,6 +24,17 @@ function base(namespace = 'gitea') {
 }
 
 describe('Kubernetes remediation policy', () => {
+  it('only accepts backup-controller attachment tickets', () => {
+    const target = { ...base('longhorn-system').target, apiVersion: 'longhorn.io/v1beta2', kind: 'VolumeAttachment' };
+    const proposed = (ticket: string) => ({
+      ...base('longhorn-system'),
+      target,
+      operation: { type: 'remove-attachment-ticket', ticket },
+    });
+    expect(validateRemediationPlan(proposed('backup-controller-backup-one'), now).lane).toBe('C');
+    expect(() => validateRemediationPlan(proposed('csi-one'), now)).toThrow('only backup-controller-*');
+  });
+
   it('accepts a Lane A same-repository digest update with the two-write recovery cap', () => {
     const validated = validateRemediationPlan(
       {

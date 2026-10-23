@@ -29,6 +29,7 @@ const API_VERSIONS: Record<KnownKind, string> = {
   Secret: 'v1',
   Pod: 'v1',
   Volume: 'longhorn.io/v1beta2',
+  VolumeAttachment: 'longhorn.io/v1beta2',
   Snapshot: 'longhorn.io/v1beta2',
 };
 const WORKLOAD_KINDS = ['Deployment', 'StatefulSet', 'DaemonSet'];
@@ -242,6 +243,13 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     exactKeys(operation, ['type', 'volume'], 'plan.operation');
     return { ...base, operation: { type, volume: string(operation.volume, 'plan.operation.volume', 253) } };
   }
+  if (type === 'remove-attachment-ticket') {
+    exactKeys(operation, ['type', 'ticket'], 'plan.operation');
+    const ticket = string(operation.ticket, 'plan.operation.ticket', 253);
+    if (!ticket.startsWith('backup-controller-'))
+      throw new Error('only backup-controller-* attachment tickets with a completed Backup may be removed');
+    return { ...base, operation: { type, ticket } };
+  }
   if (type === 'helm-uninstall') {
     exactKeys(operation, ['type'], 'plan.operation');
     return { ...base, operation: { type } };
@@ -319,7 +327,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     return { ...base, operation: { type, dockerfile, context, image } };
   }
   throw new Error(
-    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, write-secret, pod-exec, manifest-edit, manifest-sync, repo-write or build-image',
+    'plan.operation.type is unsupported; use patch-image, restart, scale, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, remove-attachment-ticket, write-secret, pod-exec, manifest-edit, manifest-sync, repo-write or build-image',
   );
 }
 
@@ -531,6 +539,9 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
   } else if (plan.operation.type === 'delete-snapshot') {
     if (plan.target.kind !== 'Snapshot' || namespace !== 'longhorn-system')
       throw new Error('delete-snapshot targets a Longhorn Snapshot in longhorn-system');
+  } else if (plan.operation.type === 'remove-attachment-ticket') {
+    if (plan.target.kind !== 'VolumeAttachment' || namespace !== 'longhorn-system')
+      throw new Error('remove-attachment-ticket targets a Longhorn VolumeAttachment in longhorn-system');
   } else if (plan.operation.type === 'pod-exec') {
     if (plan.target.kind !== 'Pod') throw new Error('pod-exec requires a Pod');
   } else if (plan.operation.type === 'build-image') {

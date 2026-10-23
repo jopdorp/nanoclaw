@@ -38,7 +38,60 @@ function plan(namespace: 'wireguard-home' | 'kube-system' | 'gitea') {
   };
 }
 
+function attachmentTicketFixture(state = 'Completed') {
+  const ticket = 'backup-controller-backup-one';
+  const target = {
+    ...plan('kube-system').target,
+    apiVersion: 'longhorn.io/v1beta2',
+    kind: 'VolumeAttachment',
+    namespace: 'longhorn-system',
+    name: 'vol',
+  };
+  const validated = validateRemediationPlan({
+    ...plan('kube-system'),
+    target,
+    operation: { type: 'remove-attachment-ticket', ticket },
+  });
+  const request = vi.fn(async (path: string, options?: unknown) =>
+    options
+      ? {}
+      : path.endsWith('/backups/backup-one')
+        ? { metadata: { labels: { 'backup-volume': 'vol' } }, status: { state } }
+        : {
+            metadata: { uid: 'uid-1', resourceVersion: '42' },
+            spec: { attachmentTickets: { [ticket]: { id: ticket, type: 'backup-controller' } } },
+          },
+  );
+  const client = { request, watch: vi.fn() };
+  const executor = new GatewayRemediationExecutor(client, client, { ready: vi.fn() }, undefined, { client });
+  const grant = {
+    approvalRowId: '',
+    approverUserId: 'standing',
+    planId: validated.plan.id,
+    planDigest: validated.digest,
+  };
+  return { executor, grant, request, ticket, validated };
+}
+
 describe('gateway remediation executor', () => {
+  it('removes exactly a completed Backup attachment ticket through break-glass', async () => {
+    const { executor, grant, request, ticket, validated } = attachmentTicketFixture();
+    await executor.execute(validated, grant);
+    expect(request).toHaveBeenLastCalledWith(
+      expect.stringContaining('/volumeattachments/vol'),
+      expect.objectContaining({
+        contentType: 'application/json-patch+json',
+        body: expect.arrayContaining([{ op: 'remove', path: `/spec/attachmentTickets/${ticket}` }]),
+      }),
+    );
+  });
+
+  it('refuses a backup attachment ticket until its Backup is completed', async () => {
+    const { executor, grant, request, validated } = attachmentTicketFixture('InProgress');
+    await expect(executor.execute(validated, grant)).rejects.toThrow('is not completed');
+    expect(request.mock.calls.some(([, options]) => options)).toBe(false);
+  });
+
   it('removes stale annotations and temporary bindings before startup', async () => {
     const request = vi.fn(async (path: string, options?: { method?: string }) => {
       if (options) return {};

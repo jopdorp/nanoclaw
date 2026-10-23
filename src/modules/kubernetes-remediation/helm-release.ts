@@ -866,7 +866,7 @@ export class HelmReleaseExecutor {
       `Orfie: ${plan.reason.split('\n', 1)[0]}`,
       'helm matches live',
     );
-    if (result.message.includes('pushed ')) this.resolveDrift(ns, release, plan.id);
+    if (result.message.includes('pushed ')) this.resolveDrift(ns, release, `helm-values plan ${plan.id}`);
     return result;
   }
 
@@ -944,21 +944,24 @@ export class HelmReleaseExecutor {
     return `temporary; Helm reconciliation pending (memory/open-items/${path.basename(file)}).`;
   }
 
-  /** One reminder line per unresolved drift item older than a day, or '' when there is none. */
-  staleDrift(now = Date.now()): string {
+  /** Resolves matching drift, then returns one reminder per unresolved item older than a day. */
+  async staleDrift(now = Date.now()): Promise<string> {
     const dir = path.join(this.options.memoryDir, 'open-items');
     if (!fs.existsSync(dir)) return '';
-    return fs
-      .readdirSync(dir)
-      .filter((name) => name.startsWith('helm-drift-'))
-      .flatMap((name) => {
-        const text = fs.readFileSync(path.join(dir, name), 'utf8');
-        const since = Date.parse(ENTRY_RE.exec(text.split('\n').find((line) => ENTRY_RE.test(line)) ?? '')?.[1] ?? '');
-        return !text.includes('\n- resolved ') && since < now - DAY
-          ? [`${name} open since ${new Date(since).toISOString()}`]
-          : [];
-      })
-      .join('\n');
+    const stale: string[] = [];
+    for (const name of fs.readdirSync(dir).filter((entry) => entry.startsWith('helm-drift-'))) {
+      const text = fs.readFileSync(path.join(dir, name), 'utf8');
+      if (text.includes('\n- resolved ')) continue;
+      const match = /^helm-drift-([a-z0-9-]+)--([a-z0-9-]+)\.md$/.exec(name);
+      const diff = match ? await this.driftDiff(match[2], match[1]).catch(() => undefined) : undefined;
+      if (diff?.length === 0) {
+        this.resolveDrift(match![1], match![2], 'live state check');
+        continue;
+      }
+      const since = Date.parse(ENTRY_RE.exec(text.split('\n').find((line) => ENTRY_RE.test(line)) ?? '')?.[1] ?? '');
+      if (since < now - DAY) stale.push(`${name} open since ${new Date(since).toISOString()}`);
+    }
+    return stale.join('\n');
   }
 
   private chartRef({ chart, repo }: HelmChart): string[] {
@@ -1128,9 +1131,8 @@ export class HelmReleaseExecutor {
     return diff;
   }
 
-  private resolveDrift(ns: string, release: string, planId: string): void {
+  private resolveDrift(ns: string, release: string, by: string): void {
     const file = this.driftFile(ns, release);
-    if (fs.existsSync(file))
-      fs.appendFileSync(file, `- resolved ${new Date().toISOString()} by helm-values plan ${planId}\n`);
+    if (fs.existsSync(file)) fs.appendFileSync(file, `- resolved ${new Date().toISOString()} by ${by}\n`);
   }
 }
