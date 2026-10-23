@@ -2,7 +2,7 @@
 ARG AGENT_IMAGE
 ARG GIT_COMMIT
 ARG GIT_TREE
-FROM node:22-slim AS build
+FROM node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS build
 WORKDIR /opt/nanoclaw
 RUN corepack enable && corepack prepare pnpm@10.34.5 --activate
 # The helm-release tests drive a real git repo.
