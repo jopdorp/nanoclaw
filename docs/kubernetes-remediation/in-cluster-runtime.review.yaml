@@ -77,6 +77,17 @@ spec:
         app: nanoclaw-remediator-orchestrator
     spec:
       serviceAccountName: nanoclaw-orchestrator
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector: { matchExpressions: [{ key: app, operator: In, values: [onecli, qdrant] }] }
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector: { matchExpressions: [{ key: app.kubernetes.io/name, operator: In, values: [vmsingle] }] }
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -122,6 +133,8 @@ spec:
             - { name: CONTAINER_IMAGE, value: 'gitea.claw.jopdorp.nl/cluster/nanoclaw/remediation-agent@sha256:2d8f082d87d1af490f4355a587abc784adc41d364237164f0bfcbf88f7f3450a' }
             - { name: NANOCLAW_KUBERNETES_NAMESPACE, value: nanoclaw-remediator }
             - { name: NANOCLAW_KUBERNETES_SERVICE_ACCOUNT, value: nanoclaw-session }
+            - { name: NANOCLAW_KUBERNETES_MEMORY_REQUEST, value: 512Mi }
+            - { name: NANOCLAW_KUBERNETES_MEMORY_LIMIT, value: 1536Mi }
             # RWO state volume: sessions co-locate with the host. Drop with an RWX state class.
             # `onecli run` (remediation k8s calls) defaults to the cloud API without this.
             - { name: ONECLI_API_HOST, value: http://onecli.nanoclaw-remediator.svc:10254 }
@@ -166,7 +179,7 @@ spec:
             # Channel adapters read creds from /opt/nanoclaw/.env, not process env.
             - { name: dotenv, mountPath: /opt/nanoclaw/.env, subPath: .env, readOnly: true }
           resources:
-            requests: { cpu: 250m, memory: 512Mi }
+            requests: { cpu: 250m, memory: 384Mi }
             limits: { cpu: '2', memory: 2Gi }
       # A helm --wait runs up to ten minutes; shutdown waits for the plan in flight.
       terminationGracePeriodSeconds: 660

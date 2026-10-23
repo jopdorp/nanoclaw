@@ -187,6 +187,8 @@ export interface KubernetesDriverOptions extends MountPolicy {
   /** Service DNS name the session's networkAccess endpoint resolves to (the --add-host equivalent). */
   gatewayHost?: string;
   imagePullPolicy?: 'Always' | 'IfNotPresent' | 'Never';
+  memoryRequest?: string;
+  memoryLimit?: string;
   persistentVolumeMounts: KubernetesPersistentVolumeMount[];
   bakedSurfaces: KubernetesBakedSurface[];
   api?: KubernetesApi;
@@ -439,7 +441,7 @@ export function kubernetesJobForSession(
       volumes.push({ name: shmName, emptyDir: { medium: 'Memory', sizeLimit: `${spec.resources.shmSizeMb}Mi` } });
       volumeMounts.push({ name: shmName, mountPath: '/dev/shm' });
     }
-    return podContainer(container, spec, volumeMounts, options.imagePullPolicy ?? 'IfNotPresent');
+    return podContainer(container, spec, volumeMounts, options);
   });
   return {
     apiVersion: 'batch/v1',
@@ -501,7 +503,7 @@ function podContainer(
   container: ContainerSpec,
   spec: SessionSpec,
   volumeMounts: Array<Record<string, unknown>>,
-  imagePullPolicy: 'Always' | 'IfNotPresent' | 'Never',
+  options: KubernetesDriverOptions,
 ): Record<string, unknown> {
   const env = Object.entries({ ...container.env, ...(container.contributedEnv ?? {}) }).map(([name, value]) => ({
     name,
@@ -510,7 +512,7 @@ function podContainer(
   return {
     name: dnsLabel(container.role),
     image: container.image,
-    imagePullPolicy,
+    imagePullPolicy: options.imagePullPolicy ?? 'IfNotPresent',
     ...(container.command ? { command: container.command } : {}),
     ...(container.args ? { args: container.args } : {}),
     env,
@@ -520,8 +522,8 @@ function podContainer(
       capabilities: { drop: ['ALL'] },
     },
     resources: {
-      requests: resourceRequirements(spec),
-      limits: resourceRequirements(spec),
+      requests: { ...resourceRequirements(spec), ...(options.memoryRequest ? { memory: options.memoryRequest } : {}) },
+      limits: { ...resourceRequirements(spec), ...(options.memoryLimit ? { memory: options.memoryLimit } : {}) },
     },
     volumeMounts,
   };
@@ -683,6 +685,8 @@ export function kubernetesOptionsFromEnvironment(
   const serviceAccountName = env.NANOCLAW_KUBERNETES_SERVICE_ACCOUNT;
   const nodeName = env.NANOCLAW_KUBERNETES_NODE_NAME;
   const gatewayHost = env.NANOCLAW_KUBERNETES_GATEWAY_HOST;
+  const memoryRequest = env.NANOCLAW_KUBERNETES_MEMORY_REQUEST;
+  const memoryLimit = env.NANOCLAW_KUBERNETES_MEMORY_LIMIT;
   if (!dnsSubdomain(namespace)) throw new Error('NANOCLAW_KUBERNETES_NAMESPACE must be a DNS subdomain');
   if (gatewayHost && !dnsSubdomain(gatewayHost)) throw new Error('NANOCLAW_KUBERNETES_GATEWAY_HOST must be a DNS name');
   if (nodeName && !dnsSubdomain(nodeName)) throw new Error('NANOCLAW_KUBERNETES_NODE_NAME must be a DNS subdomain');
@@ -695,6 +699,8 @@ export function kubernetesOptionsFromEnvironment(
     ...(serviceAccountName ? { serviceAccountName } : {}),
     ...(nodeName ? { nodeName } : {}),
     ...(gatewayHost ? { gatewayHost } : {}),
+    ...(memoryRequest ? { memoryRequest } : {}),
+    ...(memoryLimit ? { memoryLimit } : {}),
     imagePullPolicy: imagePullPolicy as KubernetesDriverOptions['imagePullPolicy'],
     persistentVolumeMounts: configured.persistentVolumeMounts ?? [],
     bakedSurfaces: configured.bakedSurfaces ?? [],
