@@ -139,6 +139,8 @@ function describe({ plan }: ValidatedPlan, full: boolean): string {
         : `exec in ${where}: ${op.command.join(' ')}`;
     case 'build-image':
       return `build ${op.image} from ${op.dockerfile}`;
+    case 'remove-attachment-ticket':
+      return `remove attachment ticket ${op.ticket} from ${target.kind} ${target.name}`;
     default:
       return `delete ${target.kind} ${where}`;
   }
