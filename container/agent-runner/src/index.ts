@@ -130,7 +130,7 @@ async function main(): Promise<void> {
     model: config.model,
     effort: config.effort,
     speed: config.speed,
-    tools: guard ? [] : undefined,
+    onlyTools: guard ? ['mcp__nanoclaw__report_finding'] : undefined,
   });
   registerProviderMemorySessionHook(providerName, provider, MEMORY_SESSION_HOOK);
 

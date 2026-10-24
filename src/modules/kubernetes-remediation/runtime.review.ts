@@ -16,11 +16,11 @@ import { unguarded } from '../../guard/index.js';
 import { onOneCliAgentEnsured } from '../../gateway-providers/onecli.js';
 import { resolveGroupFolderPath } from '../../group-folder.js';
 import { requestWake } from '../../request-wake.js';
-import { resolveSession, writeSessionMessage } from '../../session-manager.js';
+import { destroySessionMailbox, resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
 import { registerWebhookHandler } from '../../webhook-server.js';
 import { log } from '../../log.js';
-import { killContainer } from '../../container-runner.js';
-import { getSessionsByAgentGroup } from '../../db/sessions.js';
+import { isContainerRunning, killContainer } from '../../container-runner.js';
+import { deleteSession, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { getDestinations } from '../agent-to-agent/db/agent-destinations.js';
 import { trustCreateAgent } from '../agent-to-agent/guard.js';
 import { notifyAgent } from '../approvals/index.js';
@@ -225,13 +225,23 @@ export async function startKubernetesRemediation(
   }
 
   const sink = (incident: RemediationIncident) => enqueueIncident(config.agentGroupId, incident);
-  await ensureGuardGroup().catch((err: unknown) =>
-    log.error('Guard group setup failed; webhook incidents reach Orfie with the host fields only', { err }),
+  const guarded = await ensureGuardGroup().then(
+    () => true,
+    (err: unknown) => {
+      log.error('GUARD DISABLED: its group setup failed, webhook incidents reach Orfie with the host fields only', {
+        err,
+      });
+      return false;
+    },
   );
+  // Sessions a stopped host left mid-classification; their incidents come back through recover.
+  for (const s of await getSessionsByAgentGroup(GUARD_AGENT_GROUP_ID)) endGuardSession(s.id);
   const guard = createIncidentGuard({
     dir: path.join(DATA_DIR, 'kubernetes-remediation-raw'),
-    ask: (text) => enqueue(GUARD_AGENT_GROUP_ID, 'kubernetes-remediation-guard', text),
-    wake: (incident, note) => enqueueIncident(config.agentGroupId, incident, note),
+    available: guarded,
+    ask: (ref, text) => enqueue(GUARD_AGENT_GROUP_ID, 'kubernetes-remediation-guard', text, ref),
+    end: endGuardSession,
+    wake: (incident, note, data) => enqueueIncident(config.agentGroupId, incident, note, data),
   });
   await guard.recover();
   registerDeliveryAction(
@@ -325,16 +335,18 @@ async function enqueueIncident(
   agentGroupId: string,
   incident: Pick<RemediationIncident, 'severity'>,
   note?: string,
+  data?: string,
 ): Promise<void> {
   await enqueue(
     agentGroupId,
     'kubernetes-remediation-trigger',
-    `${incident.severity === 'resolved' ? 'This Kubernetes incident cleared; close what you opened for it.' : 'Investigate this Kubernetes incident. Read only until you submit a typed remediation proposal.'}${note ? ` ${note}` : ''}\n${JSON.stringify(incident)}`,
+    `${incident.severity === 'resolved' ? 'This Kubernetes incident cleared; close what you opened for it.' : 'Investigate this Kubernetes incident. Read only until you submit a typed remediation proposal.'}${note ? ` ${note}` : ''}\n${JSON.stringify(incident)}${data ? `\n${data}` : ''}`,
   );
 }
 
-async function enqueue(agentGroupId: string, sender: string, text: string): Promise<void> {
-  const { session } = await resolveSession(agentGroupId, null, null, 'agent-shared');
+/** A thread gets its own fresh session; without one the group's shared session takes the message. */
+async function enqueue(agentGroupId: string, sender: string, text: string, thread?: string): Promise<string> {
+  const { session } = await resolveSession(agentGroupId, null, thread ?? null, thread ? 'per-thread' : 'agent-shared');
   await writeSessionMessage(agentGroupId, session.id, {
     id: `k8s-${sender}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
@@ -346,4 +358,17 @@ async function enqueue(agentGroupId: string, sender: string, text: string): Prom
   });
   const fresh = await import('../../db/sessions.js').then(({ getSession }) => getSession(session.id));
   if (fresh) await requestWake(fresh, 'inbound-message');
+  return session.id;
+}
+
+/** A guard session lives for one incident, so no payload can colour another verdict. */
+function endGuardSession(sessionId: string): void {
+  const forget = () =>
+    void (async () => {
+      await destroySessionMailbox(GUARD_AGENT_GROUP_ID, sessionId);
+      fs.rmSync(sessionDir(GUARD_AGENT_GROUP_ID, sessionId), { recursive: true, force: true });
+      await deleteSession(sessionId);
+    })().catch((err: unknown) => log.warn('Removing a guard session failed', { sessionId, err }));
+  if (isContainerRunning(sessionId)) killContainer(sessionId, 'its incident is classified', forget);
+  else forget();
 }

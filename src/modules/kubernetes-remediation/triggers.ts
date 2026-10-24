@@ -20,7 +20,7 @@ export function record(value: unknown): Record<string, unknown> | null {
 }
 
 export function text(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
+  return typeof value === 'string' && value.length > 0 ? value.slice(0, 1000) : null;
 }
 
 export function trivyIncident(value: unknown): RemediationIncident | null {

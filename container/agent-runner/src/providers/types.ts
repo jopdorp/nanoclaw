@@ -92,8 +92,8 @@ export interface ProviderOptions {
    * keeps the provider default; a tier it did not declare never reaches it.
    */
   speed?: ProviderSpeed;
-  /** Built-in tools; absent keeps the provider's full set, `[]` leaves only MCP tools. */
-  tools?: string[];
+  /** The complete tool list: no built-ins and no settings files beyond it. Absent keeps the full set. */
+  onlyTools?: string[];
 }
 
 export interface QueryInput {
