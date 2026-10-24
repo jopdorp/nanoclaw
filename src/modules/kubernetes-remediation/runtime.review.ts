@@ -37,6 +37,7 @@ import { listGiteaRunners } from './gitea-runners.js';
 import { gitWithDeployKey, helmThroughOneCli, HelmReleaseExecutor, type HelmChart } from './helm-release.js';
 import { createAlertWebhookHandlers, runHealthWatch } from './health.js';
 import { createIncidentGuard, ensureGuardGroup, GUARD_AGENT_GROUP_ID } from './incident-guard.js';
+import { createLogReader } from './log-reader.js';
 import { readGrants, registerStandingApprovals } from './standing.js';
 import { createFalcoWebhookHandler, runTrivyWatchers } from './triggers.js';
 import { createUpdateChecker } from './updates.js';
@@ -252,6 +253,29 @@ export async function startKubernetesRemediation(
       if (reply) await notifyAgent(session, reply);
     },
     unguarded('the guard classifies an incident; the host validates the finding before Orfie sees it'),
+  );
+  const logs = createLogReader({
+    pods: executorClient,
+    available: guarded,
+    ask: (ref, text) => enqueue(GUARD_AGENT_GROUP_ID, 'kubernetes-remediation-guard', text, ref),
+    end: endGuardSession,
+  });
+  registerDeliveryAction(
+    'read_logs',
+    async (content, session) => {
+      if (await team(session.agent_group_id))
+        await notifyAgent(session, await logs.read(content, (text) => notifyAgent(session, text)));
+    },
+    unguarded('read-only: pod logs and VictoriaLogs, outside text masked or fenced'),
+  );
+  registerDeliveryAction(
+    'guard_report_verdicts',
+    async (content, session) => {
+      if (session.agent_group_id !== GUARD_AGENT_GROUP_ID) return;
+      const reply = logs.verdicts(content.verdicts);
+      if (reply) await notifyAgent(session, reply);
+    },
+    unguarded('the guard classifies masked log values; the host keeps only ids it handed out'),
   );
   registerDeliveryAction(
     'open_incident_payload',
