@@ -3,14 +3,17 @@
  * The GPU instance (:8188) has one 8 GB card: the quick SD 1.5 workflow fits
  * beside a small LLM, every other kind unloads the LLM first and frees the GPU
  * after. Text personas use the CPU-only instance (:8189), which never touches the
- * GPU. Workflows live in the GPU instance's user data as nanoclaw/<kind>.json,
+ * GPU. Workflows live in each instance's user data as nanoclaw/<kind>.json,
  * with %PROMPT% (and %LYRICS% for music) where the text goes. Nothing should
  * outlive the send: images come back over the websocket instead of being saved,
- * the history entry is deleted, and the caller deletes the local file.
+ * a saved video or song is deleted on the box by the host, the history entry is
+ * deleted, and the caller deletes the local file.
  */
 import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
+
+import { writeMessageOut } from '../db/messages-out.js';
 
 const host = process.env.LOCAL_AI_HOST;
 const ollama = `http://${host}:11434`;
@@ -25,7 +28,8 @@ async function json(url: string, body?: unknown): Promise<any> {
 }
 
 export async function render(kind: string, prompt: string, lyrics = '', cpu = false): Promise<string> {
-  const template = await fetch(`http://${host}:8188/api/userdata/nanoclaw%2F${kind}.json`);
+  const comfy = `http://${host}:${cpu ? 8189 : 8188}`;
+  const template = await fetch(`${comfy}/api/userdata/nanoclaw%2F${kind}.json`);
   if (!template.ok) throw new Error(`no ${kind} workflow on the box`);
   const text = (value: string) => JSON.stringify(value).slice(1, -1);
   const graph = JSON.parse(
@@ -34,11 +38,13 @@ export async function render(kind: string, prompt: string, lyrics = '', cpu = fa
   for (const node of Object.values<any>(graph)) {
     for (const key of ['seed', 'noise_seed'])
       if (typeof node.inputs?.[key] === 'number') node.inputs[key] = Math.floor(Math.random() * 2 ** 32);
-    if (node.class_type === 'SaveImage' || node.class_type === 'PreviewImage')
+    if (
+      (kind === 'quick' || kind === 'image') &&
+      (node.class_type === 'SaveImage' || node.class_type === 'PreviewImage')
+    )
       Object.assign(node, { class_type: 'SaveImageWebsocket', inputs: { images: node.inputs.images } });
   }
 
-  const comfy = `http://${host}:${cpu ? 8189 : 8188}`;
   const loaded: { name: string; size_vram: number }[] = cpu ? [] : ((await json(`${ollama}/api/ps`)).models ?? []);
   // SD 1.5 needs ~3 GB, so it runs beside the 4B chat model but not beside anything bigger.
   if (cpu || (kind === 'quick' && loaded.every((m) => m.size_vram < QUICK_BESIDE_BYTES)))
@@ -88,6 +94,13 @@ async function run(comfy: string, graph: Record<string, any>, kind: string): Pro
       const query = new URLSearchParams({ filename: file.filename, subfolder: file.subfolder ?? '', type: file.type });
       const out = path.join('/workspace/agent/media', file.filename);
       fs.writeFileSync(out, Buffer.from(await (await fetch(`${comfy}/view?${query}`)).arrayBuffer()));
+      // Video and audio have no websocket output, so the host removes the saved file on the box.
+      if (file.type === 'output' && !file.subfolder)
+        await writeMessageOut({
+          id: `local-media-delete-${prompt_id}`,
+          kind: 'system',
+          content: JSON.stringify({ action: 'local_media_delete', filename: file.filename }),
+        });
       return out;
     }
     throw new Error('ComfyUI took longer than 9 minutes');

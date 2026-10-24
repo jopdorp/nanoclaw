@@ -11,24 +11,31 @@
 import { execFile } from 'child_process';
 import { randomUUID } from 'crypto';
 import fs from 'fs';
+import path from 'path';
 import { promisify } from 'util';
 
 import { lookup } from '../cli/registry.js';
+import '../cli/resources/messaging-groups.js';
 import '../cli/resources/wirings.js';
+import { uploadListeners } from '../channels/matrix-crypto-store.js';
+import { DATA_DIR, LOCAL_AI_HOST } from '../config.js';
 import { getAgentGroup, getAllAgentGroups } from '../db/agent-groups.js';
 import { getContainerConfig } from '../db/container-configs.js';
+import { killContainer } from '../container-runner.js';
 import {
   createMessagingGroup,
-  deleteMessagingGroupAgent,
-  getMessagingGroupAgentByPair,
+  getMessagingGroupAgents,
+  getMessagingGroupByPlatform,
   getMessagingGroupsByAgentGroup,
 } from '../db/messaging-groups.js';
 import { registerDeliveryAction } from '../delivery.js';
 import { onOneCliAgentEnsured } from '../gateway-providers/onecli.js';
 import { unguarded } from '../guard/index.js';
 import { log } from '../log.js';
-import { personaSettings, readSettings, SETTINGS_FILE } from '../local-persona-settings.js';
-import type { AgentGroup, Session } from '../types.js';
+import { deleteSession, getSessionsByAgentGroup } from '../db/sessions.js';
+import { personaSettings, readSettings, writeSettings } from '../local-persona-settings.js';
+import { destroySessionMailbox, sessionDir } from '../session-manager.js';
+import type { AgentGroup, MessagingGroup, Session } from '../types.js';
 import { getDestinations } from './agent-to-agent/db/agent-destinations.js';
 import { trustCreateAgent } from './agent-to-agent/guard.js';
 import { notifyAgent } from './approvals/index.js';
@@ -58,14 +65,37 @@ onOneCliAgentEnsured(async (groupId) => {
   if (!res.ok) throw new Error(`OneCLI refused to clear the secrets of ${groupId}: ${res.status}`);
 });
 
-async function matrix(route: string, method = 'GET', body?: unknown): Promise<any> {
-  const res = await fetch(`${process.env.MATRIX_BASE_URL?.replace(/\/$/, '')}/_matrix/client/v3${route}`, {
-    method,
-    headers: { authorization: `Bearer ${process.env.MATRIX_ACCESS_TOKEN}`, 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`Matrix ${method} ${route.split('?')[0]}: ${res.status} ${await res.text()}`);
-  return res.json();
+class MatrixHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+async function matrix(route: string, method = 'GET', body?: unknown, admin = false): Promise<any> {
+  const api = admin ? '/_synapse/admin/v1' : '/_matrix/client/v3';
+  // Media deletion needs a server admin; that token is used for nothing else.
+  const token = admin ? process.env.MATRIX_MEDIA_ADMIN_TOKEN : process.env.MATRIX_ACCESS_TOKEN;
+  for (;;) {
+    const res = await fetch(`${process.env.MATRIX_BASE_URL?.replace(/\/$/, '')}${api}${route}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (res.status === 429) {
+      const { retry_after_ms } = (await res.json()) as { retry_after_ms?: number };
+      await new Promise((r) => setTimeout(r, retry_after_ms ?? 1000));
+      continue;
+    }
+    if (!res.ok)
+      throw new MatrixHttpError(
+        res.status,
+        `Matrix ${method} ${route.split('?')[0]}: ${res.status} ${await res.text()}`,
+      );
+    return res.json();
+  }
 }
 
 const roomOf = (platformId: string) => decodeURIComponent(platformId.slice('matrix:'.length));
@@ -78,9 +108,7 @@ export async function openLocalRoom(parentId: string, child: AgentGroup): Promis
   const now = new Date().toISOString();
   for (const admin of await getAdminsOfAgentGroup(parentId))
     await grantRole({ ...admin, agent_group_id: child.id, granted_at: now });
-  const settings = readSettings();
-  settings[child.id] = personaSettings(parentId);
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+  writeSettings({ ...readSettings(), [child.id]: personaSettings(parentId) });
   await createRoom(child);
 }
 
@@ -91,7 +119,9 @@ async function createRoom(group: AgentGroup): Promise<void> {
     preset: 'trusted_private_chat',
     initial_state: [
       { type: 'nanoclaw.chat', state_key: '', content: {} },
-      { type: 'm.room.encryption', state_key: '', content: { algorithm: 'm.megolm.v1.aes-sha2' } },
+      ...(process.env.MATRIX_RECOVERY_KEY
+        ? [{ type: 'm.room.encryption', state_key: '', content: { algorithm: 'm.megolm.v1.aes-sha2' } }]
+        : []),
     ],
     invite: await matrixUsers(group.id),
   });
@@ -118,25 +148,31 @@ async function createRoom(group: AgentGroup): Promise<void> {
   );
 }
 
-async function localRooms(agentGroupId: string): Promise<string[]> {
-  return (await getMessagingGroupsByAgentGroup(agentGroupId))
-    .filter((mg) => mg.channel_type === 'matrix')
-    .map((mg) => roomOf(mg.platform_id));
+/** Only rooms the host made for the persona (marked nanoclaw.chat), so an admin-wired room is never wiped. */
+async function localRooms(agentGroupId: string): Promise<{ mg: MessagingGroup; room: string }[]> {
+  const rooms = [];
+  for (const mg of await getMessagingGroupsByAgentGroup(agentGroupId)) {
+    if (mg.channel_type !== 'matrix') continue;
+    const room = roomOf(mg.platform_id);
+    const marked = await matrix(`/rooms/${encodeURIComponent(room)}/state/nanoclaw.chat`).catch((err) => {
+      if (err instanceof MatrixHttpError && err.status === 404) return null;
+      throw err;
+    });
+    if (marked) rooms.push({ mg, room });
+  }
+  return rooms;
 }
 
-/** Redacts every message older than the persona's lifetime; pages back until it meets one redacted earlier. */
+/** Redacts every message older than the cutoff, paging back to the start so a failed earlier sweep is caught up. */
 async function redactExpired(room: string, lifetimeMinutes: number): Promise<void> {
   const cutoff = Date.now() - lifetimeMinutes * 60_000;
   const encoded = encodeURIComponent(room);
   for (let from = ''; ; ) {
     const page = await matrix(`/rooms/${encoded}/messages?dir=b&limit=100${from && `&from=${from}`}`);
-    let reachedRedacted = false;
-    for (const event of page.chunk as { event_id: string; type: string; origin_server_ts: number; content: object }[]) {
-      if (event.origin_server_ts > cutoff || !REDACTABLE.has(event.type)) continue;
-      if (Object.keys(event.content).length === 0) reachedRedacted = true;
-      else await matrix(`/rooms/${encoded}/redact/${encodeURIComponent(event.event_id)}/${randomUUID()}`, 'PUT', {});
-    }
-    if (reachedRedacted || !page.end || page.chunk.length === 0) return;
+    for (const event of page.chunk as { event_id: string; type: string; origin_server_ts: number; content: object }[])
+      if (event.origin_server_ts <= cutoff && REDACTABLE.has(event.type) && Object.keys(event.content).length > 0)
+        await matrix(`/rooms/${encoded}/redact/${encodeURIComponent(event.event_id)}/${randomUUID()}`, 'PUT', {});
+    if (!page.end || page.chunk.length === 0) return;
     from = page.end;
   }
 }
@@ -148,14 +184,57 @@ async function nameBot(room: string, name: string): Promise<void> {
   if (member.displayname !== name) await matrix(route, 'PUT', { ...member, displayname: name });
 }
 
+const MEDIA_FILE = path.join(DATA_DIR, 'local-media.json');
+const readMedia = (): Record<string, { mxc: string; ts: number }[]> =>
+  fs.existsSync(MEDIA_FILE) ? JSON.parse(fs.readFileSync(MEDIA_FILE, 'utf8')) : {};
+
+uploadListeners.push((room, mxc) => {
+  void (async () => {
+    const mg = await getMessagingGroupByPlatform('matrix', `matrix:${encodeURIComponent(room)}`);
+    const wirings = mg ? await getMessagingGroupAgents(mg.id) : [];
+    if (!(await Promise.all(wirings.map((w) => isLocal(w.agent_group_id)))).some(Boolean)) return;
+    const media = readMedia();
+    (media[room] ??= []).push({ mxc, ts: Date.now() });
+    fs.writeFileSync(MEDIA_FILE, JSON.stringify(media));
+  })();
+});
+
+/** Deletes the bot's uploads to the room from before the cutoff, and every cached copy of remote media (his). */
+async function purgeMedia(room: string, cutoff: number): Promise<void> {
+  const media = readMedia();
+  for (const { mxc } of (media[room] ?? []).filter((m) => m.ts <= cutoff))
+    await matrix(`/media/${mxc.slice('mxc://'.length)}`, 'DELETE', undefined, true);
+  media[room] = (media[room] ?? []).filter((m) => m.ts > cutoff);
+  fs.writeFileSync(MEDIA_FILE, JSON.stringify(media));
+  await matrix(`/purge_media_cache?before_ts=${cutoff}`, 'POST', {}, true);
+}
+
+/** The persona starts blank: its sessions, with their history and the provider's state file, go. */
+async function forgetConversations(agentGroupId: string): Promise<void> {
+  for (const session of await getSessionsByAgentGroup(agentGroupId)) {
+    killContainer(session.id, 'its room was wiped');
+    await destroySessionMailbox(agentGroupId, session.id);
+    fs.rmSync(sessionDir(agentGroupId, session.id), { recursive: true, force: true });
+    await deleteSession(session.id);
+  }
+}
+
+async function upkeep(room: string, group: AgentGroup): Promise<void> {
+  await nameBot(room, group.name);
+  const { joined } = await matrix(`/rooms/${encodeURIComponent(room)}/joined_members`);
+  // Once he has left, the whole room goes, not just the expired part.
+  const alone = Object.keys(joined).length <= 1;
+  const lifetimeMinutes = alone ? 0 : personaSettings(group.id).lifetimeMinutes;
+  await redactExpired(room, lifetimeMinutes);
+  await purgeMedia(room, Date.now() - lifetimeMinutes * 60_000);
+  if (alone) await forgetConversations(group.id);
+}
+
 async function sweep(): Promise<void> {
   for (const group of await getAllAgentGroups()) {
     if (!(await isLocal(group.id))) continue;
-    for (const room of await localRooms(group.id))
-      await Promise.all([
-        nameBot(room, group.name),
-        redactExpired(room, personaSettings(group.id).lifetimeMinutes),
-      ]).catch((err) => log.warn('Local persona room upkeep failed', { room, err }));
+    for (const { room } of await localRooms(group.id).catch(() => []))
+      await upkeep(room, group).catch((err) => log.warn('Local persona room upkeep failed', { room, err }));
   }
 }
 if (process.env.MATRIX_ACCESS_TOKEN) setInterval(() => void sweep(), 60_000).unref();
@@ -168,6 +247,21 @@ const localPersonas = async () => {
   for (const group of all) if (await isLocal(group.id)) local.push(group);
   return local;
 };
+
+// ComfyUI has no delete API without --enable-assets, so a sent video or song is removed over Orfie's Batocera SSH.
+registerDeliveryAction(
+  'local_media_delete',
+  async (content, session) => {
+    const name = String(content.filename);
+    if (!(await isLocal(session.agent_group_id)) || !/^[\w.-]+$/.test(name)) return;
+    await exec('ssh', [
+      ...['-i', '/run/nanoclaw/batocera/id_ed25519', '-o', 'BatchMode=yes', '-o', 'HostKeyAlias=batocera'],
+      ...['-o', 'UserKnownHostsFile=/run/nanoclaw/batocera/known_hosts', `root@${LOCAL_AI_HOST}`],
+      `rm -f /userdata/ai/comfyui/output/${name}`,
+    ]);
+  },
+  unguarded('a local persona removes one ComfyUI output file by plain name'),
+);
 
 registerDeliveryAction(
   'list_personas',
@@ -192,27 +286,29 @@ registerDeliveryAction(
     if (!(await isOrfie(session))) return;
     const group = (await localPersonas()).find((g) => g.name.toLowerCase() === String(content.name).toLowerCase());
     if (!group) return notifyAgent(session, `summon_persona: no local persona called "${String(content.name)}".`);
-    const [room] = await localRooms(group.id);
-    try {
-      for (const user of await matrixUsers(group.id)) {
-        const encoded = encodeURIComponent(room);
-        const member = await matrix(`/rooms/${encoded}/state/m.room.member/${encodeURIComponent(user)}`).catch(
-          () => null,
-        );
-        if (member?.membership === 'ban') throw new Error('banned');
-        if (member?.membership !== 'join' && member?.membership !== 'invite')
-          await matrix(`/rooms/${encoded}/invite`, 'POST', { user_id: user });
+    for (const mg of await getMessagingGroupsByAgentGroup(group.id)) {
+      if (mg.channel_type !== 'matrix') continue;
+      const encoded = encodeURIComponent(roomOf(mg.platform_id));
+      try {
+        await matrix(`/rooms/${encoded}/state/nanoclaw.chat`);
+        for (const user of await matrixUsers(group.id)) {
+          const member = await matrix(`/rooms/${encoded}/state/m.room.member/${encodeURIComponent(user)}`).catch(
+            (err) => (err instanceof MatrixHttpError && err.status === 404 ? null : Promise.reject(err)),
+          );
+          if (member?.membership === 'ban') return notifyAgent(session, `${user} is banned from ${group.name}'s room.`);
+          if (member?.membership !== 'join' && member?.membership !== 'invite')
+            await matrix(`/rooms/${encoded}/invite`, 'POST', { user_id: user });
+        }
+        return notifyAgent(session, `Invited Jegor back to ${group.name}.`);
+      } catch (err) {
+        if (!(err instanceof MatrixHttpError) || (err.status !== 403 && err.status !== 404)) throw err;
+        // 404 is a room the host did not make; 403 is a room the bot is no longer in, which gets replaced.
+        if (err.status === 404) continue;
+        await lookup('messaging-groups-delete')!.handler({ id: mg.id }, { caller: 'host' });
       }
-      await notifyAgent(session, `Invited Jegor back to ${group.name}.`);
-    } catch {
-      // The room is gone or he is banned there, so the persona moves to a fresh room.
-      for (const mg of await getMessagingGroupsByAgentGroup(group.id)) {
-        const wiring = await getMessagingGroupAgentByPair(mg.id, group.id);
-        if (mg.channel_type === 'matrix' && wiring) await deleteMessagingGroupAgent(wiring.id);
-      }
-      await createRoom(group);
-      await notifyAgent(session, `${group.name} has a fresh room, Jegor is invited.`);
     }
+    await createRoom(group);
+    await notifyAgent(session, `${group.name} has a fresh room, Jegor is invited.`);
   },
   unguarded("only Orfie, and it only re-invites the persona's own admins"),
 );

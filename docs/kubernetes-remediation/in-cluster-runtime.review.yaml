@@ -166,6 +166,11 @@ spec:
                 secretKeyRef:
                   name: nanoclaw-matrix-e2ee
                   key: recovery-key
+            - name: MATRIX_MEDIA_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nanoclaw-matrix-media-admin
+                  key: token
           ports:
             - { name: webhook, containerPort: 3000 }
           readinessProbe:
