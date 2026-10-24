@@ -52,7 +52,10 @@ export async function openLocalRoom(parentId: string, child: AgentGroup): Promis
       name: child.name,
       room_version: '10',
       preset: 'trusted_private_chat',
-      initial_state: [{ type: 'nanoclaw.chat', state_key: '', content: {} }],
+      initial_state: [
+        { type: 'nanoclaw.chat', state_key: '', content: {} },
+        { type: 'm.room.encryption', state_key: '', content: { algorithm: 'm.megolm.v1.aes-sha2' } },
+      ],
       invite: admins.filter((a) => a.user_id.startsWith('matrix:')).map((a) => a.user_id.slice('matrix:'.length)),
     }),
   });

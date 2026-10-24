@@ -14,11 +14,15 @@
  *   MATRIX_DEVICE_ID            — stable device ID across restarts
  */
 import { createMatrixAdapter } from '@beeper/chat-adapter-matrix';
+import path from 'path';
+
+import { DATA_DIR } from '../config.js';
 
 import { log } from '../log.js';
 import { readEnvFile } from '../env.js';
 import type { ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
+import { encryptUploads, useDurableCryptoStore } from './matrix-crypto-store.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 /**
@@ -186,6 +190,23 @@ registerChannelAdapter('matrix', {
     }
 
     const matrixAdapter = wrapWithDmResolution(createMatrixAdapter());
+    if (process.env.MATRIX_RECOVERY_KEY) {
+      const initialize = matrixAdapter.initialize.bind(matrixAdapter);
+      matrixAdapter.initialize = async (chat) => {
+        await useDurableCryptoStore(path.join(DATA_DIR, 'matrix-crypto.v8'));
+        await initialize(chat);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const adapter = matrixAdapter as any;
+        adapter.sendRoomMessage = encryptUploads(adapter.client, adapter.sendRoomMessage.bind(adapter));
+        // Signs this device with the account's cross-signing keys from secret storage, so clients trust it;
+        // the own identity has to be downloaded first or the import is refused.
+        const crypto = adapter.client.getCrypto();
+        await crypto.userHasCrossSigningKeys(undefined, true);
+        await crypto
+          .bootstrapCrossSigning({})
+          .catch((err: unknown) => log.warn('Matrix device cross-signing failed', { err }));
+      };
+    }
     const bridge = createChatSdkBridge({
       adapter: matrixAdapter,
       concurrency: 'concurrent',
