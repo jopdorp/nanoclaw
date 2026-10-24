@@ -263,8 +263,12 @@ export async function startKubernetesRemediation(
   registerDeliveryAction(
     'read_logs',
     async (content, session) => {
-      if (await team(session.agent_group_id))
-        await notifyAgent(session, await logs.read(content, (text) => notifyAgent(session, text)));
+      if (!(await team(session.agent_group_id))) return;
+      const reply = (text: string) => notifyAgent(session, text);
+      void logs
+        .read(content, reply)
+        .then(reply)
+        .catch((err: unknown) => log.warn('Delivering read_logs failed', { err }));
     },
     unguarded('read-only: pod logs and VictoriaLogs, outside text masked or fenced'),
   );

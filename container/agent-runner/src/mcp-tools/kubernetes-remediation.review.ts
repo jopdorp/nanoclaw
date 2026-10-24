@@ -163,7 +163,6 @@ export const reportFinding: McpToolDefinition = {
   },
 };
 
-/** The guard's verdicts on masked log values; ids it was not handed are refused by the host. */
 export const reportVerdicts: McpToolDefinition = {
   tool: {
     name: 'report_verdicts',
