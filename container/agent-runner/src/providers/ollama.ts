@@ -133,6 +133,27 @@ const RULES =
   'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, showing or changing your own character or that of a persona you made, or remembering something worth keeping. Otherwise just answer. When he asks you to change your character or personality, call update_character in that same reply.';
 const VOICE =
   'This is a live voice call: answer in one to three short spoken sentences without lists, markup or emoji, and start with [tone: a few words on how to say it].';
+// The formatter names a voice message's file in the message tag, where his own text cannot put one.
+async function transcribeVoice(prompt: string): Promise<string> {
+  for (const [tag, file] of prompt.matchAll(/<message\b[^>]*\baudio="([^"]+)"[^>]*>/g)) {
+    if (!file.startsWith('/workspace/inbox/') || path.resolve(file) !== file) continue;
+    const text = await Promise.resolve()
+      .then(() =>
+        fetch(`http://${process.env.LOCAL_AI_HOST}:8190/transcribe`, {
+          method: 'POST',
+          body: fs.readFileSync(file),
+          signal: AbortSignal.timeout(60_000),
+        }),
+      )
+      .then(async (res) => (res.ok ? String(((await res.json()) as { text?: string }).text ?? '').trim() : ''))
+      .catch(() => '');
+    prompt = prompt.replace(
+      tag,
+      `${tag}${text ? `[voice message] ${text.replace(/[<>]/g, '')}` : '[voice message, could not transcribe]'}\n`,
+    );
+  }
+  return prompt;
+}
 const STATE_FILE = '/workspace/ollama-state.json';
 const MEMORY_DIR = '/workspace/agent/memory';
 // Memory files only, never the persona prompt or anything else in the group folder.
@@ -220,6 +241,7 @@ export class OllamaProvider implements AgentProvider {
   }
 
   private async *turn(state: State, system: () => string, prompt: string): AsyncGenerator<ProviderEvent> {
+    prompt = await transcribeVoice(prompt);
     if (state.promptTokens > (await this.compactAt())) await this.compact(state);
     // Replies go to whoever wrote last and any markup is dropped, small models misname or leave tags unclosed.
     const writer = [...prompt.matchAll(/<message[^>]*\bfrom="([^"]+)"/g)].pop()?.[1];

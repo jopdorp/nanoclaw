@@ -302,11 +302,15 @@ function formatSingleChat(msg: MessageInRow): string {
     : '';
 
   const fromAttr = originAttr(msg);
+  const audio = (content.attachments as any[] | undefined)?.find(
+    (a) => a.localPath && (a.type === 'audio' || String(a.mimeType ?? '').startsWith('audio/')),
+  );
+  const audioAttr = audio ? ` audio="${escapeXml(`/workspace/${audio.localPath}`)}"` : '';
   const voiceAttr = content.voice
     ? ` via="voice call"${content.emotion ? ` tone="${escapeXml(String(content.emotion))}"` : ''}`
     : '';
 
-  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}${voiceAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}${approvalsSuffix}</message>`;
+  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}${voiceAttr}${audioAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}${approvalsSuffix}</message>`;
 }
 
 /**
