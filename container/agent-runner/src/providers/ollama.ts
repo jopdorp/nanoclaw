@@ -154,6 +154,7 @@ interface State {
   messages: Message[];
   promptTokens: number;
   characterChanged?: number;
+  replyTo?: string;
 }
 
 const read = (file: string, fallback: string) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf-8') : fallback);
@@ -217,7 +218,10 @@ export class OllamaProvider implements AgentProvider {
   private async *turn(state: State, system: () => string, prompt: string): AsyncGenerator<ProviderEvent> {
     if (state.promptTokens > (await this.compactAt())) await this.compact(state);
     // Replies go to whoever wrote last and any markup is dropped, small models misname or leave tags unclosed.
-    const from = [...prompt.matchAll(/<message[^>]*\bfrom="([^"]+)"/g)].pop()?.[1];
+    const writer = [...prompt.matchAll(/<message[^>]*\bfrom="([^"]+)"/g)].pop()?.[1];
+    // Host notices (tool results) come from no destination; answer them in the room of whoever wrote before.
+    if (writer && !writer.startsWith('unknown:')) state.replyTo = writer;
+    const from = state.replyTo ?? writer;
     const wrap = (text: string) =>
       from ? `<message to="${from}">${text.replace(/<\/?message\b[^>]*>/g, '').trim()}</message>` : text;
     // A new character prompt loses to a long history unless the model is told once that it changed.
