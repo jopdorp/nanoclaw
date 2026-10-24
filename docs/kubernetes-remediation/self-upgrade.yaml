@@ -1,5 +1,5 @@
-# In-cluster deploy of Orfie's host from origin/main, out of the host's reach.
-# Secrets made by hand (DEPLOY-RUNBOOK.md, self-upgrade): orfie-ci-deploy-key, orfie-ci-registry-push, orfie-ci-matrix.
+# In-cluster deploy of Orfie's host from Gitea main, out of the host's reach.
+# Secrets made by hand (DEPLOY-RUNBOOK.md, self-upgrade): gitea-repo-read, orfie-ci-registry-push, orfie-ci-matrix.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -21,13 +21,11 @@ metadata:
   name: orfie-ci-scripts
   namespace: orfie-ci
 data:
-  known_hosts: |
-    github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
   fetch.sh: |
     set -eu
-    export GIT_SSH_COMMAND='ssh -i /key/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/scripts/known_hosts'
     git init -q /w/src && cd /w/src
-    git fetch -q --depth 1 git@github.com:jopdorp/orfie.git "${GIT_COMMIT:-main}"
+    git config credential.helper '!f() { printf "username=%s\npassword=%s\n" "$(cat /git/GIT_USERNAME)" "$(cat /git/GIT_PASSWORD)"; }; f'
+    git fetch -q --depth 1 http://gitea-http.gitea.svc:3000/cluster/orfie.git "${GIT_COMMIT:-main}"
     git checkout -q FETCH_HEAD
     git rev-parse HEAD >/w/sha
     git rev-parse 'HEAD^{tree}' >/w/tree
@@ -54,7 +52,7 @@ data:
     load
     [ "$sha" != "$deployed_sha" ] || exit 0
     case " $bad_shas " in *" $sha "*) exit 0 ;; esac
-    [ -z "$(kubectl get jobs -l orfie-ci=deploy -o jsonpath='{.items[?(@.status.active)].metadata.name}')" ] || exit 0
+    [ -z "$(kubectl get jobs -l 'orfie-ci in (build, deploy)' -o jsonpath='{.items[?(@.status.active)].metadata.name}')" ] || exit 0
     run() {
       job=orfie-ci-$1-$(echo "$sha" | cut -c1-12) template=$2
       shift 2
@@ -206,6 +204,7 @@ metadata:
   namespace: orfie-ci
 spec:
   schedule: '*/5 * * * *'
+  suspend: false
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 300
   successfulJobsHistoryLimit: 1
@@ -229,7 +228,7 @@ spec:
               volumeMounts:
                 - { name: w, mountPath: /w }
                 - { name: scripts, mountPath: /scripts }
-                - { name: key, mountPath: /key }
+                - { name: git, mountPath: /git }
           containers:
             - name: poll
               image: alpine/kubectl:1.35.0@sha256:862d86046bbcad03c252bbc10ab8bf893e7aa50aa7a20de8bfc46727dd645883
@@ -244,7 +243,7 @@ spec:
           volumes:
             - { name: w, emptyDir: { sizeLimit: 200Mi } }
             - { name: scripts, configMap: { name: orfie-ci-scripts } }
-            - { name: key, secret: { secretName: orfie-ci-deploy-key, defaultMode: 0400 } }
+            - { name: git, secret: { secretName: gitea-repo-read, defaultMode: 0400 } }
             - { name: matrix, secret: { secretName: orfie-ci-matrix, items: [{ key: token, path: token }] } }
 ---
 # Template only: orfie-ci-poll stamps a Job from it per image with the env filled in.
@@ -278,7 +277,7 @@ spec:
               volumeMounts:
                 - { name: w, mountPath: /w }
                 - { name: scripts, mountPath: /scripts }
-                - { name: key, mountPath: /key }
+                - { name: git, mountPath: /git }
           containers:
             - name: kaniko
               image: gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd80edc663df6def362cd22e79bcdf00ac53f
@@ -310,7 +309,7 @@ spec:
           volumes:
             - { name: w, emptyDir: { sizeLimit: 2Gi } }
             - { name: scripts, configMap: { name: orfie-ci-scripts } }
-            - { name: key, secret: { secretName: orfie-ci-deploy-key, defaultMode: 0400 } }
+            - { name: git, secret: { secretName: gitea-repo-read, defaultMode: 0400 } }
             - name: docker
               secret: { secretName: orfie-ci-registry-push, items: [{ key: .dockerconfigjson, path: config.json }] }
 ---
@@ -377,7 +376,7 @@ spec:
     - name: agentImage
       expression: "'^gitea[.]claw[.]jopdorp[.]nl/cluster/nanoclaw/remediation-agent@sha256:[0-9a-f]{64}$'"
     - name: isDeployment
-      expression: request.resource.resource == 'deployments' && request.operation == 'UPDATE' && request.subResource == ''
+      expression: request.resource.resource == 'deployments' && request.operation == 'UPDATE' && !has(request.subResource)
     - name: newAnn
       expression: "variables.isDeployment && has(object.spec.template.metadata.annotations) ? object.spec.template.metadata.annotations : {}"
     - name: oldAnn
