@@ -442,7 +442,7 @@ for i in 0 1; do
     || todo "could not create or rotate the ${GITEA_HOSTS[$i]} Gitea credential"
 done
 kubectl exec -n "$GITEA_NAMESPACE" "$GITEA_POD" -c gitea -- gitea admin user generate-access-token \
-  --username "$GITEA_USER" --token-name "$GITEA_WRITER_TOKEN_NAME" --scopes write:repository,read:user --raw \
+  --username "$GITEA_USER" --token-name "$GITEA_WRITER_TOKEN_NAME" --scopes write:repository,write:user,read:user --raw \
   | kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- sh -c \
       "umask 077; cat > $GITEA_TOKEN_FILE"
 GITEA_WRITER_IDS=()
