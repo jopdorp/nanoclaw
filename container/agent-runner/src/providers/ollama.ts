@@ -10,6 +10,7 @@
  */
 import fs from 'fs';
 
+import { writeMessageOut } from '../db/messages-out.js';
 import { createAgent, deleteAgent } from '../mcp-tools/agents.js';
 import { sendFile } from '../mcp-tools/core.js';
 import { render } from './ollama-media.js';
@@ -56,6 +57,25 @@ const persona = [
       return 'Updated.';
     },
   ),
+  // Another persona's folder is not mounted here, so the host does it after checking that this one made it.
+  ...(['read_persona', 'update_persona'] as const).map((action) =>
+    tool(
+      action,
+      action === 'read_persona'
+        ? 'Show the character prompt of a persona you made.'
+        : 'Replace the character prompt of a persona you made; it applies from its next reply.',
+      action === 'read_persona' ? { name: str } : { name: str, prompt: str },
+      async (a) => {
+        const id = `${action}-${Date.now()}`;
+        await writeMessageOut({
+          id,
+          kind: 'system',
+          content: JSON.stringify({ action, name: a.name, prompt: a.prompt }),
+        });
+        return 'Asked; the answer comes as a message.';
+      },
+    ),
+  ),
 ];
 const TOOLS = text
   ? [
@@ -92,7 +112,7 @@ const SLASH: Record<string, string> = text
   ? { '/image': 'quick' }
   : { '/image hq': 'image', '/image': 'quick', '/video': 'video', '/music': 'music' };
 const RULES =
-  'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, or showing or changing your own character. Otherwise just answer.';
+  'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, or showing or changing your own character or that of a persona you made. Otherwise just answer.';
 const STATE_FILE = '/workspace/ollama-state.json';
 const PERSONA_FILE = '/workspace/agent/instructions.prepend.md';
 const MAX_CHARACTER_CHARS = 8000;
@@ -131,6 +151,8 @@ export class OllamaProvider implements AgentProvider {
         tools: tools ? TOOLS.map((t) => t.spec) : undefined,
         stream: false,
         think: false,
+        // Small models ramble; a chat reply stays a chat reply.
+        options: { num_predict: 300 },
       }),
     });
     if (!res.ok) throw new Error(`Ollama ${res.status}: ${await res.text()}`);
@@ -168,10 +190,10 @@ export class OllamaProvider implements AgentProvider {
 
   private async *turn(state: State, system: () => string, prompt: string): AsyncGenerator<ProviderEvent> {
     if (state.promptTokens > (await this.compactAt())) await this.compact(state);
-    // Plain text is wrapped for whoever wrote last, so a reply never depends on the model's markup.
+    // Replies go to whoever wrote last and any markup is dropped, small models misname or leave tags unclosed.
     const from = [...prompt.matchAll(/<message[^>]*\bfrom="([^"]+)"/g)].pop()?.[1];
     const wrap = (text: string) =>
-      from && !text.includes('<message') ? `<message to="${from}">${text}</message>` : text;
+      from ? `<message to="${from}">${text.replace(/<\/?message\b[^>]*>/g, '').trim()}</message>` : text;
     state.messages.push({ role: 'user', content: prompt });
     const said = [...prompt.matchAll(/<message[^>]*>([\s\S]*?)<\/message>/g)].pop()?.[1].trim() ?? '';
     const slash = Object.keys(SLASH).find((k) => said.startsWith(k + ' '));
@@ -203,6 +225,7 @@ export class OllamaProvider implements AgentProvider {
       }
       const making = calls.some((c) => c.function.name.startsWith('generate_'));
       if (message.content || making) yield { type: 'text', text: wrap(message.content || 'making it…') };
+      let sent = false;
       for (const { function: call } of calls) {
         yield { type: 'activity' };
         const run = TOOLS.find((t) => t.spec.function.name === call.name)?.run;
@@ -210,6 +233,13 @@ export class OllamaProvider implements AgentProvider {
           ? await run({ ...call.arguments, to: from }).catch((e: Error) => `Error: ${e.message}`)
           : `Error: no tool ${call.name}`;
         state.messages.push({ role: 'tool', tool_name: call.name, content: JSON.stringify(out) });
+        sent ||= call.name.startsWith('generate_') && !JSON.stringify(out).includes('Error');
+      }
+      // The file is the reply: asked to comment on it, the model writes a fake <image> tag and then copies it forever.
+      if (sent) {
+        fs.writeFileSync(STATE_FILE, JSON.stringify(state));
+        yield { type: 'result', text: null };
+        return;
       }
     }
     yield { type: 'result', text: null };

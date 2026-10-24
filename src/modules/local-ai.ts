@@ -18,7 +18,7 @@ import { lookup } from '../cli/registry.js';
 import '../cli/resources/messaging-groups.js';
 import '../cli/resources/wirings.js';
 import { uploadListeners } from '../channels/matrix-crypto-store.js';
-import { DATA_DIR, LOCAL_AI_HOST } from '../config.js';
+import { DATA_DIR, GROUPS_DIR, LOCAL_AI_HOST } from '../config.js';
 import { getAgentGroup, getAllAgentGroups } from '../db/agent-groups.js';
 import { getContainerConfig } from '../db/container-configs.js';
 import { killContainer } from '../container-runner.js';
@@ -33,11 +33,13 @@ import { onOneCliAgentEnsured } from '../gateway-providers/onecli.js';
 import { unguarded } from '../guard/index.js';
 import { log } from '../log.js';
 import { deleteSession, getSessionsByAgentGroup } from '../db/sessions.js';
+import { PERSONA_PREPEND_FILE, readGroupPersona } from '../group-persona.js';
 import { personaSettings, readSettings, writeSettings } from '../local-persona-settings.js';
 import { destroySessionMailbox, sessionDir } from '../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../types.js';
-import { getDestinations } from './agent-to-agent/db/agent-destinations.js';
+import { deleteDestination, getDestinations } from './agent-to-agent/db/agent-destinations.js';
 import { trustCreateAgent } from './agent-to-agent/guard.js';
+import { writeDestinations } from './agent-to-agent/write-destinations.js';
 import { notifyAgent } from './approvals/index.js';
 import { getAdminsOfAgentGroup, grantRole } from './permissions/db/user-roles.js';
 
@@ -108,7 +110,8 @@ export async function openLocalRoom(parentId: string, child: AgentGroup): Promis
   const now = new Date().toISOString();
   for (const admin of await getAdminsOfAgentGroup(parentId))
     await grantRole({ ...admin, agent_group_id: child.id, granted_at: now });
-  writeSettings({ ...readSettings(), [child.id]: personaSettings(parentId) });
+  const { tools, lifetimeMinutes } = personaSettings(parentId);
+  writeSettings({ ...readSettings(), [child.id]: { tools, lifetimeMinutes, creator: parentId } });
   await createRoom(child);
 }
 
@@ -262,9 +265,25 @@ async function upkeep(room: string, group: AgentGroup): Promise<void> {
   await purgeMedia(room, Date.now() - lifetimeMinutes * 60_000);
 }
 
+/** Who made a local persona: recorded in its settings, the one place list, delete and child edits read. */
+const creatorOf = (agentGroupId: string) => readSettings()[agentGroupId]?.creator;
+
+// Copies made before the creator was recorded still have a link back and answer their creator forever; move them over.
+async function dropLinkBack(agentGroupId: string): Promise<void> {
+  const back = (await getDestinations(agentGroupId)).find(
+    (d) => d.target_type === 'agent' && /^parent(-\d+)?$/.test(d.local_name),
+  );
+  if (!back) return;
+  const settings = readSettings();
+  writeSettings({ ...settings, [agentGroupId]: { creator: back.target_id, ...settings[agentGroupId] } });
+  await deleteDestination(agentGroupId, back.local_name);
+  for (const session of await getSessionsByAgentGroup(agentGroupId)) await writeDestinations(agentGroupId, session.id);
+}
+
 async function sweep(): Promise<void> {
   for (const group of await getAllAgentGroups()) {
     if (!(await isLocal(group.id))) continue;
+    await dropLinkBack(group.id).catch((err) => log.warn('Local persona link migration failed', { err }));
     for (const { room } of await localRooms(group.id).catch(() => []))
       await upkeep(room, group).catch((err) => log.warn('Local persona room upkeep failed', { room, err }));
   }
@@ -304,16 +323,43 @@ registerDeliveryAction(
   unguarded("a local persona removes only ComfyUI outputs named with the provider's own prefix"),
 );
 
+/** A local persona called `name` that `caller` created, directly or through its own creations. */
+export async function madeBy(caller: string, name: string): Promise<AgentGroup | undefined> {
+  for (const group of await localPersonas()) {
+    if (group.name.toLowerCase() !== name.toLowerCase()) continue;
+    for (let up = creatorOf(group.id), hops = 0; up && hops < 50; up = creatorOf(up), hops++)
+      if (up === caller) return group;
+  }
+}
+
+for (const action of ['read_persona', 'update_persona'])
+  registerDeliveryAction(
+    action,
+    async (content, session) => {
+      if (!(await isLocal(session.agent_group_id))) return;
+      const child = await madeBy(session.agent_group_id, String(content.name));
+      if (!child) return notifyAgent(session, `${action}: "${String(content.name)}" is not a persona you made.`);
+      const dir = path.join(GROUPS_DIR, child.folder);
+      if (action === 'read_persona')
+        return notifyAgent(session, `${child.name}'s character:\n${readGroupPersona(dir) ?? '(empty)'}`);
+      const prompt = String(content.prompt ?? '').trim();
+      if (prompt.length > 8000) return notifyAgent(session, `update_persona: keep it under 8000 characters.`);
+      // The child can write its own folder: remove whatever is there, then create, so a planted symlink is never followed.
+      fs.rmSync(path.join(dir, PERSONA_PREPEND_FILE), { force: true });
+      fs.writeFileSync(path.join(dir, PERSONA_PREPEND_FILE), `${prompt}\n`, { flag: 'wx' });
+      await notifyAgent(session, `Updated ${child.name}'s character.`);
+    },
+    unguarded('only the character prompt of a persona the caller made'),
+  );
+
 registerDeliveryAction(
   'list_personas',
   async (_content, session) => {
     if (!(await isOrfie(session))) return;
     const lines = [];
     for (const group of await localPersonas()) {
-      const parent = (await getDestinations(group.id)).find(
-        (d) => d.target_type === 'agent' && d.local_name === 'parent',
-      );
-      const maker = parent && (await getAgentGroup(parent.target_id))?.name;
+      const creator = creatorOf(group.id);
+      const maker = creator && (await getAgentGroup(creator))?.name;
       lines.push(maker ? `${group.name} (made by ${maker})` : group.name);
     }
     await notifyAgent(session, lines.length ? lines.join('\n') : 'There are no local personas.');

@@ -83,6 +83,7 @@ vi.mock('./write-destinations.js', () => ({
 vi.mock('./db/agent-destinations.js', () => ({
   getDestinationByName: () => undefined,
   createDestination: vi.fn(),
+  deleteDestination: vi.fn(),
   hasDestination: () => true,
   normalizeName: (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
 }));
