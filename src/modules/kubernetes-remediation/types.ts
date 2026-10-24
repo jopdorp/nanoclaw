@@ -80,6 +80,11 @@ export interface BatoceraExecPlan extends PlanBase {
   operation: { type: 'batocera-exec'; command: string };
 }
 
+/** Deletes Gitea Actions runner `target.name` (its id) if it is offline; the target is {kind: "GiteaRunner"}. */
+export interface GiteaRunnerDeletePlan extends PlanBase {
+  operation: { type: 'gitea-runner-delete' };
+}
+
 export interface BuildImagePlan extends PlanBase {
   /** `dockerfile` and `context` are k8s.jegor.nl paths; `image` is <own registry>/<name>:<tag>. */
   operation: { type: 'build-image'; dockerfile: string; context: string; image: string };
@@ -180,6 +185,7 @@ export type RemediationPlan =
   | PodExecPlan
   | NodePlan
   | BatoceraExecPlan
+  | GiteaRunnerDeletePlan
   | BuildImagePlan
   | ManifestEditPlan
   | ManifestSyncPlan;
