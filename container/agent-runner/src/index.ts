@@ -98,16 +98,20 @@ async function main(): Promise<void> {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'mcp-tools', 'index.ts');
 
+  // The host's guard group (kubernetes-remediation/incident-guard.ts) reads outside data, so
+  // report_finding is all it gets: no builtins, no other MCP server.
+  const guard = config.agentGroupId === 'ag-guard';
+
   // Build MCP servers config: nanoclaw built-in + any from container.json
   const mcpServers: Record<string, McpServerConfig> = {
     nanoclaw: {
       command: 'bun',
       args: ['run', mcpServerPath],
-      env: {},
+      env: guard ? { NANOCLAW_TOOLS: 'report_finding' } : {},
     },
   };
 
-  for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
+  for (const [name, serverConfig] of Object.entries(guard ? {} : config.mcpServers)) {
     // Plugin-shipped servers get ${PLUGIN_ROOT}/${PLUGIN_DATA} expansion and
     // the two injected env vars; everything else passes through untouched.
     mcpServers[name] = resolvePluginServer(serverConfig);
@@ -126,6 +130,7 @@ async function main(): Promise<void> {
     model: config.model,
     effort: config.effort,
     speed: config.speed,
+    onlyTools: guard ? ['mcp__nanoclaw__report_finding'] : undefined,
   });
   registerProviderMemorySessionHook(providerName, provider, MEMORY_SESSION_HOOK);
 

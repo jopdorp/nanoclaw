@@ -26,6 +26,9 @@ function log(msg: string): void {
 }
 
 const allTools: McpToolDefinition[] = [];
+// A restricted runner (the guard) names the only tools its server exposes.
+const only = process.env.NANOCLAW_TOOLS?.split(',');
+const exposed = () => (only ? allTools.filter((t) => only.includes(t.tool.name)) : allTools);
 const toolMap = new Map<string, McpToolDefinition>();
 
 export function registerTools(tools: McpToolDefinition[]): void {
@@ -128,13 +131,13 @@ export function createMcpServer(
   const server = new Server({ name: 'nanoclaw', version: '2.0.0' }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: allTools.map((t) => t.tool),
+    tools: exposed().map((t) => t.tool),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, context) => {
     const { name, arguments: args } = request.params;
     const tool = toolMap.get(name);
-    if (!tool) {
+    if (!tool || (only && !only.includes(name))) {
       return { content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
     }
     return run(() => tool.handler(args ?? {}, { signal: context.signal }));
@@ -148,5 +151,6 @@ export async function startMcpServer(
   const server = createMcpServer(run);
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  log(`MCP server started with ${allTools.length} tools: ${allTools.map((t) => t.tool.name).join(', ')}`);
+  const names = exposed().map((t) => t.tool.name);
+  log(`MCP server started with ${names.length} tools: ${names.join(', ')}`);
 }

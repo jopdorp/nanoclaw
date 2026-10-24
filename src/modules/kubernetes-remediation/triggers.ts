@@ -11,7 +11,7 @@ const TRIVY_REPORTS = '/apis/aquasecurity.github.io/v1alpha1/vulnerabilityreport
 const TRIVY_CLUSTER_REPORTS = '/apis/aquasecurity.github.io/v1alpha1/clustervulnerabilityreports';
 const MAX_FALCO_BODY = 64 * 1024;
 
-export type IncidentSink = (incident: RemediationIncident) => Promise<void>;
+export type IncidentSink = (incident: RemediationIncident, raw?: Buffer) => Promise<void>;
 
 export function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -20,7 +20,7 @@ export function record(value: unknown): Record<string, unknown> | null {
 }
 
 export function text(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
+  return typeof value === 'string' && value.length > 0 ? value.slice(0, 1000) : null;
 }
 
 export function trivyIncident(value: unknown): RemediationIncident | null {
@@ -206,7 +206,7 @@ export function createWebhookHandler(options: {
       res.writeHead(400).end();
       return;
     }
-    for (const incident of options.incidents(payload, body)) await options.sink(incident);
+    for (const incident of options.incidents(payload, body)) await options.sink(incident, body);
     res.writeHead(202).end();
   };
 }

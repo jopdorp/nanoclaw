@@ -16,11 +16,11 @@ import { unguarded } from '../../guard/index.js';
 import { onOneCliAgentEnsured } from '../../gateway-providers/onecli.js';
 import { resolveGroupFolderPath } from '../../group-folder.js';
 import { requestWake } from '../../request-wake.js';
-import { resolveSession, writeSessionMessage } from '../../session-manager.js';
+import { destroySessionMailbox, resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
 import { registerWebhookHandler } from '../../webhook-server.js';
 import { log } from '../../log.js';
-import { killContainer } from '../../container-runner.js';
-import { getSessionsByAgentGroup } from '../../db/sessions.js';
+import { isContainerRunning, killContainer } from '../../container-runner.js';
+import { deleteSession, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { getDestinations } from '../agent-to-agent/db/agent-destinations.js';
 import { trustCreateAgent } from '../agent-to-agent/guard.js';
 import { notifyAgent } from '../approvals/index.js';
@@ -36,6 +36,7 @@ import {
 import { listGiteaRunners } from './gitea-runners.js';
 import { gitWithDeployKey, helmThroughOneCli, HelmReleaseExecutor, type HelmChart } from './helm-release.js';
 import { createAlertWebhookHandlers, runHealthWatch } from './health.js';
+import { createIncidentGuard, ensureGuardGroup, GUARD_AGENT_GROUP_ID } from './incident-guard.js';
 import { readGrants, registerStandingApprovals } from './standing.js';
 import { createFalcoWebhookHandler, runTrivyWatchers } from './triggers.js';
 import { createUpdateChecker } from './updates.js';
@@ -70,7 +71,7 @@ async function onecli<T>(...args: string[]): Promise<T> {
 }
 
 /** Exactly the readers and its model key: OneCLI injects one anthropic-type key, so any other (DeepSeek) shadows the subscription. */
-async function scopeHelperSecrets(agentGroupId: string): Promise<void> {
+async function scopeHelperSecrets(agentGroupId: string, modelOnly = false): Promise<void> {
   const agent = (await onecli<Array<{ id: string; identifier: string }>>('agents', 'list')).find(
     (a) => a.identifier === agentGroupId,
   );
@@ -82,10 +83,14 @@ async function scopeHelperSecrets(agentGroupId: string): Promise<void> {
   const model = id(provider === 'claude' ? 'Claude subscription' : 'Codex');
   const current = await onecli<string[]>('agents', 'secrets', '--id', agent.id);
   const wanted = [
-    reader,
     model,
-    id('Gitea repository reader (gitea-http.gitea.svc:3000)'),
-    id('Gitea repository reader (gitea.claw.jopdorp.nl)'),
+    ...(modelOnly
+      ? []
+      : [
+          reader,
+          id('Gitea repository reader (gitea-http.gitea.svc:3000)'),
+          id('Gitea repository reader (gitea.claw.jopdorp.nl)'),
+        ]),
   ].filter((s): s is string => !!s);
   await exec('onecli', ['agents', 'set-secret-mode', '--id', agent.id, '--mode', 'selective']);
   if (wanted.sort().join() !== [...current].sort().join())
@@ -178,6 +183,7 @@ export async function startKubernetesRemediation(
     unguarded('stops only a team agent’s container; it respawns on its next message'),
   );
   onOneCliAgentEnsured(async (groupId) => {
+    if (groupId === GUARD_AGENT_GROUP_ID) return scopeHelperSecrets(groupId, true);
     if (groupId === config.agentGroupId || !(await team(groupId))) return;
     await scopeHelperSecrets(groupId);
     await shareMemory(config.agentGroupId, groupId);
@@ -219,14 +225,49 @@ export async function startKubernetesRemediation(
   }
 
   const sink = (incident: RemediationIncident) => enqueueIncident(config.agentGroupId, incident);
+  const guarded = await ensureGuardGroup().then(
+    () => true,
+    (err: unknown) => {
+      log.error('GUARD DISABLED: its group setup failed, webhook incidents reach Orfie with the host fields only', {
+        err,
+      });
+      return false;
+    },
+  );
+  // Sessions a stopped host left mid-classification; their incidents come back through recover.
+  for (const s of await getSessionsByAgentGroup(GUARD_AGENT_GROUP_ID)) endGuardSession(s.id);
+  const guard = createIncidentGuard({
+    dir: path.join(DATA_DIR, 'kubernetes-remediation-raw'),
+    available: guarded,
+    ask: (ref, text) => enqueue(GUARD_AGENT_GROUP_ID, 'kubernetes-remediation-guard', text, ref),
+    end: endGuardSession,
+    wake: (incident, note, data) => enqueueIncident(config.agentGroupId, incident, note, data),
+  });
+  await guard.recover();
+  registerDeliveryAction(
+    'guard_report_finding',
+    async (content, session) => {
+      if (session.agent_group_id !== GUARD_AGENT_GROUP_ID) return;
+      const reply = await guard.report(content.finding);
+      if (reply) await notifyAgent(session, reply);
+    },
+    unguarded('the guard classifies an incident; the host validates the finding before Orfie sees it'),
+  );
+  registerDeliveryAction(
+    'open_incident_payload',
+    async (content, session) => {
+      if (await team(session.agent_group_id)) await notifyAgent(session, guard.open(String(content.ref ?? '')));
+    },
+    unguarded('read-only: a webhook payload the host kept, fenced as untrusted'),
+  );
   registerWebhookHandler(
     'kubernetes-falco',
-    createFalcoWebhookHandler({ secret: () => fs.readFileSync(config.falcoBearerFile), sink }),
+    createFalcoWebhookHandler({ secret: () => fs.readFileSync(config.falcoBearerFile), sink: guard.sink }),
   );
   // Its own bearer, mounted next to Falco's, so Orfie may hand it to the Alertmanager, Uptime Kuma and CrowdSec it configures.
   const alerts = createAlertWebhookHandlers({
     secret: () => fs.readFileSync(path.join(path.dirname(config.falcoBearerFile), 'alerts')),
-    sink,
+    sink: guard.sink,
     seenFile: path.join(DATA_DIR, 'kubernetes-remediation-alerts-seen.json'),
   });
   registerWebhookHandler('alertmanager', alerts.alertmanager);
@@ -290,21 +331,44 @@ export async function startKubernetesRemediation(
   );
 }
 
-async function enqueueIncident(agentGroupId: string, incident: RemediationIncident): Promise<void> {
-  const { session } = await resolveSession(agentGroupId, null, null, 'agent-shared');
+async function enqueueIncident(
+  agentGroupId: string,
+  incident: Pick<RemediationIncident, 'severity'>,
+  note?: string,
+  data?: string,
+): Promise<void> {
+  await enqueue(
+    agentGroupId,
+    'kubernetes-remediation-trigger',
+    `${incident.severity === 'resolved' ? 'This Kubernetes incident cleared; close what you opened for it.' : 'Investigate this Kubernetes incident. Read only until you submit a typed remediation proposal.'}${note ? ` ${note}` : ''}\n${JSON.stringify(incident)}${data ? `\n${data}` : ''}`,
+  );
+}
+
+/** A thread gets its own fresh session; without one the group's shared session takes the message. */
+async function enqueue(agentGroupId: string, sender: string, text: string, thread?: string): Promise<string> {
+  const { session } = await resolveSession(agentGroupId, null, thread ?? null, thread ? 'per-thread' : 'agent-shared');
   await writeSessionMessage(agentGroupId, session.id, {
-    id: `k8s-${incident.source}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `k8s-${sender}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
     timestamp: new Date().toISOString(),
     platformId: agentGroupId,
     channelType: 'agent',
     threadId: null,
-    content: JSON.stringify({
-      sender: 'kubernetes-remediation-trigger',
-      senderId: 'system',
-      text: `${incident.severity === 'resolved' ? 'This Kubernetes incident cleared; close what you opened for it.' : 'Investigate this Kubernetes incident. Read only until you submit a typed remediation proposal.'}\n${JSON.stringify(incident)}`,
-    }),
+    content: JSON.stringify({ sender, senderId: 'system', text }),
   });
   const fresh = await import('../../db/sessions.js').then(({ getSession }) => getSession(session.id));
   if (fresh) await requestWake(fresh, 'inbound-message');
+  return session.id;
+}
+
+/** A guard session lives for one incident, so no payload can colour another verdict. */
+function endGuardSession(sessionId: string): void {
+  const forget = () =>
+    void (async () => {
+      await destroySessionMailbox(GUARD_AGENT_GROUP_ID, sessionId);
+      fs.rmSync(sessionDir(GUARD_AGENT_GROUP_ID, sessionId), { recursive: true, force: true });
+      await deleteSession(sessionId);
+    })().catch((err: unknown) => log.warn('Removing a guard session failed', { sessionId, err }));
+  if (isContainerRunning(sessionId)) killContainer(sessionId, 'its incident is classified', forget);
+  else forget();
 }

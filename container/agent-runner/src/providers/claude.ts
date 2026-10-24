@@ -215,6 +215,7 @@ export class ClaudeProvider implements AgentProvider {
   private executionPolicy: ReturnType<typeof resolveClaudeExecutionPolicy>;
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
+  private onlyTools?: string[];
   private memorySessionHook?: MemorySessionHookRegistration;
 
   /**
@@ -226,6 +227,7 @@ export class ClaudeProvider implements AgentProvider {
     this.assistantName = options.assistantName;
     this.mcp = configuration.mcpServers as ReturnType<typeof resolveClaudeMcpServers>;
     this.additionalDirectories = options.additionalDirectories;
+    this.onlyTools = options.onlyTools;
     this.inference = configuration.inference as ReturnType<typeof resolveClaudeInference>;
     this.executionPolicy = configuration.executionPolicy as ReturnType<typeof resolveClaudeExecutionPolicy>;
     this.env = {
@@ -282,7 +284,8 @@ export class ClaudeProvider implements AgentProvider {
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions, snapshot: false }
           : undefined,
-        allowedTools: [...this.mcp.allowedTools],
+        tools: this.onlyTools ? [] : undefined,
+        allowedTools: [...(this.onlyTools ?? this.mcp.allowedTools)],
         disallowedTools: [...this.executionPolicy.disallowedTools],
         // The SDK emits `assistant` only per completed content block, so a long
         // block is silent and the host sweep kills the container mid-generation.
@@ -295,7 +298,8 @@ export class ClaudeProvider implements AgentProvider {
         effort: this.inference.effort as any,
         permissionMode: this.executionPolicy.permissionMode,
         allowDangerouslySkipPermissions: this.executionPolicy.allowDangerouslySkipPermissions,
-        settingSources: ['project', 'user', 'local'],
+        // Settings files can add MCP servers, plugins and hooks, so a locked-down agent reads none.
+        settingSources: this.onlyTools ? [] : ['project', 'user', 'local'],
         // Flag-level settings: `fastMode` only when the install turns it on,
         // then the execution policy's fixed keys, spread last so per-group
         // input can never override them. Both are Settings members rather
