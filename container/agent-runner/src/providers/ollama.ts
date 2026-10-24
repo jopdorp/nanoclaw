@@ -33,6 +33,7 @@ const tool = (name: string, description: string, properties: Args, run: (args: A
   run,
 });
 const text = process.env.LOCAL_AI_TOOLS === 'text';
+const thinks = process.env.LOCAL_AI_THINK === '1';
 const media = (kind: (a: Args) => string) => async (a: Args) => {
   const file = await render(kind(a), String(a.prompt), a.lyrics ? String(a.lyrics) : '', text);
   try {
@@ -64,7 +65,7 @@ const persona = [
   tool('read_character', 'Show your own character prompt.', {}, async () => read(PERSONA_FILE, '(empty)')),
   tool(
     'update_character',
-    'Replace your own character prompt; it applies from your next reply.',
+    'Replace your own character prompt with the full new text; saying you changed is not enough, only this call changes you.',
     { prompt: str },
     async (a) => {
       const prompt = String(a.prompt ?? '').trim();
@@ -129,7 +130,7 @@ const SLASH: Record<string, string> = text
   ? { '/image': 'quick' }
   : { '/image hq': 'image', '/image': 'quick', '/video': 'video', '/music': 'music' };
 const RULES =
-  'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, showing or changing your own character or that of a persona you made, or remembering something worth keeping. Otherwise just answer.';
+  'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, showing or changing your own character or that of a persona you made, or remembering something worth keeping. Otherwise just answer. When he asks you to change your character or personality, call update_character in that same reply.';
 const STATE_FILE = '/workspace/ollama-state.json';
 const MEMORY_DIR = '/workspace/agent/memory';
 // Memory files only, never the persona prompt or anything else in the group folder.
@@ -177,9 +178,10 @@ export class OllamaProvider implements AgentProvider {
         messages,
         tools: tools ? TOOLS.map((t) => t.spec) : undefined,
         stream: false,
-        think: false,
-        // Small models ramble; a chat reply stays a chat reply.
-        options: { num_predict: 300 },
+        // The 9B calls its tools reliably only when it may think first (measured 2/10 without, 9/10 with).
+        think: thinks,
+        // Small models ramble; a chat reply stays a chat reply. Thinking spends from the same budget.
+        options: { num_predict: thinks ? 1500 : 300 },
       }),
     });
     if (!res.ok) throw new Error(`Ollama ${res.status}: ${await res.text()}`);
@@ -271,6 +273,7 @@ export class OllamaProvider implements AgentProvider {
         const out = run
           ? await run({ ...call.arguments, to: from }).catch((e: Error) => `Error: ${e.message}`)
           : `Error: no tool ${call.name}`;
+        console.error(`[ollama] tool ${call.name} ${JSON.stringify(out).includes('Error') ? 'error' : 'ok'}`);
         state.messages.push({ role: 'tool', tool_name: call.name, content: JSON.stringify(out) });
         const later = call.name.startsWith('generate_') || call.name.endsWith('_persona');
         done ||= later && !JSON.stringify(out).includes('Error');
