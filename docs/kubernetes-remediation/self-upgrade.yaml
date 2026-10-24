@@ -153,6 +153,25 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
+  name: nanoclaw-remediator-job-cleanup
+  namespace: orfie-ci
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nanoclaw-remediator-job-cleanup
+  namespace: orfie-ci
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: nanoclaw-remediator-job-cleanup }
+subjects:
+  - { kind: ServiceAccount, name: nanoclaw-remediator, namespace: nanoclaw-remediator }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
   name: orfie-ci-deploy-state
   namespace: orfie-ci
 rules:
@@ -442,8 +461,11 @@ spec:
     - name: remediator-identity
       expression: request.userInfo.username.startsWith('system:serviceaccount:nanoclaw-remediator:')
   validations:
-    - expression: 'false'
-      message: nanoclaw-remediator identities cannot write to orfie-ci
+    - expression: >-
+        request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator' &&
+        request.resource.group == 'batch' && request.resource.resource == 'jobs' &&
+        request.operation == 'DELETE' && !has(request.subResource)
+      message: nanoclaw-remediator identities may only delete orfie-ci Jobs
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
