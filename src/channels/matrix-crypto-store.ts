@@ -10,6 +10,7 @@
  * encryption, which the adapter does not do.
  */
 import 'fake-indexeddb/auto';
+import { IDBFactory } from 'fake-indexeddb';
 import { createHash, randomUUID, webcrypto } from 'crypto';
 import fs from 'fs';
 import v8 from 'v8';
@@ -91,9 +92,20 @@ async function restore(databases: DatabaseDump[]): Promise<void> {
   }
 }
 
-/** Restore the snapshot, then re-snapshot a second after every committed write. */
-export async function useDurableCryptoStore(file: string): Promise<void> {
-  if (fs.existsSync(file)) await restore(v8.deserialize(fs.readFileSync(file)) as DatabaseDump[]);
+/** Keeps an unusable snapshot aside and starts crypto over on an empty IndexedDB, so Matrix still comes up. */
+export function discardCryptoStore(file: string, err: unknown): void {
+  log.error('Matrix crypto store unusable, starting with an empty one', { err });
+  if (fs.existsSync(file)) fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
+  globalThis.indexedDB = new IDBFactory();
+}
+
+/** Restore the snapshot, then re-snapshot a second after every committed write. Returns a flush for shutdown. */
+export async function useDurableCryptoStore(file: string): Promise<() => Promise<void>> {
+  try {
+    if (fs.existsSync(file)) await restore(v8.deserialize(fs.readFileSync(file)) as DatabaseDump[]);
+  } catch (err) {
+    discardCryptoStore(file, err);
+  }
   let pending: NodeJS.Timeout | undefined;
   const save = async () => {
     pending = undefined;
@@ -111,6 +123,11 @@ export async function useDurableCryptoStore(file: string): Promise<void> {
         );
       });
     return tx;
+  };
+  return async () => {
+    if (!pending) return;
+    clearTimeout(pending);
+    await save();
   };
 }
 
