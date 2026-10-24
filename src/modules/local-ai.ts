@@ -18,7 +18,7 @@ import { lookup } from '../cli/registry.js';
 import '../cli/resources/messaging-groups.js';
 import '../cli/resources/wirings.js';
 import { uploadListeners } from '../channels/matrix-crypto-store.js';
-import { DATA_DIR, LOCAL_AI_HOST } from '../config.js';
+import { DATA_DIR, GROUPS_DIR, LOCAL_AI_HOST } from '../config.js';
 import { getAgentGroup, getAllAgentGroups } from '../db/agent-groups.js';
 import { getContainerConfig } from '../db/container-configs.js';
 import { killContainer } from '../container-runner.js';
@@ -33,6 +33,7 @@ import { onOneCliAgentEnsured } from '../gateway-providers/onecli.js';
 import { unguarded } from '../guard/index.js';
 import { log } from '../log.js';
 import { deleteSession, getSessionsByAgentGroup } from '../db/sessions.js';
+import { PERSONA_PREPEND_FILE, readGroupPersona } from '../group-persona.js';
 import { personaSettings, readSettings, writeSettings } from '../local-persona-settings.js';
 import { destroySessionMailbox, sessionDir } from '../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../types.js';
@@ -303,6 +304,38 @@ registerDeliveryAction(
   },
   unguarded("a local persona removes only ComfyUI outputs named with the provider's own prefix"),
 );
+
+/** A local persona called `name` that `caller` created, directly or through its own creations. */
+export async function madeBy(caller: string, name: string): Promise<AgentGroup | undefined> {
+  const creator = async (id: string) =>
+    (await getDestinations(id)).find((d) => d.target_type === 'agent' && /^parent(-\d+)?$/.test(d.local_name))
+      ?.target_id;
+  for (const group of await localPersonas()) {
+    if (group.name.toLowerCase() !== name.toLowerCase()) continue;
+    for (let up = await creator(group.id), hops = 0; up && hops < 50; up = await creator(up), hops++)
+      if (up === caller) return group;
+  }
+}
+
+for (const action of ['read_persona', 'update_persona'])
+  registerDeliveryAction(
+    action,
+    async (content, session) => {
+      if (!(await isLocal(session.agent_group_id))) return;
+      const child = await madeBy(session.agent_group_id, String(content.name));
+      if (!child) return notifyAgent(session, `${action}: "${String(content.name)}" is not a persona you made.`);
+      const dir = path.join(GROUPS_DIR, child.folder);
+      if (action === 'read_persona')
+        return notifyAgent(session, `${child.name}'s character:\n${readGroupPersona(dir) ?? '(empty)'}`);
+      const prompt = String(content.prompt ?? '').trim();
+      if (prompt.length > 8000) return notifyAgent(session, `update_persona: keep it under 8000 characters.`);
+      // The child can write its own folder: remove whatever is there, then create, so a planted symlink is never followed.
+      fs.rmSync(path.join(dir, PERSONA_PREPEND_FILE), { force: true });
+      fs.writeFileSync(path.join(dir, PERSONA_PREPEND_FILE), `${prompt}\n`, { flag: 'wx' });
+      await notifyAgent(session, `Updated ${child.name}'s character.`);
+    },
+    unguarded('only the character prompt of a persona the caller made'),
+  );
 
 registerDeliveryAction(
   'list_personas',
