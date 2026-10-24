@@ -76,7 +76,6 @@ data:
     live() { kubectl $ns get $d -o jsonpath="{.spec.template.spec.containers[?(@.name=='orchestrator')]$1}"; }
     ready() { [ "$(kubectl $ns get pods -l app=nanoclaw-remediator-orchestrator -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}')" = True ]; }
     roll() {
-      kubectl $ns delete job -l nanoclaw-group-folder --ignore-not-found >/dev/null &&
       kubectl $ns patch $d -p "{\"spec\":{\"template\":{\"spec\":{
         \"initContainers\":[{\"name\":\"state-layout\",\"image\":\"$1\"},{\"name\":\"upgrade-state\",\"image\":\"$1\"}],
         \"containers\":[{\"name\":\"orchestrator\",\"image\":\"$1\",\"env\":[{\"name\":\"CONTAINER_IMAGE\",\"value\":\"$2\"}]}]}}}}" >/dev/null &&
@@ -181,9 +180,6 @@ rules:
     resources: [deployments]
     resourceNames: [nanoclaw-remediator-orchestrator]
     verbs: [get, list, watch, patch]
-  - apiGroups: [batch]
-    resources: [jobs]
-    verbs: [list, delete]
   - apiGroups: ['']
     resources: [pods]
     verbs: [get, list]
@@ -382,12 +378,11 @@ spec:
     - name: oldAnn
       expression: "variables.isDeployment && has(oldObject.spec.template.metadata.annotations) ? oldObject.spec.template.metadata.annotations : {}"
   validations:
-    # Session recycling and the ConfigMap write are the only other writes it makes.
+    # The ConfigMap write is the only other write it makes.
     - expression: >-
         variables.isDeployment ||
-        (request.resource.resource == 'jobs' && request.operation == 'DELETE' && request.namespace == 'nanoclaw-remediator') ||
         (request.resource.resource == 'configmaps' && request.operation == 'UPDATE' && request.name == 'orfie-ci-state')
-      message: orfie-ci-deploy only patches the host Deployment, recycles session Jobs and records its state
+      message: orfie-ci-deploy only patches the host Deployment and records its state
     - expression: >-
         !variables.isDeployment || (
         dyn(object.metadata).all(k, k in ['generation', 'managedFields', 'resourceVersion'] || (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
