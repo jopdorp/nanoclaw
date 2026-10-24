@@ -152,7 +152,14 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     incidentIds,
     target: targetFrom(
       input.target,
-      ['manifest-edit', 'manifest-sync', 'repo-write', 'batocera-exec', 'gitea-runner-delete'].includes(type),
+      [
+        'manifest-edit',
+        'manifest-sync',
+        'repo-write',
+        'batocera-exec',
+        'gitea-runner-delete',
+        'mail-account-add',
+      ].includes(type),
     ),
     reason: string(input.reason, 'plan.reason', 2000),
     expiresAt: string(input.expiresAt, 'plan.expiresAt', 64),
@@ -349,6 +356,10 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     exactKeys(operation, ['type'], 'plan.operation');
     return { ...base, operation: { type } };
   }
+  if (type === 'mail-account-add') {
+    exactKeys(operation, ['type'], 'plan.operation');
+    return { ...base, operation: { type } };
+  }
   if (type === 'batocera-exec') {
     exactKeys(operation, ['type', 'command'], 'plan.operation');
     return { ...base, operation: { type, command: string(operation.command, 'plan.operation.command', 16384) } };
@@ -368,7 +379,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     return { ...base, operation: { type, dockerfile, context, image } };
   }
   throw new Error(
-    `plan.operation.type is unsupported; use patch-image, restart, scale, run-cronjob, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, remove-attachment-ticket, write-secret, pod-exec, ${NODE_OPS.join(', ')}, batocera-exec, gitea-runner-delete, manifest-edit, manifest-sync, repo-write or build-image`,
+    `plan.operation.type is unsupported; use patch-image, restart, scale, run-cronjob, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, remove-attachment-ticket, write-secret, pod-exec, ${NODE_OPS.join(', ')}, batocera-exec, gitea-runner-delete, mail-account-add, manifest-edit, manifest-sync, repo-write or build-image`,
   );
 }
 
@@ -597,6 +608,15 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
       throw new Error(
         'gitea-runner-delete targets {apiVersion: "v1", kind: "GiteaRunner", namespace: null, name: <id>}',
       );
+  } else if (plan.operation.type === 'mail-account-add') {
+    if (
+      plan.target.kind !== 'MailAccount' ||
+      namespace !== null ||
+      !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?@[a-z0-9.-]+\.[a-z]+$/.test(name)
+    )
+      throw new Error(
+        'mail-account-add targets {apiVersion: "v1", kind: "MailAccount", namespace: null, name: <address>}',
+      );
   } else if (plan.operation.type === 'build-image') {
     if (plan.target.kind !== 'Job' || namespace !== 'security' || !DNS_LABEL_RE.test(name))
       throw new Error('build-image targets the build Job to create in security, named as a DNS label');
@@ -712,7 +732,7 @@ export function isAutoApproved(
     target.kind === 'StatefulSet' || t1.has(target.namespace ?? '') || t1.has(`${target.namespace}/${target.name}`);
   if (
     ['restart', 'delete-job', 'pod-exec', 'build-image', 'helm-install', 'repo-write', 'write-secret', 'batocera-exec']
-      .concat(NODE_OPS, 'gitea-runner-delete')
+      .concat(NODE_OPS, 'gitea-runner-delete', 'mail-account-add')
       .includes(operation.type)
   )
     return true;

@@ -437,6 +437,12 @@ for box in claw orfie; do
     || ncl wirings create --messaging-group-id "$MG_ID" --agent-group-id "$PRIMARY_ID" --engage-mode pattern \
       --engage-pattern '.' --sender-scope all --ignored-message-policy drop --session-mode shared >/dev/null
 done
+# The DMARC reports are only read, so Orfie is wired to email-dmarc under its own address, which never sends.
+MG_ID=$(ncl messaging-groups create --channel-type email --platform-id dmarc@jopdorp.nl --instance email-dmarc \
+  --name 'DMARC reports' --is-group 0 --unknown-sender-policy strict --json | jq -r '.data.id')
+jq -e --arg m "$MG_ID" --arg g "$PRIMARY_ID" '.data[] | select(.messaging_group_id == $m and .agent_group_id == $g)' <<<"$WIRINGS" >/dev/null \
+  || ncl wirings create --messaging-group-id "$MG_ID" --agent-group-id "$PRIMARY_ID" --engage-mode pattern \
+    --engage-pattern '.' --sender-scope known --ignored-message-policy drop --session-mode shared >/dev/null
 ncl groups restart --id "$PRIMARY_ID" >/dev/null
 
 step '6/6 create a harmless session and prove one Codex round-trip'

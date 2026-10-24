@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline';
 
 import type { HelmReleaseExecutor } from './helm-release.js';
@@ -17,6 +18,7 @@ import type {
   HelmUninstallPlan,
   HelmValuesPlan,
   ManifestEditPlan,
+  MailAccountAddPlan,
   ManifestSyncPlan,
   NodePlan,
   PodExecPlan,
@@ -258,6 +260,54 @@ function runnerJob(plan: PodExecPlan, serviceAccount: string): Record<string, un
             },
           ],
           volumes: [{ name: 'tmp', emptyDir: {} }],
+        },
+      },
+    },
+  };
+}
+
+/** docker-mailserver's own setup against its config volume, so it runs on the node holding that RWO claim. */
+function mailAccountJob(
+  plan: MailAccountAddPlan,
+  secret: string,
+  image: string,
+  node: string,
+): Record<string, unknown> {
+  const script = [
+    'cd /tmp/docker-mailserver',
+    'grep -q "^$ADDRESS|" postfix-accounts.cf 2>/dev/null || setup email add "$ADDRESS" < /run/mail/password',
+    // The domain catch-all beats a mailbox that has no alias of its own.
+    'grep -qx "$ADDRESS $ADDRESS" postfix-virtual.cf || echo "$ADDRESS $ADDRESS" >> postfix-virtual.cf',
+  ].join(' && ');
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: { name: `orfie-mail-${plan.id.slice(0, 8)}`, namespace: 'mail' },
+    spec: {
+      backoffLimit: 0,
+      activeDeadlineSeconds: 300,
+      ttlSecondsAfterFinished: 60,
+      template: {
+        spec: {
+          restartPolicy: 'Never',
+          nodeName: node,
+          automountServiceAccountToken: false,
+          containers: [
+            {
+              name: 'add',
+              image,
+              command: ['bash', '-c', script],
+              env: [{ name: 'ADDRESS', value: plan.target.name }],
+              volumeMounts: [
+                { name: 'config', mountPath: '/tmp/docker-mailserver' },
+                { name: 'password', mountPath: '/run/mail', readOnly: true },
+              ],
+            },
+          ],
+          volumes: [
+            { name: 'config', persistentVolumeClaim: { claimName: 'docker-mailserver-mail-config' } },
+            { name: 'password', secret: { secretName: secret } },
+          ],
         },
       },
     },
@@ -613,6 +663,8 @@ export class GatewayRemediationExecutor {
         return this.node(plan as NodePlan);
       case 'batocera-exec':
         return this.batoceraExec(plan as BatoceraExecPlan);
+      case 'mail-account-add':
+        return this.mailAccountAdd(plan as MailAccountAddPlan);
       case 'gitea-runner-delete':
         return { applied: true, message: await deleteOfflineGiteaRunner(plan.target.name), automaticWrites: 0 };
       case 'run-cronjob':
@@ -854,6 +906,38 @@ export class GatewayRemediationExecutor {
     };
   }
 
+  private async mailAccountAdd(plan: MailAccountAddPlan): Promise<ExecutionResult> {
+    const client = this.helm?.client;
+    if (!client) throw new Error('the Helm identity is not configured');
+    const secret = `mail-${plan.target.name.split('@')[0]}`;
+    // An existing Secret keeps its password, so a rerun never splits it from the account.
+    const password = randomBytes(24).toString('base64url');
+    await client
+      .request('/api/v1/namespaces/mail/secrets', {
+        method: 'POST',
+        body: { apiVersion: 'v1', kind: 'Secret', metadata: { name: secret }, stringData: { password } },
+      })
+      .catch((error: unknown) => {
+        if (!String(error).includes('AlreadyExists')) throw new Error(`creating Secret mail/${secret} failed`);
+      });
+    const pods = (await client.request(
+      '/api/v1/namespaces/mail/pods?labelSelector=app.kubernetes.io%2Fname%3Ddocker-mailserver',
+    )) as {
+      items?: Array<{ spec?: { nodeName?: string }; status?: { containerStatuses?: Array<{ imageID?: string }> } }>;
+    };
+    const node = pods.items?.[0]?.spec?.nodeName;
+    const image = pods.items?.[0]?.status?.containerStatuses?.[0]?.imageID;
+    if (!node || !image?.includes('@sha256:')) throw new Error('docker-mailserver is not running');
+    const { exitCode, output } = await this.runJob(mailAccountJob(plan, secret, image, node), 5 * 60_000, client);
+    return exitCode === 0
+      ? { applied: true, message: 'created', automaticWrites: 0 }
+      : {
+          applied: false,
+          message: `mail-account-add exited ${exitCode ?? 'without finishing'}:\n${output}`,
+          automaticWrites: 0,
+        };
+  }
+
   private async batoceraExec(plan: BatoceraExecPlan): Promise<ExecutionResult> {
     // Pinned by alias, so the host key still verifies when DHCP moves the laptop.
     const options = [
@@ -958,18 +1042,18 @@ export class GatewayRemediationExecutor {
   }
 
   /** Creates the Job, waits for it, and returns its container's exit code, termination message and last 2 KB of output. */
-  private async runJob(job: Record<string, unknown>, timeout: number) {
+  private async runJob(job: Record<string, unknown>, timeout: number, client = this.writer) {
     const { name, namespace } = job.metadata as { name: string; namespace: string };
     const jobs = `/apis/batch/v1/namespaces/${namespace}/jobs`;
-    await this.writer.request(jobs, { method: 'POST', body: job });
+    await client.request(jobs, { method: 'POST', body: job });
     const deadline = Date.now() + timeout;
     let done = false;
     while (!done && Date.now() < deadline) {
       await sleep(3_000);
-      const status = ((await this.writer.request(`${jobs}/${name}`)) as { status?: Record<string, number> }).status;
+      const status = ((await client.request(`${jobs}/${name}`)) as { status?: Record<string, number> }).status;
       done = Boolean(status?.succeeded || status?.failed);
     }
-    const pods = (await this.writer.request(
+    const pods = (await client.request(
       `/api/v1/namespaces/${namespace}/pods?labelSelector=${encodeURIComponent(`job-name=${name}`)}`,
     )) as {
       items?: Array<{
@@ -981,10 +1065,9 @@ export class GatewayRemediationExecutor {
     const terminated = pod?.status?.containerStatuses?.[0]?.state?.terminated;
     const log = pod?.metadata?.name
       ? String(
-          await this.writer.request(
-            `/api/v1/namespaces/${namespace}/pods/${pod.metadata.name}/log?limitBytes=1048576`,
-            { text: true },
-          ),
+          await client.request(`/api/v1/namespaces/${namespace}/pods/${pod.metadata.name}/log?limitBytes=1048576`, {
+            text: true,
+          }),
         )
       : '';
     return { exitCode: terminated?.exitCode, message: terminated?.message ?? '', output: log.slice(-OUTPUT_LIMIT) };
