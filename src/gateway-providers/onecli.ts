@@ -62,6 +62,8 @@ export function contributionFromConfig(
     mount('combined', combined, target);
     env.SSL_CERT_FILE = target;
     env.DENO_CERT = target;
+    env.GIT_SSL_CAINFO = target;
+    env.REQUESTS_CA_BUNDLE = target;
   }
   for (const stub of config.credentialStubs ?? []) {
     mount('stub', accountId ? withAccountId(stub.content, accountId) : stub.content, stub.containerPath);
