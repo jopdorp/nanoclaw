@@ -182,15 +182,17 @@ export function createLogReader(options: {
     );
     let session: string | undefined;
     let timer: NodeJS.Timeout | undefined;
+    let giveUp = () => {};
     try {
       const verdicts = new Promise<Record<string, string[]> | null>((resolve) => {
         pending.set(ref, { ids: new Set(Object.keys(sent)), done: resolve });
-        timer = setTimeout(() => resolve(null), options.timeoutMs ?? 2 * 60_000);
+        giveUp = () => resolve(null);
       });
       session = await options.ask(
         ref,
         `${GUARD_INSTRUCTIONS}\n\n${fenced(`Log values, ref ${ref}.`, JSON.stringify(sent))}`,
       );
+      timer = setTimeout(giveUp, options.timeoutMs ?? 2 * 60_000);
       return await verdicts;
       // eslint-disable-next-line no-catch-all/no-catch-all -- any failure means no verdict, the masked log already went out
     } catch {
