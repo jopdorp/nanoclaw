@@ -82,7 +82,8 @@ async function run(comfy: string, graph: Record<string, any>, kind: string): Pro
       const entry = (await json(`${comfy}/history/${prompt_id}`))[prompt_id];
       if (entry?.status?.status_str === 'error')
         throw new Error(`ComfyUI failed: ${JSON.stringify(entry.status.messages).slice(-500)}`);
-      if (!entry?.status?.completed) continue;
+      // History can say completed before a starved CPU box has sent the image frame; the final executing:null follows it.
+      if (!entry?.status?.completed || executing) continue;
       fs.mkdirSync('/workspace/agent/media', { recursive: true });
       if (image) {
         const out = path.join('/workspace/agent/media', `${kind}-${prompt_id}.png`);
