@@ -648,8 +648,13 @@ spec:
          request.namespace == 'nanoclaw-remediator' && request.resource.group == 'batch' && request.resource.resource == 'jobs' &&
          !has(request.subResource) && request.operation in ['CREATE', 'DELETE', 'UPDATE', 'PATCH']) ||
         (request.userInfo.username == 'system:serviceaccount:orfie-ci:orfie-ci-deploy' &&
-         request.namespace == 'nanoclaw-remediator' && request.resource.group == 'apps' && request.resource.resource == 'deployments' &&
-         request.name == 'nanoclaw-remediator-orchestrator' && !has(request.subResource) && request.operation == 'UPDATE')
+         request.namespace == 'nanoclaw-remediator' && !has(request.subResource) &&
+         ((request.resource.group == 'batch' && request.resource.resource == 'jobs' && request.operation == 'DELETE') ||
+          (request.resource.group == 'apps' && request.resource.resource == 'deployments' && request.name == 'nanoclaw-remediator-orchestrator' && request.operation == 'UPDATE'))) ||
+        (request.userInfo.username in ['system:serviceaccount:orfie-ci:orfie-ci-poll', 'system:serviceaccount:orfie-ci:orfie-ci-deploy'] &&
+         request.namespace == 'orfie-ci' && !has(request.subResource) &&
+         ((request.resource.group == '' && request.resource.resource == 'configmaps' && request.name == 'orfie-ci-state' && request.operation == 'UPDATE') ||
+          (request.userInfo.username.endsWith(':orfie-ci-poll') && request.resource.group == 'batch' && request.resource.resource == 'jobs' && request.operation in ['CREATE', 'DELETE'])))
       message: Orfie's own namespaces change only through its CI or by hand
 ---
 apiVersion: admissionregistration.k8s.io/v1
