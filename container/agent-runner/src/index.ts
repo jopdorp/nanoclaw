@@ -99,7 +99,7 @@ async function main(): Promise<void> {
   const mcpServerPath = path.join(__dirname, 'mcp-tools', 'index.ts');
 
   // The host's guard group (kubernetes-remediation/incident-guard.ts) reads outside data, so
-  // report_finding is all it gets: no builtins, no other MCP server.
+  // report_finding and report_verdicts are all it gets: no builtins, no other MCP server.
   const guard = config.agentGroupId === 'ag-guard';
 
   // Build MCP servers config: nanoclaw built-in + any from container.json
@@ -107,7 +107,7 @@ async function main(): Promise<void> {
     nanoclaw: {
       command: 'bun',
       args: ['run', mcpServerPath],
-      env: guard ? { NANOCLAW_TOOLS: 'report_finding' } : {},
+      env: guard ? { NANOCLAW_TOOLS: 'report_finding,report_verdicts' } : {},
     },
   };
 
@@ -130,7 +130,7 @@ async function main(): Promise<void> {
     model: config.model,
     effort: config.effort,
     speed: config.speed,
-    onlyTools: guard ? ['mcp__nanoclaw__report_finding'] : undefined,
+    onlyTools: guard ? ['mcp__nanoclaw__report_finding', 'mcp__nanoclaw__report_verdicts'] : undefined,
   });
   registerProviderMemorySessionHook(providerName, provider, MEMORY_SESSION_HOOK);
 
