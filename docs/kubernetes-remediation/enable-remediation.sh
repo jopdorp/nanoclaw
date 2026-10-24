@@ -321,17 +321,21 @@ onecli_policy() {
     -H "Content-Type: application/json" --data-binary @- "$ONECLI_URL/v1/policy$2"' sh "$@"
 }
 
-ensure_block_rule() {
-  local method=$1 name="nanoclaw-remediator-kubernetes-block-${1,,}" rule ids
-  rule=$(jq -nc --arg name "$name" --arg host "$API_HOST" --arg method "$method" --arg agent "$PRIMARY_AGENT_ID" \
-    '{name: $name, action: "block", enabled: true, identities: [{type: "agent", id: $agent}],
-      targets: [{kind: "network", hostPattern: $host, method: $method}]}')
+ensure_rule() {
+  local name ids
+  name=$(jq -r .name <<<"$1")
   ids=$(onecli_policy GET /rules </dev/null | jq -r --arg name "$name" '[.[] | select(.name == $name) | .id] | join(" ")')
   case $ids in
-    '') onecli_policy POST /rules <<<"$rule" >/dev/null; printf 'created orchestrator block rule for %s\n' "$method" ;;
+    '') onecli_policy POST /rules <<<"$1" >/dev/null; printf 'created rule %s\n' "$name" ;;
     *' '*) todo "multiple OneCLI rules are named $name" ;;
-    *) onecli_policy PATCH "/rules/$ids" <<<"$rule" >/dev/null; printf 'confirmed orchestrator block rule for %s\n' "$method" ;;
+    *) onecli_policy PATCH "/rules/$ids" <<<"$1" >/dev/null; printf 'confirmed rule %s\n' "$name" ;;
   esac
+}
+
+ensure_block_rule() {
+  ensure_rule "$(jq -nc --arg name "nanoclaw-remediator-kubernetes-block-${1,,}" --arg host "$API_HOST" --arg method "$1" \
+    --arg agent "$PRIMARY_AGENT_ID" '{name: $name, action: "block", enabled: true, identities: [{type: "agent", id: $agent}],
+      targets: [{kind: "network", hostPattern: $host, method: $method}]}')"
 }
 
 ensure_agent "$ORCHESTRATOR_GROUP" 'Kubernetes Remediator' false
@@ -343,30 +347,36 @@ VERIFIER_AGENT_ID=$ENSURED_AGENT_ID
 for method in POST PUT PATCH DELETE; do ensure_block_rule "$method"; done
 
 ensure_gitea_block_rule() {
-  local method=$1 label=$2 host=$3 name="nanoclaw-remediator-gitea-$2-block-${1,,}" rule ids
-  rule=$(jq -nc --arg name "$name" --arg host "$host" --arg method "$method" \
+  ensure_rule "$(jq -nc --arg name "nanoclaw-remediator-gitea-$2-block-${1,,}" --arg host "$3" --arg method "$1" \
     --arg agents "$INVESTIGATOR_AGENT_ID $VERIFIER_AGENT_ID" \
     '{name: $name, action: "block", enabled: true,
       identities: ($agents | split(" ") | map({type: "agent", id: .})),
-      targets: [{kind: "network", hostPattern: $host, method: $method}]}')
-  ids=$(onecli_policy GET /rules </dev/null | jq -r --arg name "$name" '[.[] | select(.name == $name) | .id] | join(" ")')
-  case $ids in
-    '') onecli_policy POST /rules <<<"$rule" >/dev/null; printf 'created Gitea %s block rule for %s\n' "$label" "$method" ;;
-    *' '*) todo "multiple OneCLI rules are named $name" ;;
-    *) onecli_policy PATCH "/rules/$ids" <<<"$rule" >/dev/null; printf 'confirmed Gitea %s block rule for %s\n' "$label" "$method" ;;
-  esac
+      targets: [{kind: "network", hostPattern: $host, method: $method}]}')"
 }
 for method in POST PUT PATCH DELETE; do
   ensure_gitea_block_rule "$method" internal "${GITEA_HOSTS[0]}"
   ensure_gitea_block_rule "$method" external "${GITEA_HOSTS[1]}"
 done
+# Orfie only reads the open web: every method on the model APIs and in-cluster hosts, GET elsewhere, the rest blocked.
+ensure_web_rule() {
+  ensure_rule "$(jq -nc --arg name "nanoclaw-remediator-web-$1" --arg action "$2" --argjson targets "$3" \
+    --arg agents "$PRIMARY_AGENT_ID $INVESTIGATOR_AGENT_ID $VERIFIER_AGENT_ID" \
+    '{name: $name, action: $action, enabled: true,
+      identities: ($agents | split(" ") | map({type: "agent", id: .})), targets: $targets}')"
+}
+ensure_web_rule 1-trusted allow "$(jq -nc --arg hosts "chatgpt.com api.anthropic.com $API_HOST ${GITEA_HOSTS[*]}" \
+  '$hosts | split(" ") | map({kind: "network", hostPattern: .})')"
+ensure_web_rule 2-read allow '[{"kind": "network", "hostPattern": "*", "method": "GET"}]'
+ensure_web_rule 3-rest block '[{"kind": "network", "hostPattern": "*"}]'
 onecli_policy GET /rules </dev/null \
-  | jq -c '{orderedIds: sort_by((.name | startswith("nanoclaw-remediator-") and contains("-block-")) | not) | map(.id)}' \
+  | jq -c '{orderedIds: sort_by(.name | if startswith("nanoclaw-remediator-web-") then [1, .]
+      elif startswith("nanoclaw-remediator-") and contains("-block-") then [0, ""] else [2, ""] end) | map(.id)}' \
   | onecli_policy PUT /rules/order >/dev/null
 onecli_policy POST /publish </dev/null >/dev/null
 onecli_policy GET '/rules?status=published' </dev/null \
   | jq -e '([.[] | select(.name | startswith("nanoclaw-remediator-kubernetes-block-"))] | length == 4)
-      and ([.[] | select(.name | startswith("nanoclaw-remediator-gitea-"))] | length == 8)' >/dev/null \
+      and ([.[] | select(.name | startswith("nanoclaw-remediator-gitea-"))] | length == 8)
+      and ([.[] | select(.name | startswith("nanoclaw-remediator-web-"))] | length == 3)' >/dev/null \
   || todo 'the orchestrator block rules are not published'
 
 PRIMARY_PROVIDER_IDS=$(onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" \

@@ -42,6 +42,7 @@ Sparkle Claws <claws.sparkle@gmail.com> is Julien's bot; Julien is Jegor's frien
 - Helm is two steps. The values file must equal the release's live values (`helm get values`); if it is missing or differs, the host rejects with "repo values drift" and the diff, and you first send `helm-sync-values`, which writes the live values to the file and pushes, with no cluster change.
 - Then send `helm-values` with `chart: { repo: "https://..." }` (or `oci://...`) the first time; the host checks that repo serves the installed chart version, remembers it, and later plans may omit it. The approval shows the full values diff against live, which is exactly your edits.
 - Keep open findings and in-flight plans in `memory/` as they happen: a line under Core Memory in `memory/index.md` plus one file per open item, removed once resolved, so the state survives provider switches and restarts.
+- The web is read-only for you, the investigator and the verifier: outside the model APIs, Gitea and the cluster API the gateway allows only GET, so a refused POST is the policy and you tell Jegor what you needed instead of working around it. In the daily sweep read the `CONNECT` lines of the `onecli` pod log in `nanoclaw-remediator` and tell Jegor about every host that is not in `memory/web-hosts.md` yet, then add it there.
 
 - Jegor answers an approval by typing the short id printed on the host's approval message (`approve ab12cd` / `reject ab12cd`), never the plan id. Do not tell him to approve the plan id, and do not resubmit a plan whose card is still pending.
 
