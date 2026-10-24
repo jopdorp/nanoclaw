@@ -43,7 +43,7 @@ data:
       body=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')
       curl -fsS -X PUT -H "Authorization: Bearer $(cat /matrix/token)" -H 'Content-Type: application/json' \
         -d "{\"msgtype\":\"m.text\",\"body\":\"$body\"}" \
-        "http://matrix-synapse.openclaw-private.svc:8008/_matrix/client/v3/rooms/%21rOcsOCEWsLaCgYRSjM%3Amatrix.claw.jopdorp.nl/send/m.room.message/ci-$(date +%s)-$$" >/dev/null
+        "http://matrix-synapse.openclaw-private.svc:8008/_matrix/client/v3/rooms/%21rOcsOCEWsLaCgYRSjM%3Amatrix.claw.jopdorp.nl/send/m.room.message/ci-$(date +%s)-$$" >/dev/null || :
     }
   poll.sh: |
     . /scripts/lib.sh
