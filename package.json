@@ -71,6 +71,9 @@
     "node": ">=22"
   },
   "pnpm": {
+    "overrides": {
+      "@matrix-org/matrix-sdk-crypto-wasm": "18.4.0"
+    },
     "patchedDependencies": {
       "@beeper/chat-adapter-matrix@0.2.0": "patches/@beeper__chat-adapter-matrix@0.2.0.patch"
     }
