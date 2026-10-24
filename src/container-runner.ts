@@ -23,6 +23,7 @@ import {
   GROUPS_DIR,
   INSTALL_SLUG,
   LOCAL_AI_HOST,
+  LOCAL_SEARCH_URL,
   TIMEZONE,
 } from './config.js';
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
@@ -1303,7 +1304,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   const local = resolveProviderName(session.agent_provider, containerConfig.provider) === 'ollama';
   if (local) {
     for (const key of Object.keys(contributedEnv)) if (/^(https?|all)_proxy$/i.test(key)) delete contributedEnv[key];
-    env.LOCAL_AI_HOST = LOCAL_AI_HOST;
+    Object.assign(env, { LOCAL_AI_HOST, LOCAL_SEARCH_URL });
     const { tools, think } = personaSettings(agentGroup.id);
     Object.assign(env, { LOCAL_AI_TOOLS: tools, LOCAL_AI_THINK: think ? '1' : '0', LOCAL_AI_OWNER: session.id });
   }
