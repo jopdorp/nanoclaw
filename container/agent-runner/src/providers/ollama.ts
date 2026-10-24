@@ -43,6 +43,19 @@ const persona = [
     createAgent.handler(a),
   ),
   tool('delete_persona', 'Delete a persona you created.', { name: str }, (a) => deleteAgent.handler(a)),
+  tool('read_character', 'Show your own character prompt.', {}, async () => read(PERSONA_FILE, '(empty)')),
+  tool(
+    'update_character',
+    'Replace your own character prompt; it applies from your next reply.',
+    { prompt: str },
+    async (a) => {
+      const prompt = String(a.prompt ?? '').trim();
+      if (prompt.length > MAX_CHARACTER_CHARS) return `Error: keep it under ${MAX_CHARACTER_CHARS} characters.`;
+      // The group folder is the only one mounted here, so this can only ever be its own prompt.
+      fs.writeFileSync(PERSONA_FILE, `${prompt}\n`);
+      return 'Updated.';
+    },
+  ),
 ];
 const TOOLS = text
   ? [
@@ -79,9 +92,10 @@ const SLASH: Record<string, string> = text
   ? { '/image': 'quick' }
   : { '/image hq': 'image', '/image': 'quick', '/video': 'video', '/music': 'music' };
 const RULES =
-  'Reply in plain text. Use a tool only when asked for what it makes: a picture, a video, a song, a new persona or a copy of you, or deleting one. Otherwise just answer.';
+  'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, or showing or changing your own character. Otherwise just answer.';
 const STATE_FILE = '/workspace/ollama-state.json';
 const PERSONA_FILE = '/workspace/agent/instructions.prepend.md';
+const MAX_CHARACTER_CHARS = 8000;
 const KEEP = 8;
 
 interface Message {
@@ -152,7 +166,7 @@ export class OllamaProvider implements AgentProvider {
     return (numCtx || 8192) * 0.75;
   }
 
-  private async *turn(state: State, system: string, prompt: string): AsyncGenerator<ProviderEvent> {
+  private async *turn(state: State, system: () => string, prompt: string): AsyncGenerator<ProviderEvent> {
     if (state.promptTokens > (await this.compactAt())) await this.compact(state);
     // Plain text is wrapped for whoever wrote last, so a reply never depends on the model's markup.
     const from = [...prompt.matchAll(/<message[^>]*\bfrom="([^"]+)"/g)].pop()?.[1];
@@ -174,7 +188,7 @@ export class OllamaProvider implements AgentProvider {
     for (let step = 0; step < 8; step++) {
       const memory = state.summary ? `\n\n## Memory of earlier conversation\n\n${state.summary}` : '';
       const { message, prompt_eval_count } = await this.chat([
-        { role: 'system', content: system + memory },
+        { role: 'system', content: system() + memory },
         ...state.messages,
       ]);
       state.promptTokens = prompt_eval_count ?? state.promptTokens;
@@ -206,9 +220,8 @@ export class OllamaProvider implements AgentProvider {
     let wake: (() => void) | null = null;
     let ended = false;
     const state: State = JSON.parse(read(STATE_FILE, '{"summary":"","messages":[],"promptTokens":0}'));
-    const system = [RULES, read(PERSONA_FILE, ''), input.systemContext?.instructions ?? '']
-      .filter(Boolean)
-      .join('\n\n');
+    const system = () =>
+      [RULES, read(PERSONA_FILE, ''), input.systemContext?.instructions ?? ''].filter(Boolean).join('\n\n');
     const self = this;
 
     return {
