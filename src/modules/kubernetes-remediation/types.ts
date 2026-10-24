@@ -85,6 +85,11 @@ export interface GiteaRunnerDeletePlan extends PlanBase {
   operation: { type: 'gitea-runner-delete' };
 }
 
+/** Creates mailbox `target.name` on docker-mailserver with a host-made password kept in Secret mail/mail-<localpart>. */
+export interface MailAccountAddPlan extends PlanBase {
+  operation: { type: 'mail-account-add' };
+}
+
 export interface BuildImagePlan extends PlanBase {
   /** `dockerfile` and `context` are k8s.jegor.nl paths; `image` is <own registry>/<name>:<tag>. */
   operation: { type: 'build-image'; dockerfile: string; context: string; image: string };
@@ -186,6 +191,7 @@ export type RemediationPlan =
   | NodePlan
   | BatoceraExecPlan
   | GiteaRunnerDeletePlan
+  | MailAccountAddPlan
   | BuildImagePlan
   | ManifestEditPlan
   | ManifestSyncPlan;

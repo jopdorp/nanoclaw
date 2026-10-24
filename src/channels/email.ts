@@ -6,6 +6,7 @@
  *
  * .env per mailbox: EMAIL_<NAME>_ADDRESS, EMAIL_<NAME>_PASSWORD, EMAIL_<NAME>_IMAP_HOST,
  * EMAIL_<NAME>_SMTP_HOST, optional EMAIL_<NAME>_IMAP_PORT (993, TLS) and _SMTP_PORT (587, STARTTLS).
+ * A mailbox without SMTP_HOST is read-only: nothing is ever sent from it.
  */
 import { ImapFlow, type MessageStructureObject } from 'imapflow';
 import nodemailer from 'nodemailer';
@@ -34,7 +35,7 @@ interface Mailbox {
   password: string;
   imapHost: string;
   imapPort: number;
-  smtpHost: string;
+  smtpHost?: string;
   smtpPort: number;
 }
 
@@ -54,13 +55,13 @@ function readMailbox(name: string): Mailbox | null {
     ['ADDRESS', 'PASSWORD', 'IMAP_HOST', 'IMAP_PORT', 'SMTP_HOST', 'SMTP_PORT'].map((k) => prefix + k),
   );
   const get = (k: string) => env[prefix + k];
-  if (!get('ADDRESS') || !get('PASSWORD') || !get('IMAP_HOST') || !get('SMTP_HOST')) return null;
+  if (!get('ADDRESS') || !get('PASSWORD') || !get('IMAP_HOST')) return null;
   return {
     address: get('ADDRESS')!,
     password: get('PASSWORD')!,
     imapHost: get('IMAP_HOST')!,
     imapPort: Number(get('IMAP_PORT') ?? 993),
-    smtpHost: get('SMTP_HOST')!,
+    smtpHost: get('SMTP_HOST'),
     smtpPort: Number(get('SMTP_PORT') ?? 587),
   };
 }
@@ -102,6 +103,7 @@ async function bodyText(client: ImapFlow, uid: number, structure?: MessageStruct
 }
 
 async function sendMail(box: Mailbox, mail: Mail): Promise<string> {
+  if (!box.smtpHost) throw new Error(`${box.address} is read-only`);
   const compiled = new MailComposer({ from: box.address, ...mail, references: mail.inReplyTo }).compile();
   const raw = await compiled.build();
   await nodemailer

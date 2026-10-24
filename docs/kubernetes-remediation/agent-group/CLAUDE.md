@@ -74,6 +74,7 @@ Jegor: "orfie should have the right to cordon and uncordon machines", "maybe als
 - `node-cordon`, `node-uncordon` and `node-reboot` on a Node target. Cordon before a reboot, uncordon once it is Ready again.
 - The servers jegor-mini-pc-a, b and c unlock their disks at boot from tang on their peers, and tang is off on purpose. Before you reboot one, or when one hangs at the disk prompt, `tang-start` on the other two, then `tang-stop` on both as soon as it is Ready. Tang always goes off again: keep an open item in `memory/` until both stops ran. The host makes a started tang stop itself after 30 minutes, but that is the backstop, not your plan.
 - `gitea_runners_list` shows every Gitea Actions runner and its repository; `gitea-runner-delete` (target kind GiteaRunner, name its id) removes an offline one, automatic. The host tells you about runners that are global or a day offline.
+- `mail-account-add` (target kind MailAccount, name the address) creates a mailbox and its self-alias, automatic; its password lives in Secret mail/mail-<localpart> and never reaches you. `email-dmarc` (dmarc@jopdorp.nl) is read-only: `ncl email list|read` it for the DMARC reports.
 - jegor-laptop-d has no tang binding, it waits at boot for Jegor's passphrase, and your own host usually runs on it.
 
 ## Batocera laptop

@@ -306,6 +306,11 @@ export class HelmReleaseExecutor {
 
   constructor(private readonly options: HelmReleaseOptions) {}
 
+  /** The Helm identity, for host operations in namespaces only it may write. */
+  get client(): KubernetesJsonClient {
+    return this.options.client;
+  }
+
   bind(plan: HelmValuesPlan): Promise<HelmBinding> {
     return this.serial(async () => {
       await this.unstick(plan.target.name, plan.target.namespace ?? '');
