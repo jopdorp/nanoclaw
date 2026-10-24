@@ -8,7 +8,7 @@ PY=${PYTHON:-$(ls /userdata/*/venv*/bin/python3 /userdata/ai/*/venv/bin/python3 
 mkdir -p $D/models/whisper-small
 [ "$(cd "$SRC" && pwd)" = "$D" ] || cp "$SRC"/worker.py "$SRC"/harness.py "$SRC"/requirements.txt "$SRC"/run.sh $D/
 [ -x $D/venv/bin/python ] || "$PY" -m venv $D/venv
-$D/venv/bin/pip install -q --only-binary=:all: -r $D/requirements.txt
+$D/venv/bin/pip install -q --prefer-binary -r $D/requirements.txt
 fetch() {  # repo@rev file sha256 dest
   [ -s "$4" ] && echo "$3  $4" | sha256sum -c >/dev/null 2>&1 && return
   curl -fsSL -o "$4.part" "https://huggingface.co/${1%@*}/resolve/${1#*@}/$2"
