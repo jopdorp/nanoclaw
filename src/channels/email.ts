@@ -6,10 +6,12 @@
  *
  * .env per mailbox: EMAIL_<NAME>_ADDRESS, EMAIL_<NAME>_PASSWORD, EMAIL_<NAME>_IMAP_HOST,
  * EMAIL_<NAME>_SMTP_HOST, optional EMAIL_<NAME>_IMAP_PORT (993, TLS) and _SMTP_PORT (587, STARTTLS).
- * A mailbox without SMTP_HOST is read-only: nothing is ever sent from it.
+ * A mailbox without SMTP_HOST is read-only: nothing is ever sent from it. EMAIL_<NAME>_ALLOWED_TO
+ * (addresses or @domains, comma-separated) limits who it mails, by default its wired senders and @jopdorp.nl.
  */
 import { ImapFlow, type MessageStructureObject } from 'imapflow';
 import nodemailer from 'nodemailer';
+import addressparser from 'nodemailer/lib/addressparser/index.js';
 import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 
 import { normalizeArgs } from '../cli/args.js';
@@ -31,12 +33,14 @@ const EMAIL_DEFAULTS: ChannelDefaults = {
 };
 
 interface Mailbox {
+  instance: string;
   address: string;
   password: string;
   imapHost: string;
   imapPort: number;
   smtpHost?: string;
   smtpPort: number;
+  allowedTo?: string[];
 }
 
 interface Mail {
@@ -52,17 +56,22 @@ const mailboxes = new Map<string, Mailbox>();
 function readMailbox(name: string): Mailbox | null {
   const prefix = `EMAIL_${name.toUpperCase().replace(/-/g, '_')}_`;
   const env = readEnvFile(
-    ['ADDRESS', 'PASSWORD', 'IMAP_HOST', 'IMAP_PORT', 'SMTP_HOST', 'SMTP_PORT'].map((k) => prefix + k),
+    ['ADDRESS', 'PASSWORD', 'IMAP_HOST', 'IMAP_PORT', 'SMTP_HOST', 'SMTP_PORT', 'ALLOWED_TO'].map((k) => prefix + k),
   );
   const get = (k: string) => env[prefix + k];
   if (!get('ADDRESS') || !get('PASSWORD') || !get('IMAP_HOST')) return null;
   return {
+    instance: `email-${name}`,
     address: get('ADDRESS')!,
     password: get('PASSWORD')!,
     imapHost: get('IMAP_HOST')!,
     imapPort: Number(get('IMAP_PORT') ?? 993),
     smtpHost: get('SMTP_HOST'),
     smtpPort: Number(get('SMTP_PORT') ?? 587),
+    allowedTo: get('ALLOWED_TO')
+      ?.split(',')
+      .map((a) => a.trim().toLowerCase())
+      .filter(Boolean),
   };
 }
 
@@ -102,8 +111,24 @@ async function bodyText(client: ImapFlow, uid: number, structure?: MessageStruct
   return (meta?.contentType === 'text/html' ? text.replace(/<[^>]+>/g, '') : text).trim();
 }
 
+export const isAllowedRecipient = (address: string, allowed: string[]) =>
+  allowed.some((a) => (a.startsWith('@') ? address.endsWith(a) : address === a));
+
+async function allowedRecipients(box: Mailbox): Promise<string[]> {
+  if (box.allowedTo) return box.allowedTo;
+  const wired = await getDb().all<{ platform_id: string }>(
+    `SELECT platform_id FROM messaging_groups WHERE channel_type = 'email' AND instance = ?`,
+    box.instance,
+  );
+  return ['@jopdorp.nl', ...wired.map((m) => m.platform_id.toLowerCase())];
+}
+
 async function sendMail(box: Mailbox, mail: Mail): Promise<string> {
   if (!box.smtpHost) throw new Error(`${box.address} is read-only`);
+  const allowed = await allowedRecipients(box);
+  for (const { address } of addressparser([mail.to, mail.cc].filter(Boolean).join(','), { flatten: true })) {
+    if (!isAllowedRecipient(address.toLowerCase(), allowed)) throw new Error(`${address} is not an allowed recipient`);
+  }
   const compiled = new MailComposer({ from: box.address, ...mail, references: mail.inReplyTo }).compile();
   const raw = await compiled.build();
   await nodemailer
