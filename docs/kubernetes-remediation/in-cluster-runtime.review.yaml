@@ -160,6 +160,12 @@ spec:
                 secretKeyRef:
                   name: nanoclaw-runtime
                   key: matrix-access-token
+            - { name: MATRIX_DEVICE_ID, value: CAELYQFBZE }
+            - name: MATRIX_RECOVERY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nanoclaw-matrix-e2ee
+                  key: recovery-key
           ports:
             - { name: webhook, containerPort: 3000 }
           readinessProbe:
