@@ -37,7 +37,13 @@ import { lookup } from '../../cli/registry.js';
 import '../../cli/resources/groups.js';
 import { killContainer } from '../../container-runner.js';
 import { getSessionsByAgentGroup } from '../../db/sessions.js';
-import { createDestination, getDestinationByName, getDestinations, normalizeName } from './db/agent-destinations.js';
+import {
+  createDestination,
+  deleteDestination,
+  getDestinationByName,
+  getDestinations,
+  normalizeName,
+} from './db/agent-destinations.js';
 import { readSettings, writeSettings } from '../../local-persona-settings.js';
 import { openLocalRoom, wipeLocalPersona } from '../local-ai.js';
 import { writeDestinations } from './write-destinations.js';
@@ -304,7 +310,11 @@ async function performCreateAgent(
     cli_scope: local ? 'disabled' : undefined,
   });
   await wireNewAgent(sourceGroup.id, localName, agentGroupId, session);
-  if (local) await openLocalRoom(sourceGroup.id, newGroup);
+  if (local) {
+    // A persona that can answer its creator chats with it forever, both sides always reply.
+    await deleteDestination(agentGroupId, 'parent');
+    await openLocalRoom(sourceGroup.id, newGroup);
+  }
 
   if (!options?.suppressCreatedNotify) {
     await notify(
@@ -354,16 +364,17 @@ async function wireNewAgent(
   await writeDestinations(session.agent_group_id, session.id);
 }
 
-/** Delete an agent the caller created (its `parent` destination points back at the caller), sessions first. */
+/** Delete an agent the caller created (its `parent` destination or persona `creator` is the caller), sessions first. */
 export async function deleteAgent(content: Record<string, unknown>, session: Session): Promise<void> {
   const name = normalizeName(str(content.name) ?? '');
   const target = (await getDestinationByName(session.agent_group_id, name))?.target_id;
   const created =
     target &&
-    (await getDestinations(target)).some(
-      (d) =>
-        d.target_type === 'agent' && d.target_id === session.agent_group_id && /^parent(-\d+)?$/.test(d.local_name),
-    );
+    (readSettings()[target]?.creator === session.agent_group_id ||
+      (await getDestinations(target)).some(
+        (d) =>
+          d.target_type === 'agent' && d.target_id === session.agent_group_id && /^parent(-\d+)?$/.test(d.local_name),
+      ));
   if (!target || !created) return notifyAgent(session, `delete_agent: "${name}" is not an agent you created.`);
   await wipeLocalPersona(target);
   for (const s of await getSessionsByAgentGroup(target)) killContainer(s.id, 'deleted by its creator');

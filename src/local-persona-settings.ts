@@ -12,6 +12,7 @@ export interface PersonaSettings {
   lifetimeMinutes: number;
   /** Rooms seen carrying the nanoclaw.chat marker, the only ones summon may replace. */
   rooms?: string[];
+  creator?: string;
 }
 
 export function readSettings(): Record<string, Partial<PersonaSettings>> {

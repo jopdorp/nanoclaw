@@ -108,7 +108,7 @@ export async function openLocalRoom(parentId: string, child: AgentGroup): Promis
   const now = new Date().toISOString();
   for (const admin of await getAdminsOfAgentGroup(parentId))
     await grantRole({ ...admin, agent_group_id: child.id, granted_at: now });
-  writeSettings({ ...readSettings(), [child.id]: personaSettings(parentId) });
+  writeSettings({ ...readSettings(), [child.id]: { ...personaSettings(parentId), creator: parentId } });
   await createRoom(child);
 }
 

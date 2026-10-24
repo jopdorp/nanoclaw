@@ -203,6 +203,7 @@ export class OllamaProvider implements AgentProvider {
       }
       const making = calls.some((c) => c.function.name.startsWith('generate_'));
       if (message.content || making) yield { type: 'text', text: wrap(message.content || 'making it…') };
+      let sent = false;
       for (const { function: call } of calls) {
         yield { type: 'activity' };
         const run = TOOLS.find((t) => t.spec.function.name === call.name)?.run;
@@ -210,6 +211,13 @@ export class OllamaProvider implements AgentProvider {
           ? await run({ ...call.arguments, to: from }).catch((e: Error) => `Error: ${e.message}`)
           : `Error: no tool ${call.name}`;
         state.messages.push({ role: 'tool', tool_name: call.name, content: JSON.stringify(out) });
+        sent ||= call.name.startsWith('generate_') && !JSON.stringify(out).includes('Error');
+      }
+      // The file is the reply: asked to comment on it, the model writes a fake <image> tag and then copies it forever.
+      if (sent) {
+        fs.writeFileSync(STATE_FILE, JSON.stringify(state));
+        yield { type: 'result', text: null };
+        return;
       }
     }
     yield { type: 'result', text: null };
