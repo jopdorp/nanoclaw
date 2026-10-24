@@ -197,6 +197,7 @@ spec:
             - { name: falco-bearer, mountPath: /run/nanoclaw/falco, readOnly: true }
             - { name: git-deploy-key, mountPath: /run/nanoclaw/git, readOnly: true }
             - { name: batocera-ssh, mountPath: /run/nanoclaw/batocera, readOnly: true }
+            - { name: voice-worker-token, mountPath: /run/nanoclaw/voice-worker, readOnly: true }
             - { name: gitea-runner-admin, mountPath: /run/nanoclaw/gitea-runner-admin, readOnly: true }
             # Channel adapters read creds from /opt/nanoclaw/.env, not process env.
             - { name: dotenv, mountPath: /opt/nanoclaw/.env, subPath: .env, readOnly: true }
@@ -225,6 +226,8 @@ spec:
           secret: { secretName: orfie-git-deploy-key, defaultMode: 256 }
         - name: batocera-ssh
           secret: { secretName: orfie-batocera-ssh, defaultMode: 256 }
+        - name: voice-worker-token
+          secret: { secretName: voice-worker-token, defaultMode: 256, optional: true }
         - name: gitea-runner-admin
           secret: { secretName: gitea-runner-admin, defaultMode: 256 }
 ---

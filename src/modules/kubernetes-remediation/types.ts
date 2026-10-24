@@ -80,6 +80,11 @@ export interface BatoceraExecPlan extends PlanBase {
   operation: { type: 'batocera-exec'; command: string };
 }
 
+/** Writes the voice worker's host.env on the Batocera laptop from Secret voice-worker-token; same Host target. */
+export interface BatoceraVoiceTokenPlan extends PlanBase {
+  operation: { type: 'batocera-voice-token' };
+}
+
 /** Deletes Gitea Actions runner `target.name` (its id) if it is offline; the target is {kind: "GiteaRunner"}. */
 export interface GiteaRunnerDeletePlan extends PlanBase {
   operation: { type: 'gitea-runner-delete' };
@@ -190,6 +195,7 @@ export type RemediationPlan =
   | PodExecPlan
   | NodePlan
   | BatoceraExecPlan
+  | BatoceraVoiceTokenPlan
   | GiteaRunnerDeletePlan
   | MailAccountAddPlan
   | BuildImagePlan

@@ -147,6 +147,10 @@ function describe({ plan }: ValidatedPlan, full: boolean): string {
       return `${op.type} ${target.name}`;
     case 'batocera-exec':
       return `batocera ${target.name}: ${op.command}`;
+    case 'batocera-voice-token':
+      return `write the voice token on ${target.name}`;
+    case 'mail-account-add':
+      return `create MailAccount ${target.name}`;
     case 'remove-attachment-ticket':
       return `remove attachment ticket ${op.ticket} from ${target.kind} ${target.name}`;
     default:

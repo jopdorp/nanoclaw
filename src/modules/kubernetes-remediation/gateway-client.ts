@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline';
 
@@ -10,6 +11,7 @@ import type {
   ApprovalGrant,
   AttachmentTicketRemovePlan,
   BatoceraExecPlan,
+  BatoceraVoiceTokenPlan,
   BuildImagePlan,
   CronJobRunPlan,
   ExecutionResult,
@@ -47,6 +49,9 @@ const HOST_SCRIPTS = {
   'tang-stop': 'systemctl stop tangd.socket; ss -ltn sport = :7500',
 };
 const BATOCERA_SSH = '/run/nanoclaw/batocera';
+const VOICE_HOST_URLS = [11, 12, 13, 17].map((n) => `ws://192.168.1.${n}:30901`).join(',');
+const VOICE_ENV_WRITE =
+  'mkdir -p /userdata/ai/voice && umask 077 && cat > /userdata/ai/voice/host.env && chmod 600 /userdata/ai/voice/host.env';
 const OUTPUT_LIMIT = 2048;
 const TEMPORARY_BINDING_RE = /^nanoclaw-remediation-[0-9a-f-]{36}$/;
 
@@ -273,12 +278,17 @@ function mailAccountJob(
   image: string,
   node: string,
 ): Record<string, unknown> {
+  // setup refuses an address that is already an alias and asks for the password twice.
   const script = [
+    'set -e',
     'cd /tmp/docker-mailserver',
-    'grep -q "^$ADDRESS|" postfix-accounts.cf 2>/dev/null || setup email add "$ADDRESS" < /run/mail/password',
+    'if ! grep -q "^$ADDRESS|" postfix-accounts.cf; then',
+    '  sed -i "/^$ADDRESS $ADDRESS\\$/d" postfix-virtual.cf',
+    '  P=$(cat /run/mail/password); printf "%s\\n%s\\n" "$P" "$P" | setup email add "$ADDRESS"',
+    'fi',
     // The domain catch-all beats a mailbox that has no alias of its own.
     'grep -qx "$ADDRESS $ADDRESS" postfix-virtual.cf || echo "$ADDRESS $ADDRESS" >> postfix-virtual.cf',
-  ].join(' && ');
+  ].join('\n');
   return {
     apiVersion: 'batch/v1',
     kind: 'Job',
@@ -662,7 +672,8 @@ export class GatewayRemediationExecutor {
       case 'tang-stop':
         return this.node(plan as NodePlan);
       case 'batocera-exec':
-        return this.batoceraExec(plan as BatoceraExecPlan);
+      case 'batocera-voice-token':
+        return this.batoceraExec(plan as BatoceraExecPlan | BatoceraVoiceTokenPlan);
       case 'mail-account-add':
         return this.mailAccountAdd(plan as MailAccountAddPlan);
       case 'gitea-runner-delete':
@@ -938,7 +949,13 @@ export class GatewayRemediationExecutor {
         };
   }
 
-  private async batoceraExec(plan: BatoceraExecPlan): Promise<ExecutionResult> {
+  private async batoceraExec(plan: BatoceraExecPlan | BatoceraVoiceTokenPlan): Promise<ExecutionResult> {
+    // The token goes over ssh stdin, so it is in no argv, log or reply.
+    const { operation } = plan;
+    const voice = operation.type === 'batocera-voice-token';
+    const input = voice
+      ? `VOICE_TOKEN=${fs.readFileSync('/run/nanoclaw/voice-worker/token', 'utf8').trim()}\nVOICE_HOST_URLS=${VOICE_HOST_URLS}\n`
+      : undefined;
     // Pinned by alias, so the host key still verifies when DHCP moves the laptop.
     const options = [
       'IdentitiesOnly=yes',
@@ -955,10 +972,16 @@ export class GatewayRemediationExecutor {
         `${BATOCERA_SSH}/id_ed25519`,
         ...options.flatMap((o) => ['-o', o]),
         `root@${plan.target.name}`,
-        plan.operation.command,
+        voice ? VOICE_ENV_WRITE : operation.command,
       ],
-      { signal: AbortSignal.timeout(10 * 60_000) },
+      { input, signal: AbortSignal.timeout(10 * 60_000) },
     );
+    if (voice)
+      return {
+        applied: code === 0,
+        message: code === 0 ? 'written' : `batocera-voice-token exited ${code}`,
+        automaticWrites: 0,
+      };
     return {
       applied: code === 0,
       message: `batocera-exec on ${plan.target.name} exited ${code}:\n${`${stdout}${stderr}`.slice(-OUTPUT_LIMIT)}`,

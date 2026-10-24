@@ -157,6 +157,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
         'manifest-sync',
         'repo-write',
         'batocera-exec',
+        'batocera-voice-token',
         'gitea-runner-delete',
         'mail-account-add',
       ].includes(type),
@@ -360,6 +361,10 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     exactKeys(operation, ['type'], 'plan.operation');
     return { ...base, operation: { type } };
   }
+  if (type === 'batocera-voice-token') {
+    exactKeys(operation, ['type'], 'plan.operation');
+    return { ...base, operation: { type } };
+  }
   if (type === 'batocera-exec') {
     exactKeys(operation, ['type', 'command'], 'plan.operation');
     return { ...base, operation: { type, command: string(operation.command, 'plan.operation.command', 16384) } };
@@ -379,7 +384,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     return { ...base, operation: { type, dockerfile, context, image } };
   }
   throw new Error(
-    `plan.operation.type is unsupported; use patch-image, restart, scale, run-cronjob, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, remove-attachment-ticket, write-secret, pod-exec, ${NODE_OPS.join(', ')}, batocera-exec, gitea-runner-delete, mail-account-add, manifest-edit, manifest-sync, repo-write or build-image`,
+    `plan.operation.type is unsupported; use patch-image, restart, scale, run-cronjob, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, remove-attachment-ticket, write-secret, pod-exec, ${NODE_OPS.join(', ')}, batocera-exec, batocera-voice-token, gitea-runner-delete, mail-account-add, manifest-edit, manifest-sync, repo-write or build-image`,
   );
 }
 
@@ -600,7 +605,7 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     if (plan.target.kind !== 'Pod') throw new Error('pod-exec requires a Pod');
   } else if (NODE_OPS.includes(plan.operation.type)) {
     if (plan.target.kind !== 'Node') throw new Error(`${plan.operation.type} requires a Node`);
-  } else if (plan.operation.type === 'batocera-exec') {
+  } else if (plan.operation.type === 'batocera-exec' || plan.operation.type === 'batocera-voice-token') {
     if (plan.target.kind !== 'Host' || namespace !== null || !/^\w[\w.-]*$/.test(name))
       throw new Error('batocera-exec targets {apiVersion: "v1", kind: "Host", namespace: null, name: <its address>}');
   } else if (plan.operation.type === 'gitea-runner-delete') {
@@ -732,7 +737,7 @@ export function isAutoApproved(
     target.kind === 'StatefulSet' || t1.has(target.namespace ?? '') || t1.has(`${target.namespace}/${target.name}`);
   if (
     ['restart', 'delete-job', 'pod-exec', 'build-image', 'helm-install', 'repo-write', 'write-secret', 'batocera-exec']
-      .concat(NODE_OPS, 'gitea-runner-delete', 'mail-account-add')
+      .concat(NODE_OPS, 'gitea-runner-delete', 'mail-account-add', 'batocera-voice-token')
       .includes(operation.type)
   )
     return true;
