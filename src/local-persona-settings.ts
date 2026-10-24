@@ -10,6 +10,8 @@ const SETTINGS_FILE = path.join(DATA_DIR, 'local-personas.json');
 export interface PersonaSettings {
   tools: 'media' | 'text';
   lifetimeMinutes: number;
+  /** Rooms seen carrying the nanoclaw.chat marker, the only ones summon may replace. */
+  rooms?: string[];
 }
 
 export function readSettings(): Record<string, Partial<PersonaSettings>> {

@@ -158,7 +158,14 @@ async function localRooms(agentGroupId: string): Promise<{ mg: MessagingGroup; r
       if (err instanceof MatrixHttpError && err.status === 404) return null;
       throw err;
     });
-    if (marked) rooms.push({ mg, room });
+    if (!marked) continue;
+    rooms.push({ mg, room });
+    const settings = readSettings();
+    if (!settings[agentGroupId]?.rooms?.includes(room))
+      writeSettings({
+        ...settings,
+        [agentGroupId]: { ...settings[agentGroupId], rooms: [...(settings[agentGroupId]?.rooms ?? []), room] },
+      });
   }
   return rooms;
 }
@@ -188,25 +195,30 @@ const MEDIA_FILE = path.join(DATA_DIR, 'local-media.json');
 const readMedia = (): Record<string, { mxc: string; ts: number }[]> =>
   fs.existsSync(MEDIA_FILE) ? JSON.parse(fs.readFileSync(MEDIA_FILE, 'utf8')) : {};
 
+// Each change is a synchronous read-modify-write, so concurrent deletes never write back an old snapshot.
+function editMedia(room: string, edit: (list: { mxc: string; ts: number }[]) => { mxc: string; ts: number }[]): void {
+  const media = readMedia();
+  media[room] = edit(media[room] ?? []);
+  fs.writeFileSync(MEDIA_FILE, JSON.stringify(media));
+}
+
 uploadListeners.push((room, mxc) => {
   void (async () => {
     const mg = await getMessagingGroupByPlatform('matrix', `matrix:${encodeURIComponent(room)}`);
     const wirings = mg ? await getMessagingGroupAgents(mg.id) : [];
-    if (!(await Promise.all(wirings.map((w) => isLocal(w.agent_group_id)))).some(Boolean)) return;
-    const media = readMedia();
-    (media[room] ??= []).push({ mxc, ts: Date.now() });
-    fs.writeFileSync(MEDIA_FILE, JSON.stringify(media));
+    if ((await Promise.all(wirings.map((w) => isLocal(w.agent_group_id)))).some(Boolean))
+      editMedia(room, (list) => [...list, { mxc, ts: Date.now() }]);
   })();
 });
 
-/** Deletes the bot's uploads to the room from before the cutoff, and every cached copy of remote media (his). */
+/** Deletes the bot's own uploads to the room from before the cutoff; his are remote, only their cache is ours. */
 async function purgeMedia(room: string, cutoff: number): Promise<void> {
-  const media = readMedia();
-  for (const { mxc } of (media[room] ?? []).filter((m) => m.ts <= cutoff))
-    await matrix(`/media/${mxc.slice('mxc://'.length)}`, 'DELETE', undefined, true);
-  media[room] = (media[room] ?? []).filter((m) => m.ts > cutoff);
-  fs.writeFileSync(MEDIA_FILE, JSON.stringify(media));
-  await matrix(`/purge_media_cache?before_ts=${cutoff}`, 'POST', {}, true);
+  for (const { mxc } of (readMedia()[room] ?? []).filter((m) => m.ts <= cutoff)) {
+    await matrix(`/media/${mxc.slice('mxc://'.length)}`, 'DELETE', undefined, true).catch((err) => {
+      if (!(err instanceof MatrixHttpError && err.status === 404)) throw err;
+    });
+    editMedia(room, (list) => list.filter((m) => m.mxc !== mxc));
+  }
 }
 
 /** The persona starts blank: its sessions, with their history and the provider's state file, go. */
@@ -219,15 +231,35 @@ async function forgetConversations(agentGroupId: string): Promise<void> {
   }
 }
 
+/** Every step runs even if another fails, so a broken admin token never keeps the messages or the history. */
+async function wipe(room: string, agentGroupId: string): Promise<void> {
+  const steps = [
+    redactExpired(room, 0),
+    purgeMedia(room, Date.now()),
+    // Synapse deletes only local media by id, so his cached uploads go with the whole remote cache.
+    matrix(`/purge_media_cache?before_ts=${Date.now()}`, 'POST', {}, true),
+    forgetConversations(agentGroupId),
+  ];
+  for (const r of await Promise.allSettled(steps))
+    if (r.status === 'rejected') log.warn('Local persona wipe step failed', { room, err: r.reason });
+}
+
+export async function wipeLocalPersona(agentGroupId: string): Promise<void> {
+  if (await isLocal(agentGroupId))
+    for (const { room } of await localRooms(agentGroupId)) await wipe(room, agentGroupId);
+}
+
 async function upkeep(room: string, group: AgentGroup): Promise<void> {
   await nameBot(room, group.name);
-  const { joined } = await matrix(`/rooms/${encodeURIComponent(room)}/joined_members`);
-  // Once he has left, the whole room goes, not just the expired part.
-  const alone = Object.keys(joined).length <= 1;
-  const lifetimeMinutes = alone ? 0 : personaSettings(group.id).lifetimeMinutes;
+  const { chunk } = await matrix(`/rooms/${encodeURIComponent(room)}/members?not_membership=leave`);
+  const present = (chunk as { state_key: string; content: { membership: string } }[]).some(
+    (m) => m.state_key !== process.env.MATRIX_USER_ID && ['join', 'invite'].includes(m.content.membership),
+  );
+  // Once he has left (and no invite is pending), the whole room goes, not just the expired part.
+  if (!present) return wipe(room, group.id);
+  const lifetimeMinutes = personaSettings(group.id).lifetimeMinutes;
   await redactExpired(room, lifetimeMinutes);
   await purgeMedia(room, Date.now() - lifetimeMinutes * 60_000);
-  if (alone) await forgetConversations(group.id);
 }
 
 async function sweep(): Promise<void> {
@@ -237,7 +269,13 @@ async function sweep(): Promise<void> {
       await upkeep(room, group).catch((err) => log.warn('Local persona room upkeep failed', { room, err }));
   }
 }
-if (process.env.MATRIX_ACCESS_TOKEN) setInterval(() => void sweep(), 60_000).unref();
+let sweeping = false;
+if (process.env.MATRIX_ACCESS_TOKEN)
+  setInterval(() => {
+    if (sweeping) return;
+    sweeping = true;
+    void sweep().finally(() => (sweeping = false));
+  }, 60_000).unref();
 
 const isOrfie = async (session: Session) =>
   (await getAgentGroup(session.agent_group_id))?.folder === 'kubernetes-remediator';
@@ -252,15 +290,18 @@ const localPersonas = async () => {
 registerDeliveryAction(
   'local_media_delete',
   async (content, session) => {
-    const name = String(content.filename);
-    if (!(await isLocal(session.agent_group_id)) || !/^[\w.-]+$/.test(name)) return;
+    if (!(await isLocal(session.agent_group_id))) return;
+    const names = (content.filenames as unknown[]).map(String);
+    const ours = names.filter((n) => /^nanoclaw-(quick|image|video|music)_[\w.-]+$/.test(n));
+    if (ours.length < names.length) log.warn('local_media_delete skipped foreign names', { names });
+    if (ours.length === 0) return;
     await exec('ssh', [
       ...['-i', '/run/nanoclaw/batocera/id_ed25519', '-o', 'BatchMode=yes', '-o', 'HostKeyAlias=batocera'],
       ...['-o', 'UserKnownHostsFile=/run/nanoclaw/batocera/known_hosts', `root@${LOCAL_AI_HOST}`],
-      `rm -f /userdata/ai/comfyui/output/${name}`,
+      `cd /userdata/ai/comfyui/output && rm -f ${ours.join(' ')}`,
     ]);
   },
-  unguarded('a local persona removes one ComfyUI output file by plain name'),
+  unguarded("a local persona removes only ComfyUI outputs named with the provider's own prefix"),
 );
 
 registerDeliveryAction(
@@ -302,8 +343,8 @@ registerDeliveryAction(
         return notifyAgent(session, `Invited Jegor back to ${group.name}.`);
       } catch (err) {
         if (!(err instanceof MatrixHttpError) || (err.status !== 403 && err.status !== 404)) throw err;
-        // 404 is a room the host did not make; 403 is a room the bot is no longer in, which gets replaced.
-        if (err.status === 404) continue;
+        // 404 is a room the host did not make; 403 is a room the bot is no longer in, replaced only if it was ours.
+        if (err.status === 404 || !personaSettings(group.id).rooms?.includes(roomOf(mg.platform_id))) continue;
         await lookup('messaging-groups-delete')!.handler({ id: mg.id }, { caller: 'host' });
       }
     }

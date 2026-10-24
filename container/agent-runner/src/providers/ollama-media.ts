@@ -38,6 +38,8 @@ export async function render(kind: string, prompt: string, lyrics = '', cpu = fa
   for (const node of Object.values<any>(graph)) {
     for (const key of ['seed', 'noise_seed'])
       if (typeof node.inputs?.[key] === 'number') node.inputs[key] = Math.floor(Math.random() * 2 ** 32);
+    // Our own prefix in the output root, the only names the host agrees to delete there.
+    if (typeof node.inputs?.filename_prefix === 'string') node.inputs.filename_prefix = `nanoclaw-${kind}`;
     if (
       (kind === 'quick' || kind === 'image') &&
       (node.class_type === 'SaveImage' || node.class_type === 'PreviewImage')
@@ -87,19 +89,22 @@ async function run(comfy: string, graph: Record<string, any>, kind: string): Pro
         fs.writeFileSync(out, image);
         return out;
       }
-      const file = Object.values<any>(entry.outputs ?? {})
+      const files = Object.values<any>(entry.outputs ?? {})
         .flatMap((o) => Object.values<any>(o).flat())
-        .find((f) => f?.filename);
+        .filter((f) => f?.filename);
+      const file = files[0];
       if (!file) throw new Error('ComfyUI returned no file');
       const query = new URLSearchParams({ filename: file.filename, subfolder: file.subfolder ?? '', type: file.type });
       const out = path.join('/workspace/agent/media', file.filename);
       fs.writeFileSync(out, Buffer.from(await (await fetch(`${comfy}/view?${query}`)).arrayBuffer()));
-      // Video and audio have no websocket output, so the host removes the saved file on the box.
-      if (file.type === 'output' && !file.subfolder)
+      // Video and audio have no websocket output, so the host removes every saved file on the box.
+      const saved = files.filter((f) => f.type === 'output' && !f.subfolder).map((f) => f.filename);
+      if (saved.length < files.length) console.error(`[ollama-media] not deleting ${JSON.stringify(files)}`);
+      if (saved.length > 0)
         await writeMessageOut({
           id: `local-media-delete-${prompt_id}`,
           kind: 'system',
-          content: JSON.stringify({ action: 'local_media_delete', filename: file.filename }),
+          content: JSON.stringify({ action: 'local_media_delete', filenames: saved }),
         });
       return out;
     }
