@@ -8,9 +8,10 @@ vi.mock('../db/agent-groups.js', () => ({
     ['parent', 'child', 'grandchild', 'sibling', 'other'].map((id) => ({ id, name: id, folder: id })),
 }));
 vi.mock('../db/container-configs.js', () => ({ getContainerConfig: async () => ({ provider: 'ollama' }) }));
-vi.mock('./agent-to-agent/db/agent-destinations.js', () => ({
-  getDestinations: async (id: string) =>
-    creatorOf[id] ? [{ target_type: 'agent', local_name: 'parent', target_id: creatorOf[id] }] : [],
+vi.mock('../local-persona-settings.js', () => ({
+  readSettings: () => Object.fromEntries(Object.entries(creatorOf).map(([id, creator]) => [id, { creator }])),
+  writeSettings: vi.fn(),
+  personaSettings: vi.fn(),
 }));
 
 const { madeBy } = await import('./local-ai.js');

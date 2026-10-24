@@ -151,6 +151,8 @@ export class OllamaProvider implements AgentProvider {
         tools: tools ? TOOLS.map((t) => t.spec) : undefined,
         stream: false,
         think: false,
+        // Small models ramble; a chat reply stays a chat reply.
+        options: { num_predict: 300 },
       }),
     });
     if (!res.ok) throw new Error(`Ollama ${res.status}: ${await res.text()}`);
