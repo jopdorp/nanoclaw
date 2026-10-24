@@ -10,6 +10,7 @@
  */
 import fs from 'fs';
 
+import { writeMessageOut } from '../db/messages-out.js';
 import { createAgent, deleteAgent } from '../mcp-tools/agents.js';
 import { sendFile } from '../mcp-tools/core.js';
 import { render } from './ollama-media.js';
@@ -56,6 +57,25 @@ const persona = [
       return 'Updated.';
     },
   ),
+  // Another persona's folder is not mounted here, so the host does it after checking that this one made it.
+  ...(['read_persona', 'update_persona'] as const).map((action) =>
+    tool(
+      action,
+      action === 'read_persona'
+        ? 'Show the character prompt of a persona you made.'
+        : 'Replace the character prompt of a persona you made; it applies from its next reply.',
+      action === 'read_persona' ? { name: str } : { name: str, prompt: str },
+      async (a) => {
+        const id = `${action}-${Date.now()}`;
+        await writeMessageOut({
+          id,
+          kind: 'system',
+          content: JSON.stringify({ action, name: a.name, prompt: a.prompt }),
+        });
+        return 'Asked; the answer comes as a message.';
+      },
+    ),
+  ),
 ];
 const TOOLS = text
   ? [
@@ -92,7 +112,7 @@ const SLASH: Record<string, string> = text
   ? { '/image': 'quick' }
   : { '/image hq': 'image', '/image': 'quick', '/video': 'video', '/music': 'music' };
 const RULES =
-  'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, or showing or changing your own character. Otherwise just answer.';
+  'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, or showing or changing your own character or that of a persona you made. Otherwise just answer.';
 const STATE_FILE = '/workspace/ollama-state.json';
 const PERSONA_FILE = '/workspace/agent/instructions.prepend.md';
 const MAX_CHARACTER_CHARS = 8000;
