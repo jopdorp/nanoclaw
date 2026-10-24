@@ -278,12 +278,17 @@ function mailAccountJob(
   image: string,
   node: string,
 ): Record<string, unknown> {
+  // setup refuses an address that is already an alias and asks for the password twice.
   const script = [
+    'set -e',
     'cd /tmp/docker-mailserver',
-    'grep -q "^$ADDRESS|" postfix-accounts.cf 2>/dev/null || setup email add "$ADDRESS" < /run/mail/password',
+    'if ! grep -q "^$ADDRESS|" postfix-accounts.cf; then',
+    '  sed -i "/^$ADDRESS $ADDRESS\\$/d" postfix-virtual.cf',
+    '  P=$(cat /run/mail/password); printf "%s\\n%s\\n" "$P" "$P" | setup email add "$ADDRESS"',
+    'fi',
     // The domain catch-all beats a mailbox that has no alias of its own.
     'grep -qx "$ADDRESS $ADDRESS" postfix-virtual.cf || echo "$ADDRESS $ADDRESS" >> postfix-virtual.cf',
-  ].join(' && ');
+  ].join('\n');
   return {
     apiVersion: 'batch/v1',
     kind: 'Job',
