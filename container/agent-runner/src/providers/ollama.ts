@@ -131,6 +131,29 @@ const SLASH: Record<string, string> = text
   : { '/image hq': 'image', '/image': 'quick', '/video': 'video', '/music': 'music' };
 const RULES =
   'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, showing or changing your own character or that of a persona you made, or remembering something worth keeping. Otherwise just answer. When he asks you to change your character or personality, call update_character in that same reply.';
+const VOICE =
+  'This is a live voice call: answer in one to three short spoken sentences without lists, markup or emoji, and start with [tone: a few words on how to say it].';
+// The formatter names a voice message's file in the message tag, where his own text cannot put one.
+async function transcribeVoice(prompt: string): Promise<string> {
+  for (const [tag, file] of prompt.matchAll(/<message\b[^>]*\baudio="([^"]+)"[^>]*>/g)) {
+    if (!file.startsWith('/workspace/inbox/') || path.resolve(file) !== file) continue;
+    const text = await Promise.resolve()
+      .then(() =>
+        fetch(`http://${process.env.LOCAL_AI_HOST}:8190/transcribe`, {
+          method: 'POST',
+          body: fs.readFileSync(file),
+          signal: AbortSignal.timeout(60_000),
+        }),
+      )
+      .then(async (res) => (res.ok ? String(((await res.json()) as { text?: string }).text ?? '').trim() : ''))
+      .catch(() => '');
+    prompt = prompt.replace(
+      tag,
+      `${tag}${text ? `[voice message] ${text.replace(/[<>]/g, '')}` : '[voice message, could not transcribe]'}\n`,
+    );
+  }
+  return prompt;
+}
 const STATE_FILE = '/workspace/ollama-state.json';
 const MEMORY_DIR = '/workspace/agent/memory';
 // Memory files only, never the persona prompt or anything else in the group folder.
@@ -218,6 +241,7 @@ export class OllamaProvider implements AgentProvider {
   }
 
   private async *turn(state: State, system: () => string, prompt: string): AsyncGenerator<ProviderEvent> {
+    prompt = await transcribeVoice(prompt);
     if (state.promptTokens > (await this.compactAt())) await this.compact(state);
     // Replies go to whoever wrote last and any markup is dropped, small models misname or leave tags unclosed.
     const writer = [...prompt.matchAll(/<message[^>]*\bfrom="([^"]+)"/g)].pop()?.[1];
@@ -236,6 +260,7 @@ export class OllamaProvider implements AgentProvider {
         ? `<system>Your character prompt was just updated; act on it from now on.</system>\n${prompt}`
         : prompt,
     });
+    const voice = [...prompt.matchAll(/<message\b[^>]*>/g)].pop()?.[0].includes(' via="voice call"');
     const said = [...prompt.matchAll(/<message[^>]*>([\s\S]*?)<\/message>/g)].pop()?.[1].trim() ?? '';
     const slash = Object.keys(SLASH).find((k) => said.startsWith(k + ' '));
     if (slash) {
@@ -251,7 +276,7 @@ export class OllamaProvider implements AgentProvider {
     for (let step = 0; step < 8; step++) {
       const memory = state.summary ? `\n\n## Memory of earlier conversation\n\n${state.summary}` : '';
       const { message, prompt_eval_count } = await this.chat([
-        { role: 'system', content: system() + memory },
+        { role: 'system', content: system() + memory + (voice ? `\n\n${VOICE}` : '') },
         ...state.messages,
       ]);
       state.promptTokens = prompt_eval_count ?? state.promptTokens;

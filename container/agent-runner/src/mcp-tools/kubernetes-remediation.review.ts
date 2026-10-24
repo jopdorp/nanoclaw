@@ -103,7 +103,11 @@ export const stopSession: McpToolDefinition = {
 };
 
 const persona = (name: string, description: string, properties: Record<string, object>): McpToolDefinition => ({
-  tool: { name, description, inputSchema: { type: 'object', properties, required: Object.keys(properties) } },
+  tool: {
+    name,
+    description,
+    inputSchema: { type: 'object', properties, required: Object.keys(properties).slice(0, 1) },
+  },
   async handler(args) {
     await writeMessageOut({
       id: `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -128,4 +132,9 @@ registerTools([
   persona('summon_persona', "Bring Jegor back into a local persona's room (he gets an invite).", {
     name: { type: 'string' },
   }),
+  persona(
+    'set_persona_voice',
+    "Set a local persona's call voice: a built-in speaker id, a clone sample, and the default speaking style. A field left out stays, an empty one is cleared.",
+    { name: { type: 'string' }, speaker: { type: 'string' }, ref: { type: 'string' }, instruct: { type: 'string' } },
+  ),
 ]);

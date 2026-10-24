@@ -582,6 +582,12 @@ async function deliverMessage(
     return;
   }
 
+  if (
+    !content.files?.length &&
+    outboundClaim?.({ ...msg, channelType: msg.channelType, platformId: msg.platformId }, content)
+  )
+    return;
+
   // Read file attachments from outbox if the content declares files.
   // File I/O lives in session-manager.ts (symmetric with inbound
   // extractAttachmentFiles) — delivery just hands buffers to the adapter.
@@ -677,6 +683,16 @@ const deliveryActions = new Map<string, DeliveryEntry>();
 
 function isUnguardedEntry(entry: DeliveryEntry): entry is Extract<DeliveryEntry, { guard: Unguarded }> {
   return isUnguarded(entry.guard);
+}
+
+/** A module that says a text message instead of posting it (a live voice call) takes it here; true means taken. */
+type OutboundClaim = (
+  msg: { channelType: string; platformId: string; inReplyTo: string | null },
+  content: Record<string, unknown>,
+) => boolean;
+let outboundClaim: OutboundClaim | null = null;
+export function setOutboundClaim(claim: OutboundClaim): void {
+  outboundClaim = claim;
 }
 
 /** See the batch-preview invocation in the delivery poll for semantics. */
