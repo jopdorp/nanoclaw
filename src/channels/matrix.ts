@@ -14,11 +14,15 @@
  *   MATRIX_DEVICE_ID            — stable device ID across restarts
  */
 import { createMatrixAdapter } from '@beeper/chat-adapter-matrix';
+import path from 'path';
+
+import { DATA_DIR } from '../config.js';
 
 import { log } from '../log.js';
 import { readEnvFile } from '../env.js';
 import type { ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
+import { discardCryptoStore, encryptUploads, useDurableCryptoStore } from './matrix-crypto-store.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 /**
@@ -186,6 +190,41 @@ registerChannelAdapter('matrix', {
     }
 
     const matrixAdapter = wrapWithDmResolution(createMatrixAdapter());
+    if (process.env.MATRIX_RECOVERY_KEY) {
+      const file = path.join(DATA_DIR, 'matrix-crypto.v8');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const adapter = matrixAdapter as any;
+      // The adapter would keep the cross-signing private keys and backup key as plain JSON in the state db;
+      // they restore from secret storage at startup instead.
+      adapter.maybePersistSecretsBundle = async () => {};
+      const initE2EE = adapter.maybeInitE2EE.bind(adapter);
+      adapter.maybeInitE2EE = () =>
+        initE2EE().catch((err: unknown) => {
+          discardCryptoStore(file, err);
+          return initE2EE();
+        });
+      const initialize = matrixAdapter.initialize.bind(matrixAdapter);
+      matrixAdapter.initialize = async (chat) => {
+        const flush = await useDurableCryptoStore(file);
+        adapter.disconnect = async () => {
+          await matrixAdapter.shutdown();
+          await flush();
+        };
+        await initialize(chat);
+        const bundleKey = adapter.getSecretsBundleStorageKey();
+        if (bundleKey) await adapter.stateAdapter.delete(bundleKey);
+        adapter.sendRoomMessage = encryptUploads(adapter.client, adapter.sendRoomMessage.bind(adapter));
+        // Signs this device with the account's cross-signing keys from secret storage, so clients trust it;
+        // the own identity has to be downloaded first or the import is refused.
+        const crypto = adapter.client.getCrypto();
+        await crypto
+          .userHasCrossSigningKeys(undefined, true)
+          .catch((err: unknown) => log.warn('Matrix own identity download failed', { err }));
+        await crypto
+          .bootstrapCrossSigning({})
+          .catch((err: unknown) => log.warn('Matrix device cross-signing failed', { err }));
+      };
+    }
     const bridge = createChatSdkBridge({
       adapter: matrixAdapter,
       concurrency: 'concurrent',
