@@ -65,7 +65,10 @@ vi.mock('../../db/container-configs.js', () => ({
   updateContainerConfigScalars: vi.fn(),
   ensureContainerConfig: () => {},
 }));
-vi.mock('../local-ai.js', () => ({ openLocalRoom: (...a: unknown[]) => mockOpenLocalRoom(...a) }));
+vi.mock('../local-ai.js', () => ({
+  openLocalRoom: (...a: unknown[]) => mockOpenLocalRoom(...a),
+  wipeLocalPersona: vi.fn(),
+}));
 vi.mock('../../db/agent-groups.js', () => ({
   getAgentGroup: (id: string) => ({ id, name: id.toUpperCase(), folder: id, agent_provider: null, created_at: '' }),
   getAgentGroupByFolder: () => undefined,

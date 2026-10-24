@@ -38,7 +38,8 @@ import '../../cli/resources/groups.js';
 import { killContainer } from '../../container-runner.js';
 import { getSessionsByAgentGroup } from '../../db/sessions.js';
 import { createDestination, getDestinationByName, getDestinations, normalizeName } from './db/agent-destinations.js';
-import { openLocalRoom } from '../local-ai.js';
+import { readSettings, writeSettings } from '../../local-persona-settings.js';
+import { openLocalRoom, wipeLocalPersona } from '../local-ai.js';
 import { writeDestinations } from './write-destinations.js';
 
 async function notifyAgent(session: Session, text: string): Promise<void> {
@@ -364,8 +365,11 @@ export async function deleteAgent(content: Record<string, unknown>, session: Ses
         d.target_type === 'agent' && d.target_id === session.agent_group_id && /^parent(-\d+)?$/.test(d.local_name),
     );
   if (!target || !created) return notifyAgent(session, `delete_agent: "${name}" is not an agent you created.`);
+  await wipeLocalPersona(target);
   for (const s of await getSessionsByAgentGroup(target)) killContainer(s.id, 'deleted by its creator');
   await lookup('groups-delete')!.handler({ id: target }, { caller: 'host' });
+  const { [target]: _dropped, ...settings } = readSettings();
+  writeSettings(settings);
   await writeDestinations(session.agent_group_id, session.id);
   await notifyAgent(session, `Agent "${name}" deleted.`);
 }

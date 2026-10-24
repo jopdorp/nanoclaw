@@ -66,6 +66,7 @@ import { validateAdditionalMounts } from './modules/mount-security/index.js';
 // remains tied to src/providers/index.ts.
 import './provider-contracts/index.js';
 import { getProviderHostContract } from './provider-contracts/registry.js';
+import { personaSettings } from './local-persona-settings.js';
 import { resolveProviderName } from './providers/provider-name.js';
 import {
   providerStateVolumePath,
@@ -1303,6 +1304,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   if (local) {
     for (const key of Object.keys(contributedEnv)) if (/^(https?|all)_proxy$/i.test(key)) delete contributedEnv[key];
     env.LOCAL_AI_HOST = LOCAL_AI_HOST;
+    env.LOCAL_AI_TOOLS = personaSettings(agentGroup.id).tools;
   }
 
   const hostUid = process.getuid?.();

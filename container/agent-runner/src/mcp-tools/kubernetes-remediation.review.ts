@@ -101,4 +101,25 @@ export const stopSession: McpToolDefinition = {
   },
 };
 
-registerTools([proposeKubernetesRemediation, readK8sRepo, checkUpdates, stopSession]);
+const persona = (name: string, description: string, properties: Record<string, object>): McpToolDefinition => ({
+  tool: { name, description, inputSchema: { type: 'object', properties, required: Object.keys(properties) } },
+  async handler(args) {
+    await writeMessageOut({
+      id: `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'system',
+      content: JSON.stringify({ ...args, action: name }),
+    });
+    return { content: [{ type: 'text', text: 'Requested; the host answers in a moment.' }] };
+  },
+});
+
+registerTools([
+  proposeKubernetesRemediation,
+  readK8sRepo,
+  checkUpdates,
+  stopSession,
+  persona('list_personas', "Names of Jegor's local personas and who made each.", {}),
+  persona('summon_persona', "Bring Jegor back into a local persona's room (he gets an invite).", {
+    name: { type: 'string' },
+  }),
+]);

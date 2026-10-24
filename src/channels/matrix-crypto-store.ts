@@ -157,6 +157,9 @@ type Send = (roomId: string, rootEventId: string | undefined, content: Record<st
  * Uploads are held until the message is sent, where the room is known, so a
  * file for an encrypted room is encrypted before it leaves the host.
  */
+/** Told about every upload with its room, so a module can delete the media later. */
+export const uploadListeners: ((roomId: string, contentUri: string) => void)[] = [];
+
 export function encryptUploads(client: UploadingClient, send: Send): Send {
   const upload = client.uploadContent.bind(client);
   const held = new Map<string, { data: Blob; opts: { name?: string; type?: string } }>();
@@ -171,10 +174,12 @@ export function encryptUploads(client: UploadingClient, send: Send): Send {
     held.delete(content.url as string);
     if (!(await client.getCrypto()?.isEncryptionEnabledInRoom(roomId))) {
       const { content_uri } = await upload(file.data, file.opts);
+      for (const listener of uploadListeners) listener(roomId, content_uri);
       return send(roomId, rootEventId, { ...content, url: content_uri });
     }
     const encrypted = await encryptAttachment(new Uint8Array(await file.data.arrayBuffer()));
     const { content_uri } = await upload(new Blob([encrypted.ciphertext]), { type: 'application/octet-stream' });
+    for (const listener of uploadListeners) listener(roomId, content_uri);
     const { url: _plain, ...rest } = content;
     return send(roomId, rootEventId, { ...rest, file: { ...encrypted.file, url: content_uri } });
   };
