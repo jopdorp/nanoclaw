@@ -9,10 +9,12 @@
  * summary.
  */
 import fs from 'fs';
+import path from 'path';
 
 import { writeMessageOut } from '../db/messages-out.js';
 import { createAgent, deleteAgent } from '../mcp-tools/agents.js';
 import { sendFile } from '../mcp-tools/core.js';
+import { MEMORY_FILE_BUDGET_CHARS, renderMemorySection } from '../memory/context.js';
 import { render } from './ollama-media.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
@@ -44,6 +46,21 @@ const persona = [
     createAgent.handler(a),
   ),
   tool('delete_persona', 'Delete a persona you created.', { name: str }, (a) => deleteAgent.handler(a)),
+  tool('read_memory', 'Read a file of your memory, e.g. index.md.', { file: str }, async (a) =>
+    read(memoryPath(a.file), '(no such file)'),
+  ),
+  tool(
+    'write_memory',
+    'Replace a file of your memory. Only for something worth keeping across conversations: a fact about him, a wish, a decision.',
+    { file: str, text: str },
+    async (a) => {
+      const text = String(a.text ?? '');
+      if (text.length > MEMORY_FILE_BUDGET_CHARS) return `Error: keep it under ${MEMORY_FILE_BUDGET_CHARS} characters.`;
+      fs.mkdirSync(path.dirname(memoryPath(a.file)), { recursive: true });
+      fs.writeFileSync(memoryPath(a.file), text);
+      return 'Saved.';
+    },
+  ),
   tool('read_character', 'Show your own character prompt.', {}, async () => read(PERSONA_FILE, '(empty)')),
   tool(
     'update_character',
@@ -112,8 +129,16 @@ const SLASH: Record<string, string> = text
   ? { '/image': 'quick' }
   : { '/image hq': 'image', '/image': 'quick', '/video': 'video', '/music': 'music' };
 const RULES =
-  'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, or showing or changing your own character or that of a persona you made. Otherwise just answer.';
+  'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, showing or changing your own character or that of a persona you made, or remembering something worth keeping. Otherwise just answer.';
 const STATE_FILE = '/workspace/ollama-state.json';
+const MEMORY_DIR = '/workspace/agent/memory';
+// Memory files only, never the persona prompt or anything else in the group folder.
+const memoryPath = (file: unknown) => {
+  // Small models write the path as `memory/index.md` as often as `index.md`.
+  const full = path.resolve(MEMORY_DIR, String(file ?? 'index.md').replace(/^(\/workspace\/agent\/)?memory\//, ''));
+  if (!full.startsWith(MEMORY_DIR + path.sep) || !full.endsWith('.md')) throw new Error('only .md files under memory/');
+  return full;
+};
 const PERSONA_FILE = '/workspace/agent/instructions.prepend.md';
 const MAX_CHARACTER_CHARS = 8000;
 const KEEP = 8;
@@ -251,7 +276,9 @@ export class OllamaProvider implements AgentProvider {
     let ended = false;
     const state: State = JSON.parse(read(STATE_FILE, '{"summary":"","messages":[],"promptTokens":0}'));
     const system = () =>
-      [RULES, read(PERSONA_FILE, ''), input.systemContext?.instructions ?? ''].filter(Boolean).join('\n\n');
+      [RULES, read(PERSONA_FILE, ''), renderMemorySection(), input.systemContext?.instructions ?? '']
+        .filter(Boolean)
+        .join('\n\n');
     const self = this;
 
     return {
