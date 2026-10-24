@@ -168,10 +168,10 @@ export class OllamaProvider implements AgentProvider {
 
   private async *turn(state: State, system: () => string, prompt: string): AsyncGenerator<ProviderEvent> {
     if (state.promptTokens > (await this.compactAt())) await this.compact(state);
-    // Plain text is wrapped for whoever wrote last, so a reply never depends on the model's markup.
+    // Replies go to whoever wrote last and any markup is dropped, small models misname or leave tags unclosed.
     const from = [...prompt.matchAll(/<message[^>]*\bfrom="([^"]+)"/g)].pop()?.[1];
     const wrap = (text: string) =>
-      from && !text.includes('<message') ? `<message to="${from}">${text}</message>` : text;
+      from ? `<message to="${from}">${text.replace(/<\/?message\b[^>]*>/g, '').trim()}</message>` : text;
     state.messages.push({ role: 'user', content: prompt });
     const said = [...prompt.matchAll(/<message[^>]*>([\s\S]*?)<\/message>/g)].pop()?.[1].trim() ?? '';
     const slash = Object.keys(SLASH).find((k) => said.startsWith(k + ' '));
