@@ -97,7 +97,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       initContainers:
         - name: state-layout
-          image: gitea.claw.jopdorp.nl/cluster/nanoclaw/remediation-host@sha256:0f8f7ab309ec8515033d3ad62e296bc36b0479b9a1e3abb47ce1a685ce5cae10
+          image: gitea.claw.jopdorp.nl/cluster/nanoclaw/remediation-host@sha256:bce182883fa3c32dbb4f1b54b0510fcb64a4613d5646455cef5ea3300d5f7975
           # fsGroup makes the volume 2770; OneCLI refuses anything but 0700 for its staged files.
           command: [sh, -c]
           args: [mkdir -p /state/data/onecli /state/groups /state/store && chmod 0700 /state/data/onecli]
@@ -109,7 +109,7 @@ spec:
             - { name: state, mountPath: /state }
         # This deploy is our sanctioned upgrade path, so it stamps the upgrade tripwire marker.
         - name: upgrade-state
-          image: gitea.claw.jopdorp.nl/cluster/nanoclaw/remediation-host@sha256:0f8f7ab309ec8515033d3ad62e296bc36b0479b9a1e3abb47ce1a685ce5cae10
+          image: gitea.claw.jopdorp.nl/cluster/nanoclaw/remediation-host@sha256:bce182883fa3c32dbb4f1b54b0510fcb64a4613d5646455cef5ea3300d5f7975
           command: [node, --input-type=module, -e]
           args: ["(await import('/opt/nanoclaw/dist/upgrade-state.js')).writeUpgradeState({ via: 'orfie-deploy' })"]
           workingDir: /opt/nanoclaw
@@ -122,7 +122,7 @@ spec:
             - { name: tmp, mountPath: /tmp }
       containers:
         - name: orchestrator
-          image: gitea.claw.jopdorp.nl/cluster/nanoclaw/remediation-host@sha256:0f8f7ab309ec8515033d3ad62e296bc36b0479b9a1e3abb47ce1a685ce5cae10
+          image: gitea.claw.jopdorp.nl/cluster/nanoclaw/remediation-host@sha256:bce182883fa3c32dbb4f1b54b0510fcb64a4613d5646455cef5ea3300d5f7975
           imagePullPolicy: IfNotPresent
           command: [node]
           args: [/opt/nanoclaw/dist/index.js]
@@ -130,7 +130,7 @@ spec:
           env:
             - { name: HOME, value: /home/node }
             - { name: NANOCLAW_RUNTIME_DRIVER, value: kubernetes }
-            - { name: CONTAINER_IMAGE, value: 'gitea.claw.jopdorp.nl/cluster/nanoclaw/remediation-agent@sha256:0ef33f0c24d8bf87e315f041ef6e99ea9cad0fec88c4868dcec0f32b1149b2e8' }
+            - { name: CONTAINER_IMAGE, value: 'gitea.claw.jopdorp.nl/cluster/nanoclaw/remediation-agent@sha256:0bdc81ef9ec363aa58d309f9f3b79cb24e2cf33cf87843a9686d8c72d60268f4' }
             - { name: NANOCLAW_KUBERNETES_NAMESPACE, value: nanoclaw-remediator }
             - { name: NANOCLAW_KUBERNETES_SERVICE_ACCOUNT, value: nanoclaw-session }
             - { name: NANOCLAW_KUBERNETES_MEMORY_REQUEST, value: 512Mi }
