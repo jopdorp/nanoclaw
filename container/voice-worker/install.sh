@@ -6,7 +6,7 @@ set -eu
 D=/userdata/ai/voice QT=${QWENTTS_DIR:-/userdata/ai/qwentts} SRC=$(dirname "$0")
 PY=${PYTHON:-$(ls /userdata/*/venv*/bin/python3 /userdata/ai/*/venv/bin/python3 2>/dev/null | head -1)}
 mkdir -p $D/models/whisper-small
-cp "$SRC"/worker.py "$SRC"/harness.py "$SRC"/requirements.txt "$SRC"/run.sh $D/
+[ "$(cd "$SRC" && pwd)" = "$D" ] || cp "$SRC"/worker.py "$SRC"/harness.py "$SRC"/requirements.txt "$SRC"/run.sh $D/
 [ -x $D/venv/bin/python ] || "$PY" -m venv $D/venv
 $D/venv/bin/pip install -q --only-binary=:all: -r $D/requirements.txt
 fetch() {  # repo@rev file sha256 dest
