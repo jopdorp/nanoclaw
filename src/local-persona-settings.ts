@@ -14,6 +14,8 @@ export interface PersonaSettings {
   /** Rooms seen carrying the nanoclaw.chat marker, the only ones summon may replace. */
   rooms?: string[];
   creator?: string;
+  /** Call voice: a built-in TTS speaker or a clone sample, and the default speaking style. */
+  voice?: { speaker?: string; ref?: string; instruct?: string };
 }
 
 export function readSettings(): Record<string, Partial<PersonaSettings>> {

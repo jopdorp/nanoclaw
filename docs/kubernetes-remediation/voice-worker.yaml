@@ -1,0 +1,32 @@
+# The Batocera voice worker's WebSocket into the host: a node port on whichever node runs the
+# orchestrator (Local keeps the laptop's address, so the policy below can match it), open to that laptop only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nanoclaw-voice-worker
+  namespace: nanoclaw-remediator
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    app: nanoclaw-remediator-orchestrator
+  ports:
+    - { name: voice-worker, port: 3001, targetPort: voice-worker, nodePort: 30901 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nanoclaw-orchestrator-ingress
+  namespace: nanoclaw-remediator
+spec:
+  podSelector:
+    matchLabels:
+      app: nanoclaw-remediator-orchestrator
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 3000 }
+    - from:
+        - ipBlock: { cidr: 192.168.1.77/32 }
+      ports:
+        - { protocol: TCP, port: 3001 }

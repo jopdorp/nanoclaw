@@ -171,8 +171,16 @@ spec:
                 secretKeyRef:
                   name: nanoclaw-matrix-media-admin
                   key: token
+            - { name: MATRIX_RTC_URL, value: https://matrix-rtc.claw.jopdorp.nl }
+            - name: VOICE_WORKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: voice-worker-token
+                  key: token
+                  optional: true
           ports:
             - { name: webhook, containerPort: 3000 }
+            - { name: voice-worker, containerPort: 3001 }
           readinessProbe:
             httpGet: { path: /health, port: webhook }
             periodSeconds: 5

@@ -28,3 +28,4 @@ import './community-portal/index.js';
 import './kubernetes-remediation/index.review.js';
 import './model-switch.js';
 import './local-ai.js';
+import './voice-calls.js';

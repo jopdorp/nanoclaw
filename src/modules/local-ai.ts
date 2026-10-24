@@ -14,7 +14,7 @@ import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
 
-import { lookup } from '../cli/registry.js';
+import { lookup, register } from '../cli/registry.js';
 import '../cli/resources/messaging-groups.js';
 import '../cli/resources/wirings.js';
 import { uploadListeners } from '../channels/matrix-crypto-store.js';
@@ -46,7 +46,7 @@ import { getAdminsOfAgentGroup, grantRole } from './permissions/db/user-roles.js
 const exec = promisify(execFile);
 const REDACTABLE = new Set(['m.room.message', 'm.room.encrypted', 'm.reaction', 'm.sticker']);
 
-const isLocal = async (agentGroupId: string) => (await getContainerConfig(agentGroupId))?.provider === 'ollama';
+export const isLocal = async (agentGroupId: string) => (await getContainerConfig(agentGroupId))?.provider === 'ollama';
 
 trustCreateAgent(isLocal);
 
@@ -76,8 +76,8 @@ class MatrixHttpError extends Error {
   }
 }
 
-async function matrix(route: string, method = 'GET', body?: unknown, admin = false): Promise<any> {
-  const api = admin ? '/_synapse/admin/v1' : '/_matrix/client/v3';
+export async function matrix(route: string, method = 'GET', body?: unknown, admin = false): Promise<any> {
+  const api = admin ? '/_synapse/admin/v1' : route.startsWith('/_matrix/') ? '' : '/_matrix/client/v3';
   // Media deletion needs a server admin; that token is used for nothing else.
   const token = admin ? process.env.MATRIX_MEDIA_ADMIN_TOKEN : process.env.MATRIX_ACCESS_TOKEN;
   for (;;) {
@@ -110,19 +110,19 @@ export async function openLocalRoom(parentId: string, child: AgentGroup): Promis
   const now = new Date().toISOString();
   for (const admin of await getAdminsOfAgentGroup(parentId))
     await grantRole({ ...admin, agent_group_id: child.id, granted_at: now });
-  const { tools, lifetimeMinutes, think } = personaSettings(parentId);
-  writeSettings({ ...readSettings(), [child.id]: { tools, lifetimeMinutes, think, creator: parentId } });
+  const { tools, lifetimeMinutes, think, voice } = personaSettings(parentId);
+  writeSettings({ ...readSettings(), [child.id]: { tools, lifetimeMinutes, think, voice, creator: parentId } });
   await createRoom(child);
 }
 
-async function createRoom(group: AgentGroup): Promise<void> {
+async function createRoom(group: AgentGroup, encrypted = true): Promise<void> {
   const { room_id } = await matrix('/createRoom', 'POST', {
-    name: group.name,
+    name: encrypted ? group.name : `${group.name} call test`,
     room_version: '10',
     preset: 'trusted_private_chat',
     initial_state: [
       { type: 'nanoclaw.chat', state_key: '', content: {} },
-      ...(process.env.MATRIX_RECOVERY_KEY
+      ...(encrypted && process.env.MATRIX_RECOVERY_KEY
         ? [{ type: 'm.room.encryption', state_key: '', content: { algorithm: 'm.megolm.v1.aes-sha2' } }]
         : []),
     ],
@@ -399,3 +399,34 @@ registerDeliveryAction(
   },
   unguarded("only Orfie, and it only re-invites the persona's own admins"),
 );
+
+registerDeliveryAction(
+  'set_persona_voice',
+  async (content, session) => {
+    if (!(await isOrfie(session))) return;
+    const group = (await localPersonas()).find((g) => g.name.toLowerCase() === String(content.name).toLowerCase());
+    if (!group) return notifyAgent(session, `set_persona_voice: no local persona called "${String(content.name)}".`);
+    const settings = readSettings();
+    const voice = { ...settings[group.id]?.voice };
+    for (const key of ['speaker', 'ref', 'instruct'] as const)
+      if (key in content) voice[key] = String(content[key] ?? '') || undefined;
+    writeSettings({ ...settings, [group.id]: { ...settings[group.id], voice } });
+    await notifyAgent(session, `${group.name}'s voice is set.`);
+  },
+  unguarded("only Orfie, and only a local persona's call voice"),
+);
+
+// An unencrypted copy of a persona's room for call tests until call media can be encrypted; `ncl voice test-room --persona X`.
+register({
+  name: 'voice-test-room',
+  description: 'Create an unencrypted call test room wired to a local persona.',
+  access: 'hidden',
+  hostOnly: true,
+  parseArgs: (raw) => ({ persona: String(raw.persona ?? '') }),
+  handler: async ({ persona }) => {
+    const group = (await localPersonas()).find((g) => g.name.toLowerCase() === persona.toLowerCase());
+    if (!group) throw new Error(`no local persona called "${persona}"`);
+    await createRoom(group, false);
+    return { persona: group.name };
+  },
+});

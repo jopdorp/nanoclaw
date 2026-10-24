@@ -37,6 +37,9 @@ const MATRIX_DEFAULTS: ChannelDefaults = {
   mentions: 'platform',
 };
 
+/** Called with the matrix-js-sdk client once sync is ready. */
+export const matrixClientListeners: ((client: any) => void)[] = [];
+
 const ENV_KEYS = [
   'MATRIX_BASE_URL',
   'MATRIX_ACCESS_TOKEN',
@@ -272,6 +275,7 @@ registerChannelAdapter('matrix', {
           resolve();
         }, 30_000);
       });
+      for (const listener of matrixClientListeners) listener((matrixAdapter as any).client);
     };
 
     return bridge;

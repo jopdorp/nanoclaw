@@ -302,8 +302,11 @@ function formatSingleChat(msg: MessageInRow): string {
     : '';
 
   const fromAttr = originAttr(msg);
+  const voiceAttr = content.voice
+    ? ` via="voice call"${content.emotion ? ` tone="${escapeXml(String(content.emotion))}"` : ''}`
+    : '';
 
-  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}${approvalsSuffix}</message>`;
+  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}${voiceAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}${approvalsSuffix}</message>`;
 }
 
 /**
