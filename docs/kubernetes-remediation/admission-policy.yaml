@@ -650,6 +650,9 @@ spec:
         (request.userInfo.username == 'system:serviceaccount:orfie-ci:orfie-ci-deploy' &&
          request.namespace == 'nanoclaw-remediator' && request.resource.group == 'apps' && request.resource.resource == 'deployments' &&
          request.name == 'nanoclaw-remediator-orchestrator' && !has(request.subResource) && request.operation == 'UPDATE') ||
+        (request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator' &&
+         request.namespace == 'orfie-ci' && request.resource.group == 'batch' && request.resource.resource == 'jobs' &&
+         !has(request.subResource) && request.operation == 'DELETE') ||
         (request.userInfo.username in ['system:serviceaccount:orfie-ci:orfie-ci-poll', 'system:serviceaccount:orfie-ci:orfie-ci-deploy'] &&
          request.namespace == 'orfie-ci' && !has(request.subResource) &&
          ((request.resource.group == '' && request.resource.resource == 'configmaps' && request.name == 'orfie-ci-state' && request.operation == 'UPDATE') ||
