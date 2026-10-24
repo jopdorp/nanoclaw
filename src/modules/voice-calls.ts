@@ -11,6 +11,7 @@ import type { IncomingMessage } from 'http';
 import { WebSocketServer, type WebSocket } from 'ws';
 
 import { matrixClientListeners } from '../channels/matrix.js';
+import { getContainerConfig } from '../db/container-configs.js';
 import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../db/messaging-groups.js';
 import { setOutboundClaim } from '../delivery.js';
 import { onHostShutdown, onHostStart } from '../host-lifecycle.js';
@@ -143,7 +144,8 @@ async function join(room: string, member: MatrixEvent): Promise<void> {
         err.status === 404 ? leave(call, true) : log.warn('Voice call leave refresh failed', { callId: call.id, err }),
       );
     }, LEAVE_DELAY_MS / 4);
-    send({ type: 'start', callId: call.id, livekitUrl: url, jwt, room: livekitRoom, voice: call.voice });
+    const mode = /9b/i.test((await getContainerConfig(persona))?.model ?? '') ? 'call-9b' : 'call-4b';
+    send({ type: 'start', callId: call.id, livekitUrl: url, jwt, room: livekitRoom, voice: call.voice, mode });
     log.info('Voice call joined', { callId: call.id, room });
   } catch (err) {
     log.error('Voice call join failed', { room, err });

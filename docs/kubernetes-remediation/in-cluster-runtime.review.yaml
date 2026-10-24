@@ -295,3 +295,4 @@ spec:
         - { protocol: TCP, port: 8188 }
         - { protocol: TCP, port: 8189 }
         - { protocol: TCP, port: 8190 }
+        - { protocol: TCP, port: 8192 }

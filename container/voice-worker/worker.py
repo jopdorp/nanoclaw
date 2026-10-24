@@ -25,6 +25,7 @@ from pipecat.audio.vad.vad_analyzer import VADParams, VADState
 
 env = os.environ.get
 TTS_URL = f"http://127.0.0.1:{env('TTS_PORT', '8191')}"
+REFEREE_URL, GPU_TTL = "http://127.0.0.1:8192", 60
 ALLOW = set(env("TRANSCRIBE_ALLOW", "127.0.0.1,192.168.1.11,192.168.1.12,192.168.1.13,192.168.1.17").split(","))
 IN_RATE, OUT_RATE, FRAME = 16000, 24000, 480  # FRAME = 20 ms at OUT_RATE
 log = logging.getLogger("voice")
@@ -32,6 +33,10 @@ TOKEN = os.environ.pop("VOICE_TOKEN", "")  # keep it out of the tts-server's env
 PDEATH = [sys.executable, "-I", "-c", "import ctypes,os,signal,sys; ctypes.CDLL(None).prctl(1, signal.SIGKILL); os.execv(sys.argv[1], sys.argv[1:])"]
 calls: dict[str, "Call"] = {}
 _whisper, _used, _lock, _transcribing = None, 0.0, threading.Lock(), asyncio.Semaphore(1)
+
+
+class Busy(Exception):
+    pass
 
 
 async def unload_idle_whisper():
@@ -90,7 +95,7 @@ class Call:
         self.room, self.source = rtc.Room(), rtc.AudioSource(OUT_RATE, 1, queue_size_ms=200)
         self.tts, self.http, self.turn, self.upto, self.dropped, self.heard_n = None, None, None, 0, set(), 0
         self.texts, self.pcm, self.workers, self.listener, self.starting = asyncio.Queue(), asyncio.Queue(), [], None, None
-        self.keys, self.stopping = list((msg.get("e2ee") or {}).get("keys", [])), False
+        self.keys, self.stopping, self.beat = list((msg.get("e2ee") or {}).get("keys", [])), False, None
 
     async def emit(self, kind: str, **kw):
         await self.send(json.dumps({"type": kind, "callId": self.id, **kw}))
@@ -98,11 +103,13 @@ class Call:
     async def start(self):
         voice = self.msg.get("voice") or {}
         mode = "base" if voice.get("ref") else "customvoice"
+        self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=5))
+        await self.acquire()
+        self.beat = asyncio.create_task(self.heartbeat())
         self.tts = await asyncio.create_subprocess_exec(  # PDEATH: the tts-server dies with us, never orphaning VRAM
             *PDEATH, os.environ["TTS_BIN"], "--model", os.environ[f"TTS_MODEL_{mode.upper()}"], "--codec", os.environ["TTS_CODEC"],
             "--host", "127.0.0.1", "--port", TTS_URL.rsplit(":", 1)[1], "--lang", "English",
             env={**os.environ, "LD_LIBRARY_PATH": env("TTS_LD_LIBRARY_PATH", "")})
-        self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=5))
         self.vad, self.eot = SileroVADAnalyzer(params=VADParams(stop_secs=0.2)), LocalSmartTurnAnalyzerV3()
         self.vad.set_sample_rate(IN_RATE)
         self.eot.set_sample_rate(IN_RATE)
@@ -127,6 +134,21 @@ class Call:
         self.workers = [asyncio.create_task(self.synth_loop()), asyncio.create_task(self.play_loop())]
         log.info("call %s up in %s", self.id, self.room.name)
 
+    async def acquire(self):
+        body = {"mode": self.msg.get("mode") or "call-4b", "owner": self.id, "ttl": GPU_TTL}
+        async with self.http.post(f"{REFEREE_URL}/acquire", json=body) as r:
+            if r.status in (409, 503):
+                raise Busy(await r.text())
+            r.raise_for_status()
+
+    async def heartbeat(self):
+        while True:
+            await asyncio.sleep(GPU_TTL / 3)
+            try:
+                await self.acquire()
+            except Exception as e:
+                log.warning("referee heartbeat: %r", e)
+
     async def warm_up(self):  # the first synthesis after load is twice as slow
         async for _ in self.synth("Hi.", None):
             pass
@@ -143,7 +165,7 @@ class Call:
     def started(self, task: asyncio.Task):
         if not task.cancelled() and task.exception():
             log.warning("call start failed: %r", task.exception())
-            asyncio.ensure_future(self.stop("error: start failed"))
+            asyncio.ensure_future(self.stop("busy" if isinstance(task.exception(), Busy) else "error: start failed"))
 
     def set_key(self, k: dict):
         if self.msg.get("e2ee") is None:
@@ -257,7 +279,7 @@ class Call:
             return
         self.stopping = True
         try:
-            for t in [self.starting, *self.workers, self.listener]:
+            for t in [self.starting, self.beat, *self.workers, self.listener]:
                 if t:
                     t.cancel()
             await self.room.disconnect()
@@ -274,6 +296,9 @@ class Call:
                 except asyncio.TimeoutError:
                     self.tts.kill()
                     await self.tts.wait()
+            with contextlib.suppress(Exception):  # self.http is closed by now
+                async with aiohttp.ClientSession() as s, s.post(f"{REFEREE_URL}/release", json={"owner": self.id}):
+                    pass
             calls.pop(self.id, None)  # only now: a new call must find port 8191 free
             with contextlib.suppress(Exception):
                 await self.emit("ended", reason=reason)

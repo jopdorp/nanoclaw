@@ -1305,7 +1305,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     for (const key of Object.keys(contributedEnv)) if (/^(https?|all)_proxy$/i.test(key)) delete contributedEnv[key];
     env.LOCAL_AI_HOST = LOCAL_AI_HOST;
     const { tools, think } = personaSettings(agentGroup.id);
-    Object.assign(env, { LOCAL_AI_TOOLS: tools, LOCAL_AI_THINK: think ? '1' : '0' });
+    Object.assign(env, { LOCAL_AI_TOOLS: tools, LOCAL_AI_THINK: think ? '1' : '0', LOCAL_AI_OWNER: session.id });
   }
 
   const hostUid = process.getuid?.();

@@ -1,9 +1,9 @@
 /**
  * Renders an image, video or song on the LAN ComfyUI box for the ollama provider.
- * The GPU instance (:8188) has one 8 GB card: the quick SD 1.5 workflow fits
- * beside a small LLM, every other kind unloads the LLM first and frees the GPU
- * after. Text personas use the CPU-only instance (:8189), which never touches the
- * GPU. Workflows live in each instance's user data as nanoclaw/<kind>.json,
+ * The GPU instance (:8188) has one 8 GB card, shared through the box's referee
+ * (:8192, see hold): the quick SD 1.5 workflow fits beside the 4B, every other
+ * kind holds the media mode, which unloads the LLM, and frees the GPU after.
+ * The CPU-only instance (:8189) never touches the GPU. Workflows live in each instance's user data as nanoclaw/<kind>.json,
  * with %PROMPT% (and %LYRICS% for music) where the text goes. Nothing should
  * outlive the send: images come back over the websocket instead of being saved,
  * a saved video or song is deleted on the box by the host, the history entry is
@@ -16,8 +16,8 @@ import path from 'path';
 import { writeMessageOut } from '../db/messages-out.js';
 
 const host = process.env.LOCAL_AI_HOST;
-const ollama = `http://${host}:11434`;
-const QUICK_BESIDE_BYTES = 4.5e9;
+const referee = `http://${host}:8192`;
+const GPU_TTL = 120;
 // ComfyUI prefixes binary websocket frames with an event type and an image format.
 const FRAME_HEADER_BYTES = 8;
 
@@ -25,6 +25,33 @@ async function json(url: string, body?: unknown): Promise<any> {
   const res = await fetch(url, body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) });
   if (!res.ok) throw new Error(`${url}: ${res.status} ${await res.text()}`);
   return res.json();
+}
+
+export class Busy extends Error {}
+
+const ask = (route: string, body: object) =>
+  fetch(`${referee}/${route}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ owner: process.env.LOCAL_AI_OWNER, ...body }),
+  });
+
+/** Runs `work` while holding a GPU mode on the referee; no mode when a live call already holds one. */
+export async function hold<T>(mode: string | undefined, work: () => Promise<T>): Promise<T> {
+  if (!mode) return work();
+  const res = await ask('acquire', { mode, ttl: GPU_TTL });
+  if (res.status === 409 || res.status === 503) {
+    const inCall = JSON.stringify((await res.json().catch(() => ({}))).current ?? '').includes('call-');
+    throw new Busy(`${inCall ? 'busy in a call' : 'the box is busy'}, try again in a minute`);
+  }
+  if (!res.ok) throw new Error(`referee ${res.status}: ${await res.text()}`);
+  const beat = setInterval(() => ask('acquire', { mode, ttl: GPU_TTL }).catch(() => {}), (GPU_TTL * 1000) / 3);
+  try {
+    return await work();
+  } finally {
+    clearInterval(beat);
+    await ask('release', {}).catch(() => {});
+  }
 }
 
 export async function render(kind: string, prompt: string, lyrics = '', cpu = false): Promise<string> {
@@ -47,11 +74,7 @@ export async function render(kind: string, prompt: string, lyrics = '', cpu = fa
       Object.assign(node, { class_type: 'SaveImageWebsocket', inputs: { images: node.inputs.images } });
   }
 
-  const loaded: { name: string; size_vram: number }[] = cpu ? [] : ((await json(`${ollama}/api/ps`)).models ?? []);
-  // SD 1.5 needs ~3 GB, so it runs beside the 4B chat model but not beside anything bigger.
-  if (cpu || (kind === 'quick' && loaded.every((m) => m.size_vram < QUICK_BESIDE_BYTES)))
-    return run(comfy, graph, kind);
-  for (const m of loaded) await json(`${ollama}/api/generate`, { model: m.name, keep_alive: 0 });
+  if (cpu || kind === 'quick') return run(comfy, graph, kind);
   try {
     return await run(comfy, graph, kind);
   } finally {
