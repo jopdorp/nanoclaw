@@ -15,7 +15,7 @@ import { writeMessageOut } from '../db/messages-out.js';
 import { createAgent, deleteAgent } from '../mcp-tools/agents.js';
 import { sendFile } from '../mcp-tools/core.js';
 import { MEMORY_FILE_BUDGET_CHARS, renderMemorySection } from '../memory/context.js';
-import { render } from './ollama-media.js';
+import { Busy, hold, render } from './ollama-media.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -34,8 +34,17 @@ const tool = (name: string, description: string, properties: Args, run: (args: A
 });
 const text = process.env.LOCAL_AI_TOOLS === 'text';
 const thinks = process.env.LOCAL_AI_THINK === '1';
+// In a live call the voice worker holds the call mode, and a 9B there only gets the context the call mode leaves it.
+const gpu = { nine: false, call: false };
+const CALL_CTX = 16384;
+const chatMode = () => (gpu.call ? undefined : gpu.nine ? 'chat-9b' : 'chat-4b');
 const media = (kind: (a: Args) => string) => async (a: Args) => {
-  const file = await render(kind(a), String(a.prompt), a.lyrics ? String(a.lyrics) : '', text);
+  const k = kind(a);
+  // SD 1.5 fits beside the 4B but not the 9B.
+  const cpu = text || (k === 'quick' && gpu.nine);
+  const file = await hold(cpu ? undefined : k === 'quick' ? chatMode() : 'media', () =>
+    render(k, String(a.prompt), a.lyrics ? String(a.lyrics) : '', cpu),
+  );
   try {
     return await sendFile.handler({ to: a.to, path: file });
   } finally {
@@ -185,7 +194,9 @@ const read = (file: string, fallback: string) => (fs.existsSync(file) ? fs.readF
 
 export class OllamaProvider implements AgentProvider {
   readonly emitsMidTurnText = true;
-  constructor(private readonly options: ProviderOptions) {}
+  constructor(private readonly options: ProviderOptions) {
+    gpu.nine = /9b/i.test(options.model ?? '');
+  }
 
   registerMemorySessionHook(): void {}
 
@@ -193,7 +204,11 @@ export class OllamaProvider implements AgentProvider {
     return false;
   }
 
-  private async chat(messages: Message[], tools = true): Promise<{ message: Message; prompt_eval_count?: number }> {
+  private chat(messages: Message[], tools = true): Promise<{ message: Message; prompt_eval_count?: number }> {
+    return hold(chatMode(), () => this.post(messages, tools));
+  }
+
+  private async post(messages: Message[], tools: boolean): Promise<{ message: Message; prompt_eval_count?: number }> {
     const res = await fetch(`http://${process.env.LOCAL_AI_HOST}:11434/api/chat`, {
       method: 'POST',
       body: JSON.stringify({
@@ -204,7 +219,7 @@ export class OllamaProvider implements AgentProvider {
         // The 9B calls its tools reliably only when it may think first (measured 2/10 without, 9/10 with).
         think: thinks,
         // Small models ramble; a chat reply stays a chat reply. Thinking spends from the same budget.
-        options: { num_predict: thinks ? 1500 : 300 },
+        options: { num_predict: thinks ? 1500 : 300, num_ctx: gpu.call && gpu.nine ? CALL_CTX : undefined },
       }),
     });
     if (!res.ok) throw new Error(`Ollama ${res.status}: ${await res.text()}`);
@@ -237,11 +252,12 @@ export class OllamaProvider implements AgentProvider {
     const numCtx = Number(
       /num_ctx\s+(\d+)/.exec(((await res.json()) as { parameters?: string }).parameters ?? '')?.[1],
     );
-    return (numCtx || 8192) * 0.75;
+    return Math.min(numCtx || 8192, gpu.call && gpu.nine ? CALL_CTX : Infinity) * 0.75;
   }
 
   private async *turn(state: State, system: () => string, prompt: string): AsyncGenerator<ProviderEvent> {
     prompt = await transcribeVoice(prompt);
+    gpu.call = [...prompt.matchAll(/<message\b[^>]*>/g)].pop()?.[0].includes(' via="voice call"') ?? false;
     if (state.promptTokens > (await this.compactAt())) await this.compact(state);
     // Replies go to whoever wrote last and any markup is dropped, small models misname or leave tags unclosed.
     const writer = [...prompt.matchAll(/<message[^>]*\bfrom="([^"]+)"/g)].pop()?.[1];
@@ -260,13 +276,12 @@ export class OllamaProvider implements AgentProvider {
         ? `<system>Your character prompt was just updated; act on it from now on.</system>\n${prompt}`
         : prompt,
     });
-    const voice = [...prompt.matchAll(/<message\b[^>]*>/g)].pop()?.[0].includes(' via="voice call"');
     const said = [...prompt.matchAll(/<message[^>]*>([\s\S]*?)<\/message>/g)].pop()?.[1].trim() ?? '';
     const slash = Object.keys(SLASH).find((k) => said.startsWith(k + ' '));
     if (slash) {
       yield { type: 'text', text: wrap('making it…') };
       const out = await media(() => SLASH[slash])({ to: from, prompt: said.slice(slash.length).trim() }).catch(
-        (e: Error) => `Error: ${e.message}`,
+        (e: Error) => (e instanceof Busy ? Promise.reject(e) : `Error: ${e.message}`),
       );
       state.messages.push({ role: 'assistant', content: JSON.stringify(out) });
       fs.writeFileSync(STATE_FILE, JSON.stringify(state));
@@ -276,7 +291,7 @@ export class OllamaProvider implements AgentProvider {
     for (let step = 0; step < 8; step++) {
       const memory = state.summary ? `\n\n## Memory of earlier conversation\n\n${state.summary}` : '';
       const { message, prompt_eval_count } = await this.chat([
-        { role: 'system', content: system() + memory + (voice ? `\n\n${VOICE}` : '') },
+        { role: 'system', content: system() + memory + (gpu.call ? `\n\n${VOICE}` : '') },
         ...state.messages,
       ]);
       state.promptTokens = prompt_eval_count ?? state.promptTokens;
@@ -314,6 +329,18 @@ export class OllamaProvider implements AgentProvider {
     yield { type: 'result', text: null };
   }
 
+  // A busy box is told in one line instead of loading the model anyway.
+  private async *guarded(state: State, system: () => string, prompt: string): AsyncGenerator<ProviderEvent> {
+    try {
+      yield* this.turn(state, system, prompt);
+    } catch (e) {
+      if (!(e instanceof Busy)) throw e;
+      const text = state.replyTo ? `<message to="${state.replyTo}">${e.message}</message>` : e.message;
+      yield { type: 'text', text };
+      yield { type: 'result', text };
+    }
+  }
+
   query(input: QueryInput): AgentQuery {
     const pending: string[] = [];
     let wake: (() => void) | null = null;
@@ -341,9 +368,9 @@ export class OllamaProvider implements AgentProvider {
       events: {
         async *[Symbol.asyncIterator]() {
           yield { type: 'init', continuation: 'ollama' };
-          yield* self.turn(state, system, input.prompt);
+          yield* self.guarded(state, system, input.prompt);
           while (!ended || pending.length > 0) {
-            if (pending.length > 0) yield* self.turn(state, system, pending.shift()!);
+            if (pending.length > 0) yield* self.guarded(state, system, pending.shift()!);
             else await new Promise<void>((resolve) => (wake = resolve));
           }
         },
