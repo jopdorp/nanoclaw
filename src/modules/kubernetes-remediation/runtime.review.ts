@@ -237,11 +237,33 @@ export async function startKubernetesRemediation(
   );
   // Sessions a stopped host left mid-classification; their incidents come back through recover.
   for (const s of await getSessionsByAgentGroup(GUARD_AGENT_GROUP_ID)) endGuardSession(s.id);
+  // One guard session at a time, each still fresh: a burst queues in order instead of filling the node.
+  let turn = Promise.resolve();
+  const releases = new Map<string, () => void>();
+  const askGuard = async (ref: string, text: string) => {
+    let release = () => {};
+    const previous = turn;
+    turn = new Promise((resolve) => (release = resolve));
+    await previous;
+    try {
+      const session = await enqueue(GUARD_AGENT_GROUP_ID, 'kubernetes-remediation-guard', text, ref);
+      releases.set(session, release);
+      return session;
+    } catch (err) {
+      release();
+      throw err;
+    }
+  };
+  const endGuard = (session: string) => {
+    endGuardSession(session);
+    releases.get(session)?.();
+    releases.delete(session);
+  };
   const guard = createIncidentGuard({
     dir: path.join(DATA_DIR, 'kubernetes-remediation-raw'),
     available: guarded,
-    ask: (ref, text) => enqueue(GUARD_AGENT_GROUP_ID, 'kubernetes-remediation-guard', text, ref),
-    end: endGuardSession,
+    ask: askGuard,
+    end: endGuard,
     wake: (incident, note, data) => enqueueIncident(config.agentGroupId, incident, note, data),
   });
   await guard.recover();
@@ -257,8 +279,8 @@ export async function startKubernetesRemediation(
   const logs = createLogReader({
     pods: executorClient,
     available: guarded,
-    ask: (ref, text) => enqueue(GUARD_AGENT_GROUP_ID, 'kubernetes-remediation-guard', text, ref),
-    end: endGuardSession,
+    ask: askGuard,
+    end: endGuard,
   });
   registerDeliveryAction(
     'read_logs',

@@ -173,7 +173,9 @@ export function createIncidentGuard(options: {
   timeoutMs?: number;
 }) {
   fs.mkdirSync(options.dir, { recursive: true, mode: 0o700 });
-  const pending = new Map<string, { incident: RemediationIncident; timer: NodeJS.Timeout; session?: string }>();
+  const pending = new Map<string, { incident: RemediationIncident; timer?: NodeJS.Timeout; session?: string }>();
+  // One Falco rule firing per exec of a build is one alert: while the guard has it, the rest reach Orfie with the host fields.
+  const fingerprint = (i: RemediationIncident) => [i.source, i.summary, i.namespace, i.workload?.name].join('\0');
   const waiting = (ref: string) => path.join(options.dir, `${ref}.pending.json`);
   const done = (ref: string) => path.join(options.dir, `${ref}.json`);
   const read = (ref: string): Stored | null => {
@@ -254,23 +256,22 @@ export function createIncidentGuard(options: {
         mode: 0o600,
       });
       prune();
-      if (!options.available || Date.now() < bypassUntil) return wake(ref, incident, null);
-      const entry: { incident: RemediationIncident; timer: NodeJS.Timeout; session?: string } = {
-        incident,
-        timer: setTimeout(() => timedOut(ref), options.timeoutMs ?? 3 * 60_000).unref(),
-      };
+      const same = [...pending.values()].some((e) => fingerprint(e.incident) === fingerprint(incident));
+      if (!options.available || Date.now() < bypassUntil || same) return wake(ref, incident, null);
+      const entry: { incident: RemediationIncident; timer?: NodeJS.Timeout; session?: string } = { incident };
       pending.set(ref, entry);
-      try {
-        entry.session = await options.ask(
-          ref,
-          `${INSTRUCTIONS}\n\n${fenced(`Incident ref ${ref}.`, JSON.stringify(incident))}`,
-        );
-        if (!pending.has(ref)) options.end(entry.session);
-        // eslint-disable-next-line no-catch-all/no-catch-all -- any failure falls back to the host fields
-      } catch (err) {
-        log.warn('The guard could not take an incident, waking Orfie with the host fields', { ref, err });
-        await settle(ref, null);
-      }
+      // Not awaited: the guard takes one incident at a time, and the webhook must not wait in that queue.
+      void options.ask(ref, `${INSTRUCTIONS}\n\n${fenced(`Incident ref ${ref}.`, JSON.stringify(incident))}`).then(
+        (session) => {
+          entry.session = session;
+          if (!pending.has(ref)) options.end(session);
+          else entry.timer = setTimeout(() => timedOut(ref), options.timeoutMs ?? 3 * 60_000).unref();
+        },
+        (err: unknown) => {
+          log.warn('The guard could not take an incident, waking Orfie with the host fields', { ref, err });
+          return settle(ref, null);
+        },
+      );
     },
 
     /** null when accepted; otherwise the reply the guard gets. */
