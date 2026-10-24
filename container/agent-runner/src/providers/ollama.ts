@@ -2,8 +2,9 @@
  * Ollama provider: a small chat loop against the LAN Ollama box (LOCAL_AI_HOST)
  * for small local models that drown in a full agent harness. The prompt is a
  * line of tool rules, the group's standing persona and the destination map; the
- * tools are media generation and creating/deleting its own copies. /image,
- * /video and /music skip the model. History lives in the session dir; past
+ * tools are media generation and creating/deleting its own copies, and a text
+ * persona (LOCAL_AI_TOOLS=text) only gets quick pictures from the CPU instance.
+ * /image, /video and /music skip the model. History lives in the session dir; past
  * three quarters of the model's num_ctx the oldest turns fold into a rolling
  * summary.
  */
@@ -28,33 +29,55 @@ const tool = (name: string, description: string, properties: Args, run: (args: A
   },
   run,
 });
-const media = (kind: (a: Args) => string) => async (a: Args) =>
-  sendFile.handler({ to: a.to, path: await render(kind(a), String(a.prompt), a.lyrics ? String(a.lyrics) : '') });
-const TOOLS = [
-  tool(
-    'generate_image',
-    'Make a picture and send it to the chat. Only when asked for a picture.',
-    { prompt: str, hq: { type: 'boolean', description: 'only if he asks for high quality' } },
-    media((a) => (a.hq === true ? 'image' : 'quick')),
-  ),
-  tool(
-    'generate_video',
-    'Make a short video and send it to the chat. Only when asked for a video.',
-    { prompt: str },
-    media(() => 'video'),
-  ),
-  tool(
-    'generate_music',
-    'Make a song and send it to the chat. Only when asked for music.',
-    { prompt: str, lyrics: str },
-    media(() => 'music'),
-  ),
+const text = process.env.LOCAL_AI_TOOLS === 'text';
+const media = (kind: (a: Args) => string) => async (a: Args) => {
+  const file = await render(kind(a), String(a.prompt), a.lyrics ? String(a.lyrics) : '', text);
+  try {
+    return await sendFile.handler({ to: a.to, path: file });
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+};
+const persona = [
   tool('create_persona', 'Create a new persona with its own chat room.', { name: str, instructions: str }, (a) =>
     createAgent.handler(a),
   ),
   tool('delete_persona', 'Delete a persona you created.', { name: str }, (a) => deleteAgent.handler(a)),
 ];
-const SLASH: Record<string, string> = { '/image hq': 'image', '/image': 'quick', '/video': 'video', '/music': 'music' };
+const TOOLS = text
+  ? [
+      tool(
+        'generate_image',
+        'Make a picture and send it to the chat. Only when asked for a picture.',
+        { prompt: str },
+        media(() => 'quick'),
+      ),
+      ...persona,
+    ]
+  : [
+      tool(
+        'generate_image',
+        'Make a picture and send it to the chat. Only when asked for a picture.',
+        { prompt: str, hq: { type: 'boolean', description: 'only if he asks for high quality' } },
+        media((a) => (a.hq === true ? 'image' : 'quick')),
+      ),
+      tool(
+        'generate_video',
+        'Make a short video and send it to the chat. Only when asked for a video.',
+        { prompt: str },
+        media(() => 'video'),
+      ),
+      tool(
+        'generate_music',
+        'Make a song and send it to the chat. Only when asked for music.',
+        { prompt: str, lyrics: str },
+        media(() => 'music'),
+      ),
+      ...persona,
+    ];
+const SLASH: Record<string, string> = text
+  ? { '/image': 'quick' }
+  : { '/image hq': 'image', '/image': 'quick', '/video': 'video', '/music': 'music' };
 const RULES =
   'Reply in plain text. Use a tool only when asked for what it makes: a picture, a video, a song, a new persona or a copy of you, or deleting one. Otherwise just answer.';
 const STATE_FILE = '/workspace/ollama-state.json';

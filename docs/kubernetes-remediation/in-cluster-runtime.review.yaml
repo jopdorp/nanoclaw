@@ -255,7 +255,7 @@ spec:
       ports:
         - { protocol: TCP, port: 10255 }
 ---
-# Local-model sessions (nanoclaw-egress=local) reach only Ollama and ComfyUI on the LAN box.
+# Local-model sessions (nanoclaw-egress=local) reach only Ollama and the two ComfyUIs on the LAN box.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -274,3 +274,4 @@ spec:
       ports:
         - { protocol: TCP, port: 11434 }
         - { protocol: TCP, port: 8188 }
+        - { protocol: TCP, port: 8189 }
