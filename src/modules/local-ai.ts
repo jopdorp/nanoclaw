@@ -2,8 +2,9 @@
  * Local-model (`ollama` provider) groups. Their OneCLI identity holds no
  * secrets, they create copies of themselves without an approval card, and each
  * copy gets its own encrypted Matrix room with the parent's admins and the
- * parent's settings. Messages in those rooms disappear after the persona's
- * lifetime. Orfie can list the personas and bring a room back, nothing more.
+ * parent's settings, where the bot goes by the persona's name. Messages in
+ * those rooms disappear after the persona's lifetime. Orfie can list the
+ * personas and bring a room back, nothing more.
  * create-agent.ts gives a copy its parent's provider and model and no CLI;
  * container-runner.ts keeps their sessions off the gateway.
  */
@@ -94,6 +95,7 @@ async function createRoom(group: AgentGroup): Promise<void> {
     ],
     invite: await matrixUsers(group.id),
   });
+  await nameBot(room_id, group.name);
   const id = randomUUID();
   await createMessagingGroup({
     id,
@@ -139,13 +141,21 @@ async function redactExpired(room: string, lifetimeMinutes: number): Promise<voi
   }
 }
 
+/** In a persona's room the bot goes by the persona's name, not its global one. */
+async function nameBot(room: string, name: string): Promise<void> {
+  const route = `/rooms/${encodeURIComponent(room)}/state/m.room.member/${encodeURIComponent(process.env.MATRIX_USER_ID!)}`;
+  const member = await matrix(route);
+  if (member.displayname !== name) await matrix(route, 'PUT', { ...member, displayname: name });
+}
+
 async function sweep(): Promise<void> {
   for (const group of await getAllAgentGroups()) {
     if (!(await isLocal(group.id))) continue;
     for (const room of await localRooms(group.id))
-      await redactExpired(room, personaSettings(group.id).lifetimeMinutes).catch((err) =>
-        log.warn('Local persona redaction failed', { room, err }),
-      );
+      await Promise.all([
+        nameBot(room, group.name),
+        redactExpired(room, personaSettings(group.id).lifetimeMinutes),
+      ]).catch((err) => log.warn('Local persona room upkeep failed', { room, err }));
   }
 }
 if (process.env.MATRIX_ACCESS_TOKEN) setInterval(() => void sweep(), 60_000).unref();
