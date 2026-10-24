@@ -22,6 +22,7 @@ const envConfig = readEnvFile([
   'NANOCLAW_ABSOLUTE_CEILING_MS',
   'NANOCLAW_CLAIM_STUCK_MS',
   'LOCAL_AI_HOST',
+  'LOCAL_SEARCH_URL',
 ]);
 
 /**
@@ -109,6 +110,7 @@ export const CONTAINER_PIDS_LIMIT = process.env.CONTAINER_PIDS_LIMIT ?? envConfi
 export const EGRESS_LOCKDOWN = (process.env.NANOCLAW_EGRESS_LOCKDOWN || envConfig.NANOCLAW_EGRESS_LOCKDOWN) === 'true';
 // The LAN box serving Ollama (:11434) and ComfyUI (:8188) to `ollama` provider groups.
 export const LOCAL_AI_HOST = process.env.LOCAL_AI_HOST || envConfig.LOCAL_AI_HOST || '';
+export const LOCAL_SEARCH_URL = process.env.LOCAL_SEARCH_URL || envConfig.LOCAL_SEARCH_URL || '';
 export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
 

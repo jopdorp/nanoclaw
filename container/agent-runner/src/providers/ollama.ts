@@ -2,7 +2,7 @@
  * Ollama provider: a small chat loop against the LAN Ollama box (LOCAL_AI_HOST)
  * for small local models that drown in a full agent harness. The prompt is a
  * line of tool rules, the group's standing persona and the destination map; the
- * tools are media generation and creating/deleting its own copies, and a text
+ * tools are media generation, web search and creating/deleting its own copies, and a text
  * persona (LOCAL_AI_TOOLS=text) only gets quick pictures from the CPU instance.
  * /image, /video and /music skip the model. History lives in the session dir; past
  * three quarters of the model's num_ctx the oldest turns fold into a rolling
@@ -47,6 +47,18 @@ const persona = [
     createAgent.handler(a),
   ),
   tool('delete_persona', 'Delete a persona you created.', { name: str }, (a) => deleteAgent.handler(a)),
+  tool('web_search', 'Search the web; returns the top results as title — url — snippet.', { query: str }, async (a) => {
+    const url = `${process.env.LOCAL_SEARCH_URL || 'http://searxng.search.svc:8080'}/search?format=json&q=`;
+    try {
+      const res = await fetch(url + encodeURIComponent(String(a.query ?? '')), { signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) return `Search failed: HTTP ${res.status}`;
+      const { results = [] } = (await res.json()) as { results?: { title: string; url: string; content?: string }[] };
+      const lines = results.slice(0, 5).map((r) => `${r.title} — ${r.url} — ${(r.content ?? '').slice(0, 200)}`);
+      return lines.join('\n') || 'No results.';
+    } catch (err) {
+      return `Search failed: ${(err as Error).message}`;
+    }
+  }),
   tool('read_memory', 'Read a file of your memory, e.g. index.md.', { file: str }, async (a) =>
     read(memoryPath(a.file), '(no such file)'),
   ),
@@ -130,7 +142,7 @@ const SLASH: Record<string, string> = text
   ? { '/image': 'quick' }
   : { '/image hq': 'image', '/image': 'quick', '/video': 'video', '/music': 'music' };
 const RULES =
-  'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, showing or changing your own character or that of a persona you made, or remembering something worth keeping. Otherwise just answer. When he asks you to change your character or personality, call update_character in that same reply.';
+  'Reply in plain text. Use a tool only when asked for what it does: a picture, a video, a song, a new persona or a copy of you, deleting one, showing or changing your own character or that of a persona you made, or remembering something worth keeping. Otherwise just answer. Use web_search for current facts or when asked to look something up. When he asks you to change your character or personality, call update_character in that same reply.';
 const VOICE =
   'This is a live voice call: answer in one to three short spoken sentences without lists, markup or emoji, and start with [tone: a few words on how to say it].';
 // The formatter names a voice message's file in the message tag, where his own text cannot put one.
