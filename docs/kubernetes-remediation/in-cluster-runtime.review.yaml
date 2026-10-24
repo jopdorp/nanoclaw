@@ -289,6 +289,15 @@ spec:
   ingress: []
   egress:
     - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: search
+          podSelector:
+            matchLabels:
+              app: searxng
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - to:
         - ipBlock: { cidr: 192.168.1.77/32 }
       ports:
         - { protocol: TCP, port: 11434 }
