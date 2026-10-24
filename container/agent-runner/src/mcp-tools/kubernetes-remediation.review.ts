@@ -30,6 +30,7 @@ export const proposeKubernetesRemediation: McpToolDefinition = {
             '{type:"manifest-sync", file} with the same target writes the live object to the file and pushes, no cluster change; ' +
             '{type:"build-image", dockerfile, context (k8s.jegor.nl paths, dockerfile inside context), image ("<registry>/<name>:<tag>" on the cluster own registry, registry.prophet.jopdorp.nl or gitea.claw.jopdorp.nl)} with target {apiVersion:"batch/v1", kind:"Job", namespace:"security", name (the build Job to create), uid:"-", resourceVersion:"-"}: the host builds with kaniko, pushes and replies with the digest; ' +
             '{type:"write-secret", secretType (optional, default "Opaque"), stringData {key: value}} with target {apiVersion:"v1", kind:"Secret", namespace, name, uid:"-", resourceVersion:"-"}: the host creates or replaces that Secret on the cluster only, never in the repo, and never repeats the values; ' +
+            '{type:"gitea-runner-delete"} with target {apiVersion:"v1", kind:"GiteaRunner", namespace:null, name (the runner id from gitea_runners_list), uid:"-", resourceVersion:"-"}: the host deletes it only while it is offline; ' +
             'Changes no operation covers are not plans: send Jegor the exact commands. ' +
             'Incidents reach you from http://nanoclaw-remediator.nanoclaw-remediator.svc:3000/webhook/<kubernetes-falco|alertmanager|uptime-kuma|crowdsec> (CrowdSec http plugin format `{"alerts": {{.|toJson}}}`); the last three take Authorization: Bearer from Secret orfie-alert-webhook (key bearer) in monitoring and crowdsec.',
         },
@@ -118,6 +119,11 @@ registerTools([
   readK8sRepo,
   checkUpdates,
   stopSession,
+  persona(
+    'gitea_runners_list',
+    'Every Gitea Actions runner: id, name, status, labels and the repository it is scoped to (null when global or owner-wide).',
+    {},
+  ),
   persona('list_personas', "Names of Jegor's local personas and who made each.", {}),
   persona('summon_persona', "Bring Jegor back into a local persona's room (he gets an invite).", {
     name: { type: 'string' },

@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import type http from 'node:http';
 
 import type { KubernetesJsonClient } from './gateway-client.js';
+import { listGiteaRunners } from './gitea-runners.js';
 import { createWebhookHandler, type IncidentSink, PersistentDedupe, record, text } from './triggers.js';
 import type { RemediationIncident } from './types.js';
 
@@ -158,7 +159,7 @@ const condition = (item: Item, type: string) =>
 const CHECKS: Record<
   string,
   {
-    path: string;
+    path?: string;
     findings: (items: Item[], now: number, client: KubernetesJsonClient) => Finding[] | Promise<Finding[]>;
   }
 > = {
@@ -307,6 +308,30 @@ const CHECKS: Record<
         return out;
       }),
   },
+  'gitea-runners': {
+    findings: async () =>
+      (await listGiteaRunners()).flatMap(({ id, name, repo, status }): Finding[] => [
+        ...(repo
+          ? []
+          : [
+              {
+                id: `health:gitea-runners:global:${id}`,
+                severity: 'warning',
+                summary: `Gitea runner ${id} ${name} serves more than one repository`,
+              },
+            ]),
+        ...(status === 'offline'
+          ? [
+              {
+                id: `health:gitea-runners:offline:${id}`,
+                severity: 'warning',
+                forMs: DAY,
+                summary: `Gitea runner ${id} ${name} has been offline for a day`,
+              },
+            ]
+          : []),
+      ]),
+  },
 };
 
 export async function runHealthWatch(
@@ -328,7 +353,7 @@ export async function runHealthWatch(
     for (const [check, { path, findings }] of Object.entries(CHECKS)) {
       let found: Finding[];
       try {
-        found = await findings(items(await client.request(path, { signal })), now, client);
+        found = await findings(path ? items(await client.request(path, { signal })) : [], now, client);
         // eslint-disable-next-line no-catch-all/no-catch-all -- an absent CRD or a failed list skips the check this round
       } catch {
         continue;

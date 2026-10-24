@@ -430,7 +430,13 @@ WHERE u.name = '$GITEA_USER' AND r.name = '$GITEA_REPOSITORY'
 ON CONFLICT (user_id, repo_id) DO UPDATE SET mode = 1;
 DELETE FROM access_token WHERE uid = (SELECT id FROM public.user WHERE name = '$GITEA_USER')
   AND name IN ('$GITEA_TOKEN_NAME', '$GITEA_WRITER_TOKEN_NAME');
+DELETE FROM access_token WHERE uid = (SELECT id FROM public.user WHERE name = 'gitea_admin') AND name = 'nanoclaw-runner-admin';
 SQL
+# The host's own runner admin token; only the orchestrator mounts it.
+kubectl exec -n "$GITEA_NAMESPACE" "$GITEA_POD" -c gitea -- gitea admin user generate-access-token \
+  --username gitea_admin --token-name nanoclaw-runner-admin --scopes write:admin,read:repository --raw \
+  | kubectl create secret generic -n "$NAMESPACE" gitea-runner-admin --from-file=token=/dev/stdin --dry-run=client -o yaml \
+  | kubectl apply -f - >/dev/null
 kubectl exec -n "$GITEA_NAMESPACE" "$GITEA_POD" -c gitea -- gitea admin user generate-access-token \
   --username "$GITEA_USER" --token-name "$GITEA_TOKEN_NAME" --scopes read:repository --raw \
   | kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- sh -c \
@@ -442,7 +448,7 @@ for i in 0 1; do
     || todo "could not create or rotate the ${GITEA_HOSTS[$i]} Gitea credential"
 done
 kubectl exec -n "$GITEA_NAMESPACE" "$GITEA_POD" -c gitea -- gitea admin user generate-access-token \
-  --username "$GITEA_USER" --token-name "$GITEA_WRITER_TOKEN_NAME" --scopes write:repository,read:user --raw \
+  --username "$GITEA_USER" --token-name "$GITEA_WRITER_TOKEN_NAME" --scopes write:repository,write:user,read:user --raw \
   | kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- sh -c \
       "umask 077; cat > $GITEA_TOKEN_FILE"
 GITEA_WRITER_IDS=()

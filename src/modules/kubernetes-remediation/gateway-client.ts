@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
 import type { HelmReleaseExecutor } from './helm-release.js';
+import { deleteOfflineGiteaRunner } from './gitea-runners.js';
 import { canonicalImage } from './policy.js';
 import type { RegistryFetch } from './registry.js';
 import type {
@@ -612,6 +613,8 @@ export class GatewayRemediationExecutor {
         return this.node(plan as NodePlan);
       case 'batocera-exec':
         return this.batoceraExec(plan as BatoceraExecPlan);
+      case 'gitea-runner-delete':
+        return { applied: true, message: await deleteOfflineGiteaRunner(plan.target.name), automaticWrites: 0 };
       case 'run-cronjob':
         return this.runCronJob(plan as CronJobRunPlan, executor);
       case 'delete-snapshot':

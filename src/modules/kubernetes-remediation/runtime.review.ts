@@ -33,6 +33,7 @@ import {
   registryThroughOneCli,
   runningDigest,
 } from './gateway-client.js';
+import { listGiteaRunners } from './gitea-runners.js';
 import { gitWithDeployKey, helmThroughOneCli, HelmReleaseExecutor, type HelmChart } from './helm-release.js';
 import { createAlertWebhookHandlers, runHealthWatch } from './health.js';
 import { readGrants, registerStandingApprovals } from './standing.js';
@@ -248,6 +249,18 @@ export async function startKubernetesRemediation(
       await notifyAgent(session, reply);
     },
     unguarded('read-only, served from the host checkout of k8s.jegor.nl'),
+  );
+  registerDeliveryAction(
+    'gitea_runners_list',
+    async (_content, session) => {
+      if (!(await team(session.agent_group_id))) return;
+      const reply = await listGiteaRunners().then(
+        (runners) => JSON.stringify(runners),
+        (error: unknown) => `gitea_runners_list failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      await notifyAgent(session, reply);
+    },
+    unguarded('read-only: the Gitea runner list'),
   );
   if (config.helmOneCliAgent) {
     const checkUpdates = createUpdateChecker({
