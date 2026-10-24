@@ -357,17 +357,24 @@ for method in POST PUT PATCH DELETE; do
   ensure_gitea_block_rule "$method" internal "${GITEA_HOSTS[0]}"
   ensure_gitea_block_rule "$method" external "${GITEA_HOSTS[1]}"
 done
-# Orfie only reads the open web: every method on the model APIs and in-cluster hosts, GET elsewhere, the rest blocked.
+# Orfie may not send data out: every method on trusted, build and home hosts, POST/PUT/PATCH/DELETE blocked elsewhere.
 ensure_web_rule() {
   ensure_rule "$(jq -nc --arg name "nanoclaw-remediator-web-$1" --arg action "$2" --argjson targets "$3" \
     --arg agents "$PRIMARY_AGENT_ID $INVESTIGATOR_AGENT_ID $VERIFIER_AGENT_ID" \
     '{name: $name, action: $action, enabled: true,
       identities: ($agents | split(" ") | map({type: "agent", id: .})), targets: $targets}')"
 }
-ensure_web_rule 1-trusted allow "$(jq -nc --arg hosts "chatgpt.com api.anthropic.com $API_HOST ${GITEA_HOSTS[*]}" \
+TRUSTED_HOSTS=(chatgpt.com api.anthropic.com "$API_HOST" "${GITEA_HOSTS[@]}" '*.svc' '*.cluster.local' '10.42.*' '10.43.*'
+  jegor.nl '*.jegor.nl' jopdorp.nl '*.jopdorp.nl' 192.168.1.77 192.168.1.253 192.168.1.1{1..4} 192.168.1.17
+  github.com api.github.com codeload.github.com '*.githubusercontent.com' ghcr.io
+  registry-1.docker.io auth.docker.io production.cloudflare.docker.com quay.io gcr.io registry.k8s.io
+  pypi.org files.pythonhosted.org registry.npmjs.org proxy.golang.org sum.golang.org crates.io static.crates.io
+  huggingface.co '*.huggingface.co' '*.hf.co' download.pytorch.org developer.download.nvidia.com
+  deb.debian.org archive.ubuntu.com security.ubuntu.com dl-cdn.alpinelinux.org)
+ensure_web_rule 1-trusted allow "$(jq -nc --arg hosts "${TRUSTED_HOSTS[*]}" \
   '$hosts | split(" ") | map({kind: "network", hostPattern: .})')"
-ensure_web_rule 2-read allow '[{"kind": "network", "hostPattern": "*", "method": "GET"}]'
-ensure_web_rule 3-rest block '[{"kind": "network", "hostPattern": "*"}]'
+ensure_web_rule 2-send block "$(jq -nc '["POST", "PUT", "PATCH", "DELETE"] | map({kind: "network", hostPattern: "*", method: .})')"
+ensure_web_rule 3-rest allow '[{"kind": "network", "hostPattern": "*"}]'
 onecli_policy GET /rules </dev/null \
   | jq -c '{orderedIds: sort_by(.name | if startswith("nanoclaw-remediator-web-") then [1, .]
       elif startswith("nanoclaw-remediator-") and contains("-block-") then [0, ""] else [2, ""] end) | map(.id)}' \
