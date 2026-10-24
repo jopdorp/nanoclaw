@@ -20,6 +20,8 @@ GITEA_REPOSITORY=k8s.jegor.nl
 GITEA_TOKEN_NAME=onecli-read
 GITEA_HOSTS=(gitea-http.gitea.svc gitea.claw.jopdorp.nl)
 GITEA_SECRET_NAMES=('Gitea repository reader (gitea-http.gitea.svc:3000)' 'Gitea repository reader (gitea.claw.jopdorp.nl)')
+GITEA_WRITER_TOKEN_NAME=onecli-write
+GITEA_WRITER_SECRET_NAMES=('Gitea repository writer (gitea-http.gitea.svc:3000)' 'Gitea repository writer (gitea.claw.jopdorp.nl)')
 EXECUTOR=nanoclaw-remediation-executor
 ANNOTATOR=nanoclaw-remediation-annotator
 HELM=nanoclaw-helm
@@ -343,7 +345,7 @@ for method in POST PUT PATCH DELETE; do ensure_block_rule "$method"; done
 ensure_gitea_block_rule() {
   local method=$1 label=$2 host=$3 name="nanoclaw-remediator-gitea-$2-block-${1,,}" rule ids
   rule=$(jq -nc --arg name "$name" --arg host "$host" --arg method "$method" \
-    --arg agents "$PRIMARY_AGENT_ID $INVESTIGATOR_AGENT_ID $VERIFIER_AGENT_ID" \
+    --arg agents "$INVESTIGATOR_AGENT_ID $VERIFIER_AGENT_ID" \
     '{name: $name, action: "block", enabled: true,
       identities: ($agents | split(" ") | map({type: "agent", id: .})),
       targets: [{kind: "network", hostPattern: $host, method: $method}]}')
@@ -427,7 +429,7 @@ SELECT u.id, r.id, 1 FROM public.user u JOIN repository r ON r.owner_name = 'clu
 WHERE u.name = '$GITEA_USER' AND r.name = '$GITEA_REPOSITORY'
 ON CONFLICT (user_id, repo_id) DO UPDATE SET mode = 1;
 DELETE FROM access_token WHERE uid = (SELECT id FROM public.user WHERE name = '$GITEA_USER')
-  AND name = '$GITEA_TOKEN_NAME';
+  AND name IN ('$GITEA_TOKEN_NAME', '$GITEA_WRITER_TOKEN_NAME');
 SQL
 kubectl exec -n "$GITEA_NAMESPACE" "$GITEA_POD" -c gitea -- gitea admin user generate-access-token \
   --username "$GITEA_USER" --token-name "$GITEA_TOKEN_NAME" --scopes read:repository --raw \
@@ -438,6 +440,16 @@ for i in 0 1; do
   GITEA_SECRET_IDS[$i]=$(upsert_generic_secret "${GITEA_SECRET_NAMES[$i]}" \
     "$GITEA_TOKEN_FILE" "${GITEA_HOSTS[$i]}" 'token {value}') \
     || todo "could not create or rotate the ${GITEA_HOSTS[$i]} Gitea credential"
+done
+kubectl exec -n "$GITEA_NAMESPACE" "$GITEA_POD" -c gitea -- gitea admin user generate-access-token \
+  --username "$GITEA_USER" --token-name "$GITEA_WRITER_TOKEN_NAME" --scopes write:repository,read:user --raw \
+  | kubectl exec -i -n "$NAMESPACE" "$LOGIN_POD" -c login -- sh -c \
+      "umask 077; cat > $GITEA_TOKEN_FILE"
+GITEA_WRITER_IDS=()
+for i in 0 1; do
+  GITEA_WRITER_IDS[$i]=$(upsert_generic_secret "${GITEA_WRITER_SECRET_NAMES[$i]}" \
+    "$GITEA_TOKEN_FILE" "${GITEA_HOSTS[$i]}" 'token {value}') \
+    || todo "could not create or rotate the ${GITEA_HOSTS[$i]} Gitea writer credential"
 done
 kubectl exec -n "$NAMESPACE" "$LOGIN_POD" -c login -- rm -f "$GITEA_TOKEN_FILE"
 
@@ -455,10 +467,13 @@ for agent in $(jq -r '.data[].id' <<<"$AGENTS"); do
     || onecli_cli agents set-secrets --id "$agent" --secret-ids "$(jq -r 'join(",")' <<<"$wanted")" >/dev/null
 done
 onecli_cli agents secrets --id "$PRIMARY_AGENT_ID" | jq -e --arg id "${SECRET_IDS[0]}" '.data | index($id)' >/dev/null
+# Orfie writes the repos it is a collaborator on, so it holds the writer instead of the reader for the same hosts.
 for agent in "$PRIMARY_AGENT_ID" "$INVESTIGATOR_AGENT_ID" "$VERIFIER_AGENT_ID"; do
   current=$(onecli_cli agents secrets --id "$agent" | jq -c '.data | unique')
-  wanted=$(jq -c --arg one "${GITEA_SECRET_IDS[0]}" --arg two "${GITEA_SECRET_IDS[1]}" \
-    '[.[], $one, $two] | unique' <<<"$current")
+  add=("${GITEA_SECRET_IDS[@]}") drop=("${GITEA_WRITER_IDS[@]}")
+  [[ "$agent" == "$PRIMARY_AGENT_ID" ]] && add=("${GITEA_WRITER_IDS[@]}") drop=("${GITEA_SECRET_IDS[@]}")
+  wanted=$(jq -c --arg one "${add[0]}" --arg two "${add[1]}" --arg x "${drop[0]}" --arg y "${drop[1]}" \
+    '[.[], $one, $two] - [$x, $y] | unique' <<<"$current")
   onecli_cli agents set-secrets --id "$agent" --secret-ids "$(jq -r 'join(",")' <<<"$wanted")" >/dev/null
 done
 for pair in "$EXECUTOR_AGENT_ID:1" "$ANNOTATOR_AGENT_ID:2" "$HELM_AGENT_ID:3" "$BREAKGLASS_AGENT_ID:4"; do
