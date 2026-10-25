@@ -1,6 +1,6 @@
 /**
- * Voice calls with local personas (MatrixRTC, audio only, unencrypted rooms for now).
- * When an admin of a local persona joins a call in its room, the bot joins too: it asks the
+ * Voice calls with local personas and the main agent (MatrixRTC, audio only).
+ * When an admin starts a call in the main agent's DM or a local persona room, the bot joins too: it asks the
  * MatrixRTC auth service for a LiveKit token and hands it to the voice worker on the Batocera
  * box, which does the listening and speaking over one authenticated WebSocket. What he says
  * goes into the persona's normal session as a message; its text reply to that turn comes back
@@ -23,8 +23,7 @@ import { getAdminsOfAgentGroup } from './permissions/db/user-roles.js';
 import { spokenReply } from './spoken-reply.js';
 
 const MEMBER = 'org.matrix.msc3401.call.member';
-const DELAYED = '/_matrix/client/unstable/org.matrix.msc4140/delayed_events';
-const LEAVE_DELAY_MS = 20_000;
+const MAIN_AGENT = 'ag-4be55056-f0a3-4991-a83e-a347b75de07d';
 // His account is on matrix.org, so his calls run on its LiveKit; the bot's OpenID token goes to no other service.
 const MATRIX_ORG_FOCUS = 'https://livekit-jwt.call.matrix.org';
 
@@ -39,8 +38,12 @@ interface Call {
   platformId: string;
   caller: string;
   voice: NonNullable<PersonaSettings['voice']>;
-  delayId?: string;
-  refresh?: NodeJS.Timeout;
+  rtc?: any;
+  onKey?: (key: Uint8Array, index: number, membership: unknown, participant: string) => void;
+  onRtcError?: (err: unknown) => void;
+  keys: { participant: string; index: number; key: string }[];
+  encrypted: boolean;
+  started: boolean;
   turn?: string;
 }
 
@@ -60,9 +63,6 @@ let client: any;
 
 const send = (message: object) => worker?.send(JSON.stringify(message));
 const turnMessageId = (call: Call, turnId: string) => `voice-${call.id}-${turnId}`;
-const memberRoute = (room: string) =>
-  `/rooms/${encodeURIComponent(room)}/state/${MEMBER}/${encodeURIComponent(`_${client.getUserId()}_${client.getDeviceId()}_m.call`)}`;
-
 /** Who else is in the room's call, oldest first: memberships with content that have not expired. */
 function inCall(room: string): MatrixEvent[] {
   const events: MatrixEvent[] = client.getRoom(room)?.currentState.getStateEvents(MEMBER) ?? [];
@@ -83,30 +83,45 @@ function focusOf(member: MatrixEvent): { service: string; foci: unknown[] } | un
   return [ours, MATRIX_ORG_FOCUS].includes(service) ? { service, foci } : undefined;
 }
 
-/** Only a room whose every wired agent is a local persona he administers, so a call never reaches another agent. */
-async function personaOf(room: string, caller: string): Promise<string | undefined> {
-  const mg = await getMessagingGroupByPlatform('matrix', `matrix:${encodeURIComponent(room)}`);
+/** Only his DM with the main agent, or a room whose every wired agent is a local persona he administers. */
+async function targetOf(roomId: string, caller: string): Promise<{ agent: string; platformId: string } | undefined> {
+  const room = client.getRoom(roomId);
+  const direct =
+    !room?.currentState.getStateEvents('nanoclaw.chat', '') &&
+    ((client.getAccountData('m.direct')?.getContent()[caller] as string[] | undefined) ?? []).includes(roomId);
+  const platformId = direct ? `matrix:${caller}` : `matrix:${encodeURIComponent(roomId)}`;
+  const mg = await getMessagingGroupByPlatform('matrix', platformId);
   const wired = mg ? await getMessagingGroupAgents(mg.id) : [];
-  for (const { agent_group_id: id } of wired)
-    if (!(await isLocal(id)) || !(await getAdminsOfAgentGroup(id)).some((a) => a.user_id === `matrix:${caller}`))
-      return undefined;
-  return wired[0]?.agent_group_id;
+  if (
+    !wired.length ||
+    !(await Promise.all(wired.map(({ agent_group_id: id }) => getAdminsOfAgentGroup(id)))).every((admins) =>
+      admins.some((a) => a.user_id === `matrix:${caller}`),
+    )
+  )
+    return undefined;
+  if (direct)
+    return wired.length === 1 && wired[0].agent_group_id === MAIN_AGENT ? { agent: MAIN_AGENT, platformId } : undefined;
+  return (await Promise.all(wired.map(({ agent_group_id: id }) => isLocal(id)))).every(Boolean)
+    ? { agent: wired[0].agent_group_id, platformId }
+    : undefined;
 }
 
 async function join(room: string, member: MatrixEvent): Promise<void> {
   const caller = member.getSender()!;
-  if (client.getRoom(room)?.hasEncryptionStateEvent())
-    return log.info('Voice call skipped, call media E2EE is not built yet', { room });
-  const persona = await personaOf(room, caller);
+  const matrixRoom = client.getRoom(room);
+  const target = await targetOf(room, caller);
   const focus = focusOf(member);
   if (!focus) return log.warn('Voice call skipped, unknown LiveKit service', { room });
-  if (!persona || !worker || callIn(room)) return;
+  if (!matrixRoom || !target || !worker || callIn(room)) return;
   const call: Call = {
     id: randomUUID(),
     room,
-    platformId: `matrix:${encodeURIComponent(room)}`,
+    platformId: target.platformId,
     caller,
-    voice: personaSettings(persona).voice ?? {},
+    voice: personaSettings(target.agent).voice ?? {},
+    keys: [],
+    encrypted: matrixRoom.hasEncryptionStateEvent(),
+    started: false,
   };
   calls.set(call.id, call);
   try {
@@ -121,31 +136,37 @@ async function join(room: string, member: MatrixEvent): Promise<void> {
     const { url, jwt } = (await res.json()) as { url: string; jwt: string };
     // The worker's LiveKit transport wants the room name, which the auth service only puts in the token.
     const livekitRoom = JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString()).video.room;
-    // The leave is scheduled before the join, so a crash never leaves the bot in the call.
-    call.delayId = (
-      await matrix(`${memberRoute(room)}?org.matrix.msc4140.delay=${LEAVE_DELAY_MS}`, 'PUT', {})
-    ).delay_id;
-    await matrix(memberRoute(room), 'PUT', {
-      application: 'm.call',
-      call_id: '',
-      scope: 'm.room',
-      device_id: client.getDeviceId(),
-      expires: 4 * 3600_000,
-      focus_active: { type: 'livekit', focus_selection: 'oldest_membership' },
-      foci_preferred: focus.foci,
-      'm.call.intent': 'audio',
-      membershipID: call.id,
+    call.rtc = client.matrixRTC.getRoomSession(matrixRoom);
+    call.onKey = (key, index, _membership, participant) => {
+      const item = { participant, index, key: Buffer.from(key).toString('base64') };
+      call.keys.push(item);
+      if (call.started) send({ type: 'keys', callId: call.id, ...item });
+    };
+    call.rtc.on('encryption_key_changed', call.onKey);
+    call.onRtcError = (err) => {
+      log.error('Voice call membership failed', { callId: call.id, err });
+      void leave(call, true);
+    };
+    call.rtc.on('membership_manager_error', call.onRtcError);
+    const userId = client.getUserId();
+    const deviceId = client.getDeviceId();
+    call.rtc.joinRTCSession({ userId, deviceId, memberId: `${userId}:${deviceId}` }, focus.foci, undefined, {
+      callIntent: 'audio',
+      manageMediaKeys: call.encrypted,
     });
     if (!calls.has(call.id)) throw new Error('hung up while joining');
-    call.refresh = setInterval(() => {
-      // His membership can expire without an event, so the refresh also notices he is gone.
-      if (inCall(room).length === 0) return void leave(call, true);
-      matrix(`${DELAYED}/${call.delayId}`, 'POST', { action: 'restart' }).catch((err) =>
-        err.status === 404 ? leave(call, true) : log.warn('Voice call leave refresh failed', { callId: call.id, err }),
-      );
-    }, LEAVE_DELAY_MS / 4);
-    const mode = /9b/i.test((await getContainerConfig(persona))?.model ?? '') ? 'call-9b' : 'call-4b';
-    send({ type: 'start', callId: call.id, livekitUrl: url, jwt, room: livekitRoom, voice: call.voice, mode });
+    const mode = /9b/i.test((await getContainerConfig(target.agent))?.model ?? '') ? 'call-9b' : 'call-4b';
+    send({
+      type: 'start',
+      callId: call.id,
+      livekitUrl: url,
+      jwt,
+      room: livekitRoom,
+      voice: call.voice,
+      mode,
+      e2ee: call.encrypted ? { keys: call.keys } : undefined,
+    });
+    call.started = true;
     log.info('Voice call joined', { callId: call.id, room });
   } catch (err) {
     log.error('Voice call join failed', { room, err });
@@ -155,18 +176,12 @@ async function join(room: string, member: MatrixEvent): Promise<void> {
 
 async function leave(call: Call, tellWorker: boolean): Promise<void> {
   calls.delete(call.id);
-  clearInterval(call.refresh);
   if (tellWorker) send({ type: 'stop', callId: call.id });
-  const sent =
-    call.delayId &&
-    (await matrix(`${DELAYED}/${call.delayId}`, 'POST', { action: 'send' }).then(
-      () => true,
-      () => false,
-    ));
-  if (!sent)
-    await matrix(memberRoute(call.room), 'PUT', {}).catch((err) =>
-      log.warn('Voice call leave failed', { callId: call.id, err }),
-    );
+  if (call.onKey) call.rtc?.off('encryption_key_changed', call.onKey);
+  if (call.onRtcError) call.rtc?.off('membership_manager_error', call.onRtcError);
+  await call.rtc
+    ?.leaveRoomSession(10_000)
+    .catch((err: unknown) => log.warn('Voice call leave failed', { callId: call.id, err }));
   log.info('Voice call left', { callId: call.id });
 }
 
