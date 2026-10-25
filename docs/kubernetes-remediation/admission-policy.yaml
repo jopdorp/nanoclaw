@@ -694,12 +694,12 @@ spec:
       - apiGroups: ['']
         apiVersions: [v1]
         operations: [CREATE, UPDATE]
-        resources: [pods]
+        resources: [pods, pods/ephemeralcontainers, replicationcontrollers]
         scope: Namespaced
       - apiGroups: [apps]
         apiVersions: [v1]
         operations: [CREATE, UPDATE]
-        resources: [deployments, statefulsets, daemonsets]
+        resources: [deployments, replicasets, statefulsets, daemonsets]
         scope: Namespaced
       - apiGroups: [batch]
         apiVersions: [v1]
@@ -729,7 +729,8 @@ spec:
         variables.pod.?hostIPC.orValue(false) ||
         (has(variables.pod.volumes) && variables.pod.volumes.exists(v, has(v.hostPath))) ||
         variables.pod.containers.exists(c, has(c.securityContext) && c.securityContext.?privileged.orValue(false)) ||
-        (has(variables.pod.initContainers) && variables.pod.initContainers.exists(c, has(c.securityContext) && c.securityContext.?privileged.orValue(false)))
+        (has(variables.pod.initContainers) && variables.pod.initContainers.exists(c, has(c.securityContext) && c.securityContext.?privileged.orValue(false))) ||
+        (has(variables.pod.ephemeralContainers) && variables.pod.ephemeralContainers.exists(c, has(c.securityContext) && c.securityContext.?privileged.orValue(false)))
     - name: name
       expression: object.metadata.name
     - name: allowed
