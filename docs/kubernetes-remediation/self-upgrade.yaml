@@ -52,7 +52,7 @@ data:
     git log -1 --format=%s >/w/subject
   lib.sh: |
     set -eu
-    keys='deployed_sha deployed_host_digest deployed_agent_digest previous_host_digest previous_agent_digest bad_shas held_sha held_event'
+    keys='deployed_sha deployed_host_digest deployed_agent_digest previous_host_digest previous_agent_digest bad_shas held_sha held_token'
     load() { for k in $keys; do eval "$k=\$(kubectl -n orfie-ci get configmap orfie-ci-state -o jsonpath={.data.$k})"; done; }
     save() {
       set --
@@ -70,14 +70,16 @@ data:
       curl -fsS -X PUT -H "Authorization: Bearer $(cat /matrix/token)" -H 'Content-Type: application/json' \
         -d "{\"msgtype\":\"m.text\",\"body\":\"$body\"}" \
         "http://matrix-synapse.openclaw-private.svc:8008/_matrix/client/v3/rooms/%21oXcL93RCyMG-H5ntEQKinxOpYF6fe0anI-XY5kfrOLY/send/m.room.message/hold-$(date +%s)-$$" \
-        | sed -n 's/^{"event_id":"\([^"]*\)"}$/\1/p'
+        >/dev/null
+      curl -fsS -H "Authorization: Bearer $(cat /matrix/token)" \
+        'http://matrix-synapse.openclaw-private.svc:8008/_matrix/client/v3/sync?timeout=0' \
+        | sed -n 's/.*"next_batch":"\([^"]*\)".*/\1/p'
     }
     approved() {
-      event=$(printf '%s' "$held_event" | base64 -d | sed 's/^\$/%24/')
       filter='%7B%22types%22%3A%5B%22m.room.message%22%5D%2C%22senders%22%3A%5B%22%40jopdorp%3Amatrix.org%22%5D%7D'
       curl -fsS -H "Authorization: Bearer $(cat /matrix/token)" \
-        "http://matrix-synapse.openclaw-private.svc:8008/_matrix/client/v3/rooms/%21oXcL93RCyMG-H5ntEQKinxOpYF6fe0anI-XY5kfrOLY/context/$event?limit=100&filter=$filter" \
-        | grep -Eq '"body"[[:space:]]*:[[:space:]]*"deploy '"$(echo "$sha" | cut -c1-12)"'"'
+        "http://matrix-synapse.openclaw-private.svc:8008/_matrix/client/v3/rooms/%21oXcL93RCyMG-H5ntEQKinxOpYF6fe0anI-XY5kfrOLY/messages?dir=f&from=$held_token&filter=$filter" \
+        | grep -Eq '"body"[[:space:]]*:[[:space:]]*"deploy '"$(echo "$sha" | cut -c1-12)"'"[[:space:]]*[,}]'
     }
   poll.sh: |
     . /scripts/lib.sh
@@ -89,15 +91,15 @@ data:
     if [ -f /w/held ]; then
       if [ "$held_sha" != "$sha" ]; then
         short=$(echo "$sha" | cut -c1-12)
-        event=$(approval_say "Deploy held for $subject ($sha). Jegor: reply exactly 'deploy $short' to approve.")
-        [ -n "$event" ] || exit 1
-        held_sha=$sha held_event=$(printf '%s' "$event" | base64 | tr -d '\n'); save
+        token=$(approval_say "Deploy held for $subject ($sha). Jegor: reply exactly 'deploy $short' to approve.")
+        [ -n "$token" ] || exit 1
+        held_sha=$sha held_token=$token; save
         say "Deploy held for $subject ($sha); approval is in the Orfie deploy approvals room."
         exit 0
       fi
       approved || exit 0
     fi
-    held_sha= held_event=; save
+    held_sha= held_token=; save
     [ -z "$(kubectl get jobs -l 'orfie-ci in (build, deploy)' -o jsonpath='{.items[?(@.status.active)].metadata.name}')" ] || exit 0
     run() {
       job=orfie-ci-$1-$(echo "$sha" | cut -c1-12) template=$2
