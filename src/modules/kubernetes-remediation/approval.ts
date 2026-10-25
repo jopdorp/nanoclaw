@@ -147,6 +147,8 @@ function describe({ plan }: ValidatedPlan, full: boolean): string {
     case 'tang-start':
     case 'tang-stop':
       return `${op.type} ${target.name}`;
+    case 'keepalived-ops':
+      return `keepalived ${target.name}: ${op.verb}`;
     case 'batocera-exec':
       return `batocera ${target.name}: ${op.command}`;
     case 'batocera-voice-token':

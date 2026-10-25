@@ -19,6 +19,7 @@ import type {
   HelmSyncPlan,
   HelmUninstallPlan,
   HelmValuesPlan,
+  KeepalivedPlan,
   ManifestEditPlan,
   MailAccountAddPlan,
   ManifestSyncPlan,
@@ -49,10 +50,17 @@ const HOST_SCRIPTS = {
   'tang-stop': 'systemctl stop tangd.socket; ss -ltn sport = :7500',
 };
 const BATOCERA_SSH = '/run/nanoclaw/batocera';
+const KEEPALIVED_SSH = '/run/nanoclaw/keepalived';
+const KEEPALIVED_NODES: Record<string, string> = {
+  'jegor-mini-pc-a': '192.168.1.11',
+  'jegor-mini-pc-b': '192.168.1.12',
+  'jegor-mini-pc-c': '192.168.1.13',
+};
 const VOICE_HOST_URLS = [11, 12, 13, 17].map((n) => `ws://192.168.1.${n}:30901`).join(',');
 const VOICE_ENV_WRITE =
   'mkdir -p /userdata/ai/voice && umask 077 && cat > /userdata/ai/voice/host.env && chmod 600 /userdata/ai/voice/host.env';
 const OUTPUT_LIMIT = 2048;
+const KEEPALIVED_OUTPUT_LIMIT = 32 * 1024;
 const TEMPORARY_BINDING_RE = /^nanoclaw-remediation-[0-9a-f-]{36}$/;
 
 export interface KubernetesJsonClient {
@@ -671,6 +679,8 @@ export class GatewayRemediationExecutor {
       case 'tang-start':
       case 'tang-stop':
         return this.node(plan as NodePlan);
+      case 'keepalived-ops':
+        return this.keepalived(plan as KeepalivedPlan);
       case 'batocera-exec':
       case 'batocera-voice-token':
         return this.batoceraExec(plan as BatoceraExecPlan | BatoceraVoiceTokenPlan);
@@ -913,6 +923,37 @@ export class GatewayRemediationExecutor {
     return {
       applied: exitCode === 0,
       message: `${type} on ${plan.target.name} exited ${exitCode ?? 'without finishing'}${owed}:\n${output}`,
+      automaticWrites: 0,
+    };
+  }
+
+  private async keepalived(plan: KeepalivedPlan): Promise<ExecutionResult> {
+    const path = `/api/v1/nodes/${encodeURIComponent(plan.target.name)}`;
+    if (((await this.writer.request(path)) as LiveObject).metadata?.uid !== plan.target.uid)
+      throw new Error('target node changed after proposal');
+    const host = KEEPALIVED_NODES[plan.target.name];
+    if (!host) throw new Error('keepalived-ops requires one of the three server Nodes');
+    const { stdout, stderr, code } = await run(
+      'ssh',
+      [
+        '-i',
+        `${KEEPALIVED_SSH}/id_ed25519`,
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'IdentitiesOnly=yes',
+        '-o',
+        'StrictHostKeyChecking=yes',
+        '-o',
+        `UserKnownHostsFile=${KEEPALIVED_SSH}/known_hosts`,
+        `root@${host}`,
+        plan.operation.verb,
+      ],
+      { signal: AbortSignal.timeout(150_000) },
+    );
+    return {
+      applied: code === 0,
+      message: `keepalived-ops ${plan.target.name} ${plan.operation.verb} exited ${code}:\n${`${stdout}${stderr}`.slice(-KEEPALIVED_OUTPUT_LIMIT)}`,
       automaticWrites: 0,
     };
   }

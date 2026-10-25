@@ -43,6 +43,7 @@ data:
         ':(glob)src/gateway-providers/onecli*.ts' \
         docs/kubernetes-remediation/self-upgrade.yaml \
         docs/kubernetes-remediation/admission-policy.yaml \
+        docs/kubernetes-remediation/orfie-admission-applier.yaml \
         docs/kubernetes-remediation/in-cluster-runtime.review.yaml; then
         touch /w/held
       fi

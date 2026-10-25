@@ -41,6 +41,15 @@ function chartBump(version: string) {
 }
 
 describe('Kubernetes remediation policy', () => {
+  it('allows only bounded Keepalived recovery verbs on server nodes', () => {
+    const target = { ...base().target, apiVersion: 'v1', kind: 'Node', namespace: null, name: 'jegor-mini-pc-b' };
+    const plan = (verb: string) => ({ ...base(), target, operation: { type: 'keepalived-ops', verb } });
+    for (const verb of ['status', 'restart', 'release 120', 'priority 54 254', 'priority reset 54'])
+      expect(isAutoApproved(validateRemediationPlan(plan(verb), now), new Set())).toBe(true);
+    for (const verb of ['release 121', 'priority 54 255', 'priority 55 100', 'status; id'])
+      expect(() => validateRemediationPlan(plan(verb), now)).toThrow('not an allowed Keepalived operation');
+  });
+
   it('only accepts backup-controller attachment tickets', () => {
     const target = { ...base('longhorn-system').target, apiVersion: 'longhorn.io/v1beta2', kind: 'VolumeAttachment' };
     const proposed = (ticket: string) => ({

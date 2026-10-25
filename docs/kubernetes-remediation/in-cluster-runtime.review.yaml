@@ -263,6 +263,7 @@ spec:
             - { name: falco-bearer, mountPath: /run/nanoclaw/falco, readOnly: true }
             - { name: git-deploy-key, mountPath: /run/nanoclaw/git, readOnly: true }
             - { name: batocera-ssh, mountPath: /run/nanoclaw/batocera, readOnly: true }
+            - { name: keepalived-ssh, mountPath: /run/nanoclaw/keepalived, readOnly: true }
             - { name: voice-worker-token, mountPath: /run/nanoclaw/voice-worker, readOnly: true }
             - { name: gitea-runner-admin, mountPath: /run/nanoclaw/gitea-runner-admin, readOnly: true }
             - { name: hard-rules, mountPath: /run/nanoclaw/hard-rules, readOnly: true }
@@ -293,6 +294,8 @@ spec:
           secret: { secretName: orfie-git-deploy-key, defaultMode: 256 }
         - name: batocera-ssh
           secret: { secretName: orfie-batocera-ssh, defaultMode: 256 }
+        - name: keepalived-ssh
+          secret: { secretName: orfie-keepalived-ssh, defaultMode: 256 }
         - name: voice-worker-token
           secret: { secretName: voice-worker-token, defaultMode: 256, optional: true }
         - name: gitea-runner-admin

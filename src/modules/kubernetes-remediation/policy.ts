@@ -37,6 +37,8 @@ const API_VERSIONS: Record<KnownKind, string> = {
 const WORKLOAD_KINDS = ['Deployment', 'StatefulSet', 'DaemonSet'];
 const IMAGE_KINDS = [...WORKLOAD_KINDS, 'CronJob'];
 const NODE_OPS = ['node-cordon', 'node-uncordon', 'node-reboot', 'tang-start', 'tang-stop'];
+const KEEPALIVED_VERB_RE =
+  /^(?:status|restart|release (?:[1-9]|[1-9]\d|1[01]\d|120)|priority 5[1-4] (?:[1-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-4])|priority reset 5[1-4])$/;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DIGEST_IMAGE_RE =
@@ -353,6 +355,12 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     exactKeys(operation, ['type'], 'plan.operation');
     return { ...base, operation: { type: type as NodePlan['operation']['type'] } };
   }
+  if (type === 'keepalived-ops') {
+    exactKeys(operation, ['type', 'verb'], 'plan.operation');
+    const verb = string(operation.verb, 'plan.operation.verb', 32);
+    if (!KEEPALIVED_VERB_RE.test(verb)) throw new Error('plan.operation.verb is not an allowed Keepalived operation');
+    return { ...base, operation: { type, verb } };
+  }
   if (type === 'gitea-runner-delete') {
     exactKeys(operation, ['type'], 'plan.operation');
     return { ...base, operation: { type } };
@@ -384,7 +392,7 @@ export function parseRemediationPlan(value: unknown): RemediationPlan {
     return { ...base, operation: { type, dockerfile, context, image } };
   }
   throw new Error(
-    `plan.operation.type is unsupported; use patch-image, restart, scale, run-cronjob, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, remove-attachment-ticket, write-secret, pod-exec, ${NODE_OPS.join(', ')}, batocera-exec, batocera-voice-token, gitea-runner-delete, mail-account-add, manifest-edit, manifest-sync, repo-write or build-image`,
+    `plan.operation.type is unsupported; use patch-image, restart, scale, run-cronjob, delete-job, delete-storage, helm-values, helm-sync-values, helm-install, helm-uninstall, delete-snapshot, remove-attachment-ticket, write-secret, pod-exec, ${NODE_OPS.join(', ')}, keepalived-ops, batocera-exec, batocera-voice-token, gitea-runner-delete, mail-account-add, manifest-edit, manifest-sync, repo-write or build-image`,
   );
 }
 
@@ -605,6 +613,9 @@ export function validateRemediationPlan(value: unknown, now = Date.now()): Valid
     if (plan.target.kind !== 'Pod') throw new Error('pod-exec requires a Pod');
   } else if (NODE_OPS.includes(plan.operation.type)) {
     if (plan.target.kind !== 'Node') throw new Error(`${plan.operation.type} requires a Node`);
+  } else if (plan.operation.type === 'keepalived-ops') {
+    if (plan.target.kind !== 'Node' || !['jegor-mini-pc-a', 'jegor-mini-pc-b', 'jegor-mini-pc-c'].includes(name))
+      throw new Error('keepalived-ops requires one of the three server Nodes');
   } else if (plan.operation.type === 'batocera-exec' || plan.operation.type === 'batocera-voice-token') {
     if (plan.target.kind !== 'Host' || namespace !== null || !/^\w[\w.-]*$/.test(name))
       throw new Error('batocera-exec targets {apiVersion: "v1", kind: "Host", namespace: null, name: <its address>}');
@@ -737,7 +748,7 @@ export function isAutoApproved(
     target.kind === 'StatefulSet' || t1.has(target.namespace ?? '') || t1.has(`${target.namespace}/${target.name}`);
   if (
     ['restart', 'delete-job', 'pod-exec', 'build-image', 'helm-install', 'repo-write', 'write-secret', 'batocera-exec']
-      .concat(NODE_OPS, 'gitea-runner-delete', 'mail-account-add', 'batocera-voice-token')
+      .concat(NODE_OPS, 'keepalived-ops', 'gitea-runner-delete', 'mail-account-add', 'batocera-voice-token')
       .includes(operation.type)
   )
     return true;

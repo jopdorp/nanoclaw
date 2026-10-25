@@ -75,6 +75,10 @@ export interface NodePlan extends PlanBase {
   operation: { type: 'node-cordon' | 'node-uncordon' | 'node-reboot' | 'tang-start' | 'tang-stop' };
 }
 
+export interface KeepalivedPlan extends PlanBase {
+  operation: { type: 'keepalived-ops'; verb: string };
+}
+
 /** Runs `command` as root on the Batocera laptop over ssh; the target is {kind: "Host", name: its address}. */
 export interface BatoceraExecPlan extends PlanBase {
   operation: { type: 'batocera-exec'; command: string };
@@ -194,6 +198,7 @@ export type RemediationPlan =
   | RepoWritePlan
   | PodExecPlan
   | NodePlan
+  | KeepalivedPlan
   | BatoceraExecPlan
   | BatoceraVoiceTokenPlan
   | GiteaRunnerDeletePlan
