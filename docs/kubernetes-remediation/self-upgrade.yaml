@@ -52,7 +52,7 @@ data:
     git log -1 --format=%s >/w/subject
   lib.sh: |
     set -eu
-    keys='deployed_sha deployed_host_digest deployed_agent_digest previous_host_digest previous_agent_digest bad_shas held_sha held_token'
+    keys='deployed_sha deployed_host_digest deployed_agent_digest previous_host_digest previous_agent_digest bad_shas held_sha held_event held_token'
     load() { for k in $keys; do eval "$k=\$(kubectl -n orfie-ci get configmap orfie-ci-state -o jsonpath={.data.$k})"; done; }
     save() {
       set --
@@ -67,39 +67,65 @@ data:
     }
     approval_say() {
       body=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')
-      curl -fsS -X PUT -H "Authorization: Bearer $(cat /matrix/token)" -H 'Content-Type: application/json' \
+      response=$(curl -fsS -X PUT -H "Authorization: Bearer $(cat /matrix/token)" -H 'Content-Type: application/json' \
         -d "{\"msgtype\":\"m.text\",\"body\":\"$body\"}" \
-        "http://matrix-synapse.openclaw-private.svc:8008/_matrix/client/v3/rooms/%21oXcL93RCyMG-H5ntEQKinxOpYF6fe0anI-XY5kfrOLY/send/m.room.message/hold-$(date +%s)-$$" \
-        >/dev/null
-      curl -fsS -H "Authorization: Bearer $(cat /matrix/token)" \
+        "http://matrix-synapse.openclaw-private.svc:8008/_matrix/client/v3/rooms/%21oXcL93RCyMG-H5ntEQKinxOpYF6fe0anI-XY5kfrOLY/send/m.room.message/hold-$(date +%s)-$$")
+      token=$(curl -fsS -H "Authorization: Bearer $(cat /matrix/token)" \
         'http://matrix-synapse.openclaw-private.svc:8008/_matrix/client/v3/sync?timeout=0' \
-        | sed -n 's/.*"next_batch":"\([^"]*\)".*/\1/p'
+        | sed -n 's/.*"next_batch":"\([^"]*\)".*/\1/p')
+      event=$(printf '%s' "$response" | sed -n 's/^{"event_id":"\([^"]*\)"}$/\1/p')
+      printf '%s %s' "$(printf '%s' "$event" | base64 | tr -d '\n')" "$token"
     }
     approved() {
-      filter='%7B%22types%22%3A%5B%22m.room.message%22%5D%2C%22senders%22%3A%5B%22%40jopdorp%3Amatrix.org%22%5D%7D'
+      if [ -n "$held_event" ]; then
+        legacy=0
+        event=$(printf '%s' "$held_event" | base64 -d)
+      else
+        # The first hold predates held_event; this invite-only room had no other live notice.
+        legacy=1
+        filter='%7B%22types%22%3A%5B%22m.room.message%22%5D%2C%22senders%22%3A%5B%22%40orfie-ci%3Amatrix.claw.jopdorp.nl%22%5D%7D'
+        event=$(curl -fsS -H "Authorization: Bearer $(cat /matrix/token)" \
+          "http://matrix-synapse.openclaw-private.svc:8008/_matrix/client/v3/rooms/%21oXcL93RCyMG-H5ntEQKinxOpYF6fe0anI-XY5kfrOLY/messages?dir=b&from=$held_token&limit=1&filter=$filter" \
+          | grep "$(echo "$sha" | cut -c1-12)" | sed -n 's/.*"event_id":"\([^"]*\)".*/\1/p')
+      fi
+      [ -n "$event" ] || return 1
+      filter='%7B%22types%22%3A%5B%22m.room.message%22%2C%22m.reaction%22%5D%2C%22senders%22%3A%5B%22%40jopdorp%3Amatrix.org%22%5D%7D'
       curl -fsS -H "Authorization: Bearer $(cat /matrix/token)" \
         "http://matrix-synapse.openclaw-private.svc:8008/_matrix/client/v3/rooms/%21oXcL93RCyMG-H5ntEQKinxOpYF6fe0anI-XY5kfrOLY/messages?dir=f&from=$held_token&filter=$filter" \
-        | grep -Eq '"body"[[:space:]]*:[[:space:]]*"deploy '"$(echo "$sha" | cut -c1-12)"'"[[:space:]]*[,}]'
+        | sed 's/},{"type":/}\n{"type":/g' >/w/approval-events
+      while IFS= read -r line || [ -n "$line" ]; do
+        if printf '%s' "$line" | grep -Fq '"type":"m.reaction"' && { [ "$legacy" = 1 ] || printf '%s' "$line" | grep -Fq "\"event_id\":\"$event\""; }; then return 0; fi
+        body=$(printf '%s' "$line" | sed -n 's/.*"body":"\([^"]*\)".*/\1/p' | sed 's/.*\\n\\n//; s/<[^>]*>//g' | tr '[:upper:]' '[:lower:]')
+        if printf '%s' "$line" | grep -Fq '"m.in_reply_to"' && printf '%s' "$line" | grep -Fq "\"event_id\":\"$event\""; then
+          case "$(printf '%s' "$body" | sed 's/^[[:space:]*_>#-]*//')" in yes*|ok*|deploy*|ja*|👍*) return 0 ;; esac
+        fi
+        case "$body" in *deploy*)
+          for prefix in $(printf '%s' "$body" | grep -Eio '[0-9a-f]{7,40}'); do case "$sha" in "$prefix"*) return 0 ;; esac; done
+        esac
+      done </w/approval-events
+      return 1
     }
   poll.sh: |
     . /scripts/lib.sh
     sha=$(cat /w/sha) tree=$(cat /w/tree) subject=$(cat /w/subject)
     reg=gitea.claw.jopdorp.nl/cluster/nanoclaw
     load
-    [ "$sha" != "$deployed_sha" ] || exit 0
+    if [ "$sha" = "$deployed_sha" ]; then
+      [ -z "$held_sha" ] || { held_sha= held_event= held_token=; save; }
+      exit 0
+    fi
     case " $bad_shas " in *" $sha "*) exit 0 ;; esac
     if [ -f /w/held ]; then
       if [ "$held_sha" != "$sha" ]; then
         short=$(echo "$sha" | cut -c1-12)
-        token=$(approval_say "Deploy held for $subject ($sha). Jegor: reply exactly 'deploy $short' to approve.")
-        [ -n "$token" ] || exit 1
-        held_sha=$sha held_token=$token; save
+        set -- $(approval_say "Deploy held: $subject ($short). React 👍 or reply yes to approve.")
+        [ -n "$1" ] && [ -n "$2" ] || exit 1
+        held_sha=$sha held_event=$1 held_token=$2; save
         say "Deploy held for $subject ($sha); approval is in the Orfie deploy approvals room."
         exit 0
       fi
       approved || exit 0
     fi
-    held_sha= held_token=; save
     [ -z "$(kubectl get jobs -l 'orfie-ci in (build, deploy)' -o jsonpath='{.items[?(@.status.active)].metadata.name}')" ] || exit 0
     run() {
       job=orfie-ci-$1-$(echo "$sha" | cut -c1-12) template=$2
@@ -140,6 +166,7 @@ data:
     save
     if roll "$HOST_IMAGE" "$AGENT_IMAGE"; then
       deployed_sha=$GIT_COMMIT deployed_host_digest=$HOST_IMAGE deployed_agent_digest=$AGENT_IMAGE
+      held_sha= held_event= held_token=
       save
       say "Host updated to $SUBJECT."
       exit 0
