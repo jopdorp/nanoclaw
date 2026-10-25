@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { stageOnecliFile } from './onecli-files.js';
+import { combinedCaBundle, stageOnecliFile } from './onecli-files.js';
 
 let dir: string;
 beforeEach(() => {
@@ -18,6 +18,12 @@ afterEach(() => {
 });
 
 describe('persistent OneCLI files', () => {
+  it('adds the internal service trust anchor to the combined bundle', () => {
+    const bundle = combinedCaBundle('ONECLI CA');
+    expect(bundle).toContain('ONECLI CA');
+    expect(bundle).toContain('MIIB4TCCAWegAwIBAgIUO0RNqLPoCYu6RM4FsxsbfHtnXMU');
+  });
+
   it('publishes only a complete file when several processes stage the same content', async () => {
     const moduleUrl = new URL('./onecli-files.ts', import.meta.url).href;
     const script = `import {stageOnecliFile} from ${JSON.stringify(moduleUrl)}; console.log(stageOnecliFile(process.argv[1], 'ca', 'CA'.repeat(50000)));`;
