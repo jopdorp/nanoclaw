@@ -42,13 +42,15 @@ interface Prepared {
 
 const DAY = 24 * 60 * 60_000;
 // Plans being applied right now; a host shutdown waits for them instead of killing helm or a rollout midway.
-const running = new Set<Promise<unknown>>();
+const running = new Map<Promise<unknown>, string>();
 let draining = false;
 
 export async function drainRemediation(): Promise<void> {
   draining = true;
-  await Promise.allSettled([...running]);
+  await Promise.allSettled([...running.keys()]);
 }
+
+export const applyingFor = (sessionId: string) => [...running.values()].includes(sessionId);
 
 /** The change itself, without the per-submission identity, expiry and binding. */
 function changeKey({ plan }: ValidatedPlan): string {
@@ -180,12 +182,12 @@ function renderQuestion(validated: ValidatedPlan, diff: string[] = []): string {
   ].join('\n');
 }
 
-export async function notifyApprover(userId: string, text: string): Promise<void> {
+export async function notifyApprover(userId: string, text: string): Promise<boolean> {
   const adapter = getDeliveryAdapter();
   const target = adapter && (await pickApprovalDelivery([userId], ''));
   if (!adapter || !target) {
     log.error('Auto-approved remediation notice has no Matrix delivery', { userId });
-    return;
+    return false;
   }
   const { channel_type, platform_id, instance } = target.messagingGroup;
   try {
@@ -198,9 +200,11 @@ export async function notifyApprover(userId: string, text: string): Promise<void
       undefined,
       instance ?? undefined,
     );
+    return true;
     // eslint-disable-next-line no-catch-all/no-catch-all -- a throw here would make delivery replay an applied plan
   } catch (error) {
     log.error('Auto-approved remediation notice failed', { userId, error });
+    return false;
   }
 }
 
@@ -331,7 +335,7 @@ export function registerKubernetesRemediationApproval(options: {
           planId: validated.plan.id,
           planDigest: validated.digest,
         });
-        running.add(execution);
+        running.set(execution, session.id);
         const result = await execution.finally(() => running.delete(execution));
         message = [
           prepared.unchanged && result.applied ? 'record updated, nothing changed' : '',

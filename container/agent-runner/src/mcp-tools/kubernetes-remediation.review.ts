@@ -239,6 +239,11 @@ registerTools([
       raw: { type: 'boolean' },
     },
   ),
+  persona(
+    'restart_self',
+    'End your own container so the next one starts with your current instructions; refused while a plan of yours is being applied. Your memory files carry over, and the new session is told it restarted.',
+    {},
+  ),
   persona('list_personas', "Names of Jegor's local personas and who made each.", {}),
   persona('summon_persona', "Bring Jegor back into a local persona's room (he gets an invite).", {
     name: { type: 'string' },
