@@ -5,6 +5,22 @@ import path from 'node:path';
 // Keep the SDK's system trust order and its proxy-only fallback.
 const SYSTEM_CA_PATHS = ['/etc/ssl/cert.pem', '/etc/ssl/certs/ca-certificates.crt', '/etc/pki/tls/certs/ca-bundle.crt'];
 
+// Public trust anchor for services below *.internal.jegor.nl. Its private key
+// is offline and never enters NanoClaw or the cluster.
+const JEGOR_HOME_ROOT_CA = `-----BEGIN CERTIFICATE-----
+MIIB4TCCAWegAwIBAgIUO0RNqLPoCYu6RM4FsxsbfHtnXMUwCgYIKoZIzj0EAwMw
+MDEbMBkGA1UEAwwSSmVnb3IgSG9tZSBSb290IENBMREwDwYDVQQKDAhqZWdvci5u
+bDAeFw0yNjEwMjQyMjI2MjhaFw00NjEwMjQyMjI2MjhaMDAxGzAZBgNVBAMMEkpl
+Z29yIEhvbWUgUm9vdCBDQTERMA8GA1UECgwIamVnb3IubmwwdjAQBgcqhkjOPQIB
+BgUrgQQAIgNiAASvQllOd6/FLqti42nowziOHeoCFJAqOtoAekFhzz9Fkxttltz+
+4X47TlrizfsJbmh0WzljjbL67mkhhBViLAkpcqzdrxVwhHZ1ZOn9G8W8GWLGwboG
+Pe6tVvV595ienzWjQjBAMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEG
+MB0GA1UdDgQWBBQ+aJ7fAOvlh6UIF2Zy67TByHzFpDAKBggqhkjOPQQDAwNoADBl
+AjBd9aZXxTTXvkRopHchzjXxY7kYO3PrwdGQ2iwswC80MZZ0nbPyK4Mz/k1c43As
+DdACMQC004SGenWYHYPg8kxOrZeArsLLvKsI5n1P3/p+k5cHVGiCC3NkKuIp2xEW
+KABcjn0=
+-----END CERTIFICATE-----`;
+
 export function combinedCaBundle(certificate: string): string | undefined {
   for (const file of SYSTEM_CA_PATHS) {
     let system: string;
@@ -16,7 +32,7 @@ export function combinedCaBundle(certificate: string): string | undefined {
       if (!(error instanceof Error && 'code' in error)) throw error;
       continue;
     }
-    return `${system.trimEnd()}\n${certificate.trimEnd()}\n`;
+    return `${system.trimEnd()}\n${certificate.trimEnd()}\n${JEGOR_HOME_ROOT_CA}\n`;
   }
 }
 
