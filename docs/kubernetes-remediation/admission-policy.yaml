@@ -787,6 +787,8 @@ spec:
          !request.userInfo.username.startsWith('system:serviceaccount:kube-system:'))
     - name: not-the-approval-controller
       expression: request.userInfo.username != 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediation-approver'
+    - name: not-the-namespace-binder
+      expression: request.userInfo.username != 'system:serviceaccount:security:namespace-binder'
   variables:
     - name: key
       expression: "'remediation.nanoclaw.io/approval-id'"
