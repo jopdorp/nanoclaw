@@ -72,7 +72,7 @@ export interface HelmReleaseOptions {
   helm: (args: string[]) => Promise<string>;
   git: (args: string[]) => Promise<string>;
   remote: string;
-  notify: (message: string) => Promise<void>;
+  notify: (message: string) => Promise<unknown>;
 }
 
 interface Workload {

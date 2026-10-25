@@ -15,6 +15,7 @@ import { registerDeliveryAction } from '../../delivery.js';
 import { unguarded } from '../../guard/index.js';
 import { onOneCliAgentEnsured } from '../../gateway-providers/onecli.js';
 import { resolveGroupFolderPath } from '../../group-folder.js';
+import { readGroupPersona } from '../../group-persona.js';
 import { requestWake } from '../../request-wake.js';
 import { destroySessionMailbox, resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
 import { registerWebhookHandler } from '../../webhook-server.js';
@@ -24,7 +25,7 @@ import { deleteSession, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { getDestinations } from '../agent-to-agent/db/agent-destinations.js';
 import { trustCreateAgent } from '../agent-to-agent/guard.js';
 import { notifyAgent } from '../approvals/index.js';
-import { notifyApprover, registerKubernetesRemediationApproval } from './approval.js';
+import { applyingFor, notifyApprover, registerKubernetesRemediationApproval } from './approval.js';
 import {
   cleanupRemediationOrphans,
   GatewayRemediationExecutor,
@@ -183,9 +184,30 @@ export async function startKubernetesRemediation(
     },
     unguarded('stops only a team agent’s container; it respawns on its next message'),
   );
+  registerDeliveryAction(
+    'restart_self',
+    async (_content, session) => {
+      if (session.agent_group_id !== config.agentGroupId) return;
+      if (applyingFor(session.id))
+        return notifyAgent(
+          session,
+          'restart_self refused: a plan of this session is being applied; ask again after its outcome',
+        );
+      killContainer(
+        session.id,
+        'restarted by Orfie',
+        () => void notifyAgent(session, 'You restarted; this is a fresh session.'),
+      );
+    },
+    unguarded('ends only Orfie’s own container; it respawns on the message that says so'),
+  );
   onOneCliAgentEnsured(async (groupId) => {
     if (groupId === GUARD_AGENT_GROUP_ID) return scopeHelperSecrets(groupId, true);
-    if (groupId === config.agentGroupId || !(await team(groupId))) return;
+    if (groupId === config.agentGroupId && group)
+      return reportStandingRules(resolveGroupFolderPath(group.folder), config.matrixApproverUserId).catch(
+        (err: unknown) => log.warn('Reporting a standing-rule change failed', { err }),
+      );
+    if (!(await team(groupId))) return;
     await scopeHelperSecrets(groupId);
     await shareMemory(config.agentGroupId, groupId);
   });
@@ -409,6 +431,24 @@ async function enqueue(agentGroupId: string, sender: string, text: string, threa
   const fresh = await import('../../db/sessions.js').then(({ getSession }) => getSession(session.id));
   if (fresh) await requestWake(fresh, 'inbound-message');
   return session.id;
+}
+
+/** Orfie edits its own standing rules, so the host shows Jegor each change it is about to compose. */
+async function reportStandingRules(groupDir: string, approverUserId: string): Promise<void> {
+  const snapshot = path.join(DATA_DIR, 'kubernetes-remediation-standing-rules.md');
+  fs.writeFileSync(`${snapshot}.next`, `${readGroupPersona(groupDir) ?? ''}\n`);
+  if (fs.existsSync(snapshot)) {
+    const diff = await exec('diff', ['-u', '--label', 'before', '--label', 'after', snapshot, `${snapshot}.next`]).then(
+      () => '',
+      (error: { code?: number; stdout?: string }) => {
+        if (error.code !== 1) throw error;
+        return error.stdout ?? '';
+      },
+    );
+    // Kept unsent, the change is diffed again on the next spawn.
+    if (diff && !(await notifyApprover(approverUserId, `Orfie changed its standing rules:\n${diff}`))) return;
+  }
+  fs.renameSync(`${snapshot}.next`, snapshot);
 }
 
 /** A guard session lives for one incident, so no payload can colour another verdict. */

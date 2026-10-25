@@ -59,6 +59,16 @@ spec:
     requests:
       storage: 20Gi
 ---
+# Orfie's hard rules, ahead of the standing rules it edits itself; only an admin can change this.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orfie-hard-rules
+  namespace: nanoclaw-remediator
+data:
+  hard-rules.md: |
+    PLACEHOLDER: the hard rules are drafted separately.
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -206,6 +216,7 @@ spec:
             - { name: batocera-ssh, mountPath: /run/nanoclaw/batocera, readOnly: true }
             - { name: voice-worker-token, mountPath: /run/nanoclaw/voice-worker, readOnly: true }
             - { name: gitea-runner-admin, mountPath: /run/nanoclaw/gitea-runner-admin, readOnly: true }
+            - { name: hard-rules, mountPath: /run/nanoclaw/hard-rules, readOnly: true }
             # Channel adapters read creds from /opt/nanoclaw/.env, not process env.
             - { name: dotenv, mountPath: /opt/nanoclaw/.env, subPath: .env, readOnly: true }
           resources:
@@ -237,6 +248,8 @@ spec:
           secret: { secretName: voice-worker-token, defaultMode: 256, optional: true }
         - name: gitea-runner-admin
           secret: { secretName: gitea-runner-admin, defaultMode: 256 }
+        - name: hard-rules
+          configMap: { name: orfie-hard-rules, items: [{ key: hard-rules.md, path: kubernetes-remediator/hard-rules.md }] }
 ---
 apiVersion: v1
 kind: Service

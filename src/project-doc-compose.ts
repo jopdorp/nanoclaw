@@ -150,6 +150,9 @@ const COMPOSED_HEADER =
 
 const BASE_DOC_SECTION = 'NanoClaw Runtime Contract';
 
+// A read-only mount the agent cannot reach, so these rules hold even though the agent edits its persona.
+const HARD_RULES_DIR = '/run/nanoclaw/hard-rules';
+
 // Instruction docs that only teach `ncl`, and so are dead weight when the agent
 // has none: host dispatch rejects every cli_request at cli_scope=disabled, and
 // scheduling teaches `ncl tasks`.
@@ -186,7 +189,10 @@ export async function composeGroupProjectDoc(
     if (trimmed) sections.push({ name, body: trimmed, droppable });
   };
 
-  // The group's standing instructions lead the document, and are never
+  const hardRules = path.join(HARD_RULES_DIR, group.folder, 'hard-rules.md');
+  if (fs.existsSync(hardRules)) push('Hard Rules', fs.readFileSync(hardRules, 'utf-8'));
+
+  // The group's standing instructions come next, and are never
   // droppable: a group whose persona is evicted stops being that group.
   const persona = readGroupPersona(groupDir);
   if (persona) push('Persona', persona);
