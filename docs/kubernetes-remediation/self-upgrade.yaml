@@ -25,14 +25,35 @@ data:
     set -eu
     git init -q /w/src && cd /w/src
     git config credential.helper '!f() { printf "username=%s\npassword=%s\n" "$(cat /git/GIT_USERNAME)" "$(cat /git/GIT_PASSWORD)"; }; f'
-    git fetch -q --depth 1 http://gitea-http.gitea.svc:3000/cluster/orfie.git "${GIT_COMMIT:-main}"
-    git checkout -q FETCH_HEAD
+    repo=http://gitea-http.gitea.svc:3000/cluster/orfie.git
+    if [ -n "${GIT_COMMIT:-}" ]; then
+      git fetch -q --depth 1 "$repo" "$GIT_COMMIT"
+      git checkout -q FETCH_HEAD
+    else
+      git fetch -q --depth 100 "$repo" main:main deploy-approved:deploy-approved
+      git checkout -q main
+      git fetch -q --depth 1 "$repo" "$DEPLOYED_SHA"
+      if ! git diff --quiet FETCH_HEAD..main -- \
+        src/project-doc-compose.ts \
+        src/modules/kubernetes-remediation/approval.ts \
+        src/modules/kubernetes-remediation/policy.ts \
+        src/modules/kubernetes-remediation/standing.ts \
+        src/modules/kubernetes-remediation/incident-guard.ts \
+        src/modules/kubernetes-remediation/log-reader.ts \
+        ':(glob)src/gateway-providers/onecli*.ts' \
+        docs/kubernetes-remediation/self-upgrade.yaml \
+        docs/kubernetes-remediation/admission-policy.yaml \
+        docs/kubernetes-remediation/in-cluster-runtime.review.yaml \
+        && ! git merge-base --is-ancestor main deploy-approved; then
+        touch /w/held
+      fi
+    fi
     git rev-parse HEAD >/w/sha
     git rev-parse 'HEAD^{tree}' >/w/tree
     git log -1 --format=%s >/w/subject
   lib.sh: |
     set -eu
-    keys='deployed_sha deployed_host_digest deployed_agent_digest previous_host_digest previous_agent_digest bad_shas'
+    keys='deployed_sha deployed_host_digest deployed_agent_digest previous_host_digest previous_agent_digest bad_shas held_sha'
     load() { for k in $keys; do eval "$k=\$(kubectl -n orfie-ci get configmap orfie-ci-state -o jsonpath={.data.$k})"; done; }
     save() {
       set --
@@ -52,6 +73,11 @@ data:
     load
     [ "$sha" != "$deployed_sha" ] || exit 0
     case " $bad_shas " in *" $sha "*) exit 0 ;; esac
+    if [ -f /w/held ]; then
+      [ "$held_sha" = "$sha" ] || say "Deploy held for $subject ($sha); merge it into deploy-approved to approve."
+      held_sha=$sha; save; exit 0
+    fi
+    held_sha=; save
     [ -z "$(kubectl get jobs -l 'orfie-ci in (build, deploy)' -o jsonpath='{.items[?(@.status.active)].metadata.name}')" ] || exit 0
     run() {
       job=orfie-ci-$1-$(echo "$sha" | cut -c1-12) template=$2
@@ -238,6 +264,9 @@ spec:
             - name: fetch
               image: alpine/git:v2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
               command: [sh, /scripts/fetch.sh]
+              env:
+                - name: DEPLOYED_SHA
+                  valueFrom: { configMapKeyRef: { name: orfie-ci-state, key: deployed_sha } }
               securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
               resources: { requests: { cpu: 10m, memory: 32Mi }, limits: { cpu: 500m, memory: 256Mi } }
               volumeMounts:
