@@ -517,7 +517,7 @@ spec:
   policyName: nanoclaw-remediator-job-guard
   validationActions: [Deny, Audit]
 ---
-# The writer cordons and uncordons nodes and changes nothing else on them.
+# Host write identities cannot change Node objects.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -531,13 +531,19 @@ spec:
         operations: [UPDATE]
         resources: [nodes]
   matchConditions:
-    - name: remediator-service-account
-      expression: request.userInfo.username == 'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator'
+    - name: host-identity
+      expression: >-
+        request.userInfo.username in [
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator',
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-helm',
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-breakglass',
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-orchestrator',
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediation-approver',
+          'system:serviceaccount:orfie-ci:orfie-ci-poll',
+          'system:serviceaccount:orfie-ci:orfie-ci-deploy']
   validations:
-    - expression: >-
-        object.metadata.?labels == oldObject.metadata.?labels && object.metadata.?annotations == oldObject.metadata.?annotations &&
-        object.spec.?taints == oldObject.spec.?taints && object.spec.?providerID == oldObject.spec.?providerID
-      message: only spec.unschedulable may change
+    - expression: 'false'
+      message: host write identities may not change Node objects
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -608,6 +614,183 @@ metadata:
   name: nanoclaw-never-guard
 spec:
   policyName: nanoclaw-never-guard
+  validationActions: [Deny, Audit]
+
+---
+# Host writes cannot expose Orfie's disks through a hand-made PV or Longhorn clone.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-state-volume-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [persistentvolumes]
+        scope: Cluster
+      - apiGroups: [longhorn.io]
+        apiVersions: ['*']
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [volumes, engines, replicas, snapshots, backups]
+        scope: Namespaced
+  matchConditions:
+    - name: host-identity
+      expression: >-
+        request.userInfo.username in [
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator',
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-helm',
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-breakglass',
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-orchestrator',
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediation-approver',
+          'system:serviceaccount:orfie-ci:orfie-ci-poll',
+          'system:serviceaccount:orfie-ci:orfie-ci-deploy']
+  variables:
+    - name: obj
+      expression: "request.operation == 'DELETE' ? dyn(oldObject) : dyn(object)"
+    - name: protectedVolumes
+      expression: >-
+        ['pvc-163ea022-08c1-4d4a-ba46-e31c4cec9f77',
+         'pvc-359ccae8-b271-4617-bf68-a4b7eb652216',
+         'pvc-37632908-afeb-46df-9c32-9dc4c71381c8',
+         'pvc-8cb3693b-694a-43a0-b36f-cf83d85f916f',
+         'pvc-c1e056d0-7b86-436a-9d7a-fb1fc7b2fb53']
+  validations:
+    - expression: request.resource.resource != 'persistentvolumes'
+      message: host identities do not create or bind PersistentVolumes
+    - expression: >-
+        request.resource.group != 'longhorn.io' ||
+        !(variables.obj.metadata.name in variables.protectedVolumes) &&
+        !(has(variables.obj.metadata.labels) && variables.obj.metadata.labels.exists(k, v, v in variables.protectedVolumes)) &&
+        !(has(variables.obj.spec.volumeName) && variables.obj.spec.volumeName in variables.protectedVolumes) &&
+        !(has(variables.obj.spec.volume) && variables.obj.spec.volume in variables.protectedVolumes) &&
+        !(request.resource.resource == 'volumes' &&
+          ((has(variables.obj.spec.dataSource) && variables.obj.spec.dataSource != '') ||
+           (has(variables.obj.spec.fromBackup) && variables.obj.spec.fromBackup != '')))
+      message: host identities cannot clone, attach or change Orfie's Longhorn volumes
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-state-volume-guard
+spec:
+  policyName: nanoclaw-state-volume-guard
+  validationActions: [Deny, Audit]
+
+---
+# Host-created workloads get host access only for the fixed operational allowlist.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-host-access-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+        scope: Namespaced
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [deployments, statefulsets, daemonsets]
+        scope: Namespaced
+      - apiGroups: [batch]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [jobs, cronjobs]
+        scope: Namespaced
+  matchConditions:
+    - name: host-identity
+      expression: >-
+        request.userInfo.username in [
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediator',
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-helm',
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-breakglass',
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-orchestrator',
+          'system:serviceaccount:nanoclaw-remediator:nanoclaw-remediation-approver',
+          'system:serviceaccount:orfie-ci:orfie-ci-poll',
+          'system:serviceaccount:orfie-ci:orfie-ci-deploy']
+  variables:
+    - name: pod
+      expression: >-
+        request.resource.resource == 'pods' ? dyn(object).spec :
+        request.resource.resource == 'cronjobs' ? dyn(object).spec.jobTemplate.spec.template.spec :
+        dyn(object).spec.template.spec
+    - name: hostAccess
+      expression: >-
+        variables.pod.?hostPID.orValue(false) || variables.pod.?hostNetwork.orValue(false) ||
+        variables.pod.?hostIPC.orValue(false) ||
+        (has(variables.pod.volumes) && variables.pod.volumes.exists(v, has(v.hostPath))) ||
+        variables.pod.containers.exists(c, has(c.securityContext) && c.securityContext.?privileged.orValue(false)) ||
+        (has(variables.pod.initContainers) && variables.pod.initContainers.exists(c, has(c.securityContext) && c.securityContext.?privileged.orValue(false)))
+    - name: name
+      expression: object.metadata.name
+    - name: allowed
+      expression: >-
+        request.resource.resource != 'pods' && (
+          (request.namespace == 'falco' && variables.name == 'falco') ||
+          (request.namespace == 'crowdsec' && variables.name == 'crowdsec-agent') ||
+          (request.namespace == 'logging' && variables.name == 'fluent-bit') ||
+          (request.namespace == 'node-exporter' && variables.name.endsWith('node-exporter')) ||
+          (request.namespace == 'trivy-operator' && variables.name == 'trivy-host-scanner') ||
+          request.namespace == 'longhorn-system' ||
+          (request.namespace == 'kube-system' && (variables.name.startsWith('csi-smb-') || variables.name == 'traefik')) ||
+          (request.namespace == 'system-upgrade' && variables.name == 'system-upgrade-controller') ||
+          (request.namespace == 'wireguard-home' && variables.name == 'wireguard') ||
+          (request.namespace == 'backups' && variables.name.startsWith('k3s-etcd-backup')) ||
+          (request.namespace == 'security' && variables.name == 'node-inspector'))
+  validations:
+    - expression: '!variables.hostAccess || variables.allowed'
+      message: privileged and host-access workloads are limited to the fixed operational allowlist
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-host-access-guard
+spec:
+  policyName: nanoclaw-host-access-guard
+  validationActions: [Deny, Audit]
+
+---
+# Traefik stays configurable, but its values cannot add a host-escape sidecar or mount.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nanoclaw-traefik-values-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [helm.cattle.io]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [helmchartconfigs]
+        scope: Namespaced
+  matchConditions:
+    - name: traefik
+      expression: request.namespace == 'kube-system' && request.name == 'traefik'
+  variables:
+    - name: values
+      expression: "has(object.spec.valuesContent) ? object.spec.valuesContent : ''"
+  validations:
+    - expression: >-
+        !variables.values.matches('(?m)(^|\\n)[ ]*(additionalVolumes|additionalContainers|securityContext|hostPath):') &&
+        !variables.values.matches('(?m)(^|\\n)[ ]*privileged:[ ]*true[ ]*($|\\n)')
+      message: Traefik values may not add containers, host volumes or privileged security context
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nanoclaw-traefik-values-guard
+spec:
+  policyName: nanoclaw-traefik-values-guard
   validationActions: [Deny, Audit]
 
 ---
