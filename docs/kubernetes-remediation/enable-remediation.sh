@@ -182,9 +182,10 @@ for kind in rolebinding role; do
     | while read -r ns name; do kubectl delete "$kind" -n "$ns" "$name" >/dev/null; done
 done
 kubectl delete clusterrolebinding nanoclaw-remediator-reader-cluster-read nanoclaw-remediator-reader-trivy-read \
+  nanoclaw-remediator-lane-a \
   --ignore-not-found >/dev/null
 kubectl delete clusterrole nanoclaw-breakglass-lane-c nanoclaw-remediator-reader-logs --ignore-not-found >/dev/null
-printf '%s\n' 'namespace-binder binds the reader, exec and helm rights in every namespace'
+printf '%s\n' 'namespace-binder binds the reader, writer, exec and helm rights in every workload namespace'
 kubectl get secret -n "$NAMESPACE" registry-prophet -o json \
   | jq '{apiVersion, kind, type, data, metadata: {name: .metadata.name, namespace: "security"}}' \
   | kubectl apply -f - >/dev/null

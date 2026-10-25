@@ -78,10 +78,8 @@ rules:
     resources: [persistentvolumes]
     verbs: [delete]
 ---
-# Lane A writes in every namespace. RBAC cannot exclude namespaces, so
-# admission-policy.yaml keeps this identity out of Lane C, behind the approval
-# annotation in the always-ask namespaces, and from deleting anything in backups.
-# PVC and PV deletion come only from the temporary approved bindings.
+# namespace-binder gives this role in every workload namespace except Orfie's own and Lane C.
+# Admission still holds always-ask writes and backup deletion; PVC/PV deletion uses temporary bindings.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -102,9 +100,6 @@ rules:
   - apiGroups: ['']
     resources: [pods, persistentvolumeclaims]
     verbs: [get, list]
-  - apiGroups: ['']
-    resources: [nodes]
-    verbs: [get, patch]
   # The pod-exec runner Job runs kubectl in-cluster under this account.
   - apiGroups: ['']
     resources: [pods/exec]
@@ -146,10 +141,19 @@ items:
     metadata: { name: nanoclaw-remediator-jobs, namespace: security }
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nanoclaw-remediator-node-write
+rules:
+  - apiGroups: ['']
+    resources: [nodes]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: nanoclaw-remediator-lane-a
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-remediator-lane-a }
+  name: nanoclaw-remediator-node-write
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nanoclaw-remediator-node-write }
 subjects:
   - { kind: ServiceAccount, name: nanoclaw-remediator, namespace: nanoclaw-remediator }
 ---

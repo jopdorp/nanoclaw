@@ -611,7 +611,7 @@ spec:
   validationActions: [Deny, Audit]
 
 ---
-# Orfie's own namespaces change only through its CI or by hand; the writer still runs the pinned pod-exec Jobs there.
+# Orfie's own namespaces change only through its CI or by hand; its writer only cleans up CI Jobs there.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -721,12 +721,12 @@ spec:
         request.userInfo.username == 'system:serviceaccount:security:namespace-binder' &&
         request.resource.resource == 'rolebindings' && request.operation in ['CREATE', 'UPDATE'] &&
         has(request.namespace) && !(request.namespace in ['nanoclaw-remediator', 'orfie-ci']) &&
-        variables.obj.metadata.name in ['nanoclaw-remediator-reader-secrets', 'nanoclaw-remediator-reader-inspect', 'nanoclaw-helm'] &&
+        variables.obj.metadata.name in ['nanoclaw-remediator-reader-secrets', 'nanoclaw-remediator-reader-inspect', 'nanoclaw-remediator-lane-a', 'nanoclaw-helm'] &&
         variables.obj.roleRef.apiGroup == 'rbac.authorization.k8s.io' && variables.obj.roleRef.kind == 'ClusterRole' &&
         variables.obj.roleRef.name == (variables.obj.metadata.name == 'nanoclaw-helm' ? 'nanoclaw-namespace-admin' : variables.obj.metadata.name) &&
         variables.obj.subjects.size() == 1 && variables.obj.subjects[0].kind == 'ServiceAccount' &&
         variables.obj.subjects[0].namespace == 'nanoclaw-remediator' &&
-        variables.obj.subjects[0].name == (variables.obj.metadata.name == 'nanoclaw-helm' ? 'nanoclaw-helm' : 'nanoclaw-remediator-reader')
+        variables.obj.subjects[0].name == (variables.obj.metadata.name == 'nanoclaw-helm' ? 'nanoclaw-helm' : variables.obj.metadata.name == 'nanoclaw-remediator-lane-a' ? 'nanoclaw-remediator' : 'nanoclaw-remediator-reader')
   validations:
     # The approval controller's per-plan storage-delete binding, pinned by nanoclaw-remediation-approver-binding.
     - expression: >-
