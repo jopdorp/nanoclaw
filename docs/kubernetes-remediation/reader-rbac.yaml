@@ -3,9 +3,9 @@
 # - ClusterRole nanoclaw-remediator-reader-wide: get/list/watch on every listable
 #   resource but Secrets, plus pod logs, bound cluster-wide below;
 # - a nanoclaw-remediator-reader-secrets RoleBinding in every namespace except
-#   vaultwarden, nanoclaw-remediator and orfie-ci, whose tokens would read vaultwarden's or upgrade Orfie;
+#   vaultwarden, matrix-home, nanoclaw-remediator and orfie-ci, whose tokens would expose protected identities or upgrade Orfie;
 # - a nanoclaw-remediator-reader-inspect RoleBinding in every namespace except
-#   wireguard-home, kube-system and longhorn-system, where changes need approval and
+#   wireguard-home, kube-system, longhorn-system and matrix-home, where changes need approval or protected identities run, and
 #   exec runs as a pod-exec plan, nanoclaw-remediator and orfie-ci.
 apiVersion: v1
 kind: ServiceAccount

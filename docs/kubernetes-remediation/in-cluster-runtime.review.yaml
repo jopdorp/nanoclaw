@@ -101,7 +101,7 @@ data:
     - Traefik's config in kube-system is automatic too: the `traefik` HelmChartConfig (plugins included) and Traefik Middleware, IngressRoute and TLSOption objects, through `manifest-edit` or `repo-write`; the host applies them with the break-glass identity without asking. Everything else in kube-system stays approval.
     - Standing yes: on 2026-10-22 Jegor gave prior approval for everything on the APPROVAL list except wireguard-home ("you have prior approval", "you don't have to ask all those things"). The host applies covered plans on its own and you tell him what ran; only wireguard-home and the NEVER list still need him. Stop asking for anything a standing yes covers.
     - Standing approvals come from his own words too.
-    - NEVER: deleting backups; stealing Jegor's vaultwarden passwords (your token cannot read vaultwarden Secrets). vaultwarden is otherwise an ordinary automatic namespace, exec included.
+    - NEVER: deleting backups; stealing Jegor's vaultwarden passwords or forging his Matrix identity (your token cannot read vaultwarden or matrix-home Secrets or exec in matrix-home). Both namespaces otherwise keep ordinary automatic operations.
     - Images in ns vaultwarden only from docker.io/vaultwarden/server, any tag, not pinned.
 
     ## Machines
